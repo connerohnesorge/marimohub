@@ -50,7 +50,7 @@ export function startNotebookBridge(options: NotebookBridgeOptions): BridgeHandl
 	const initialTitle = win.document.title;
 	let changedTitle: string | undefined;
 	let syncTitle = false;
-	let inFlight = false;
+	let inFlight: { query?: boolean; title?: boolean } = {};
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let readyTimer: ReturnType<typeof setTimeout> | undefined;
 	const updateStatus = (next: BridgeStatus) => {
@@ -72,7 +72,7 @@ export function startNotebookBridge(options: NotebookBridgeOptions): BridgeHandl
 	};
 	const handshake = createHandshakeRetry(ready, () => updateStatus('unavailable'));
 	const schedule = () => {
-		if (status !== 'connected' || navigating || inFlight || timer !== undefined) return;
+		if (status !== 'connected' || navigating || timer !== undefined) return;
 		timer = setTimeout(() => {
 			timer = undefined;
 			flush();
@@ -80,48 +80,47 @@ export function startNotebookBridge(options: NotebookBridgeOptions): BridgeHandl
 	};
 	const flush = () => {
 		const current = channel;
-		if (status !== 'connected' || !current || navigating || inFlight) return;
+		if (status !== 'connected' || !current || navigating) return;
 		const params = notebookQueryParams(win.location.search, excludedKeys);
 		const search = params.toString();
 		const title = syncTitle ? changedTitle : undefined;
-		const requests: Promise<void>[] = [];
 		const track = (key: keyof typeof lastSent, value: string, request: Promise<QueryResult>) => {
-			requests.push(
-				request.then(({ applied }) => {
+			inFlight[key] = true;
+			void request
+				.then(({ applied }) => {
 					if (channel === current && applied) lastSent[key] = value;
-				}),
-			);
+				})
+				.catch(() => {
+					if (channel !== current || status === 'disposed') return;
+					if (key === 'title') {
+						syncTitle = false;
+					} else {
+						stopLinks?.();
+						stopLinks = undefined;
+						current.dispose();
+						channel = undefined;
+						updateStatus('unavailable');
+					}
+				})
+				.finally(() => {
+					if (channel === current) {
+						inFlight[key] = false;
+						schedule();
+					}
+				});
 		};
-		if (search !== lastSent.query) {
+		if (!inFlight.query && search !== lastSent.query) {
 			const parsed = QuerySnapshot.safeParse({ revision: ++revision, entries: [...params] });
 			if (parsed.success) {
 				track('query', search, current.rpc.replaceQuery(parsed.data));
 			}
 		}
-		if (title !== undefined && title !== lastSent.title) {
+		if (!inFlight.title && title !== undefined && title !== lastSent.title) {
 			const parsed = TitleSnapshot.safeParse({ revision: ++revision, title });
 			if (parsed.success) {
 				track('title', title, current.rpc.replaceTitle(parsed.data));
 			}
 		}
-		if (requests.length === 0) return;
-		inFlight = true;
-		void Promise.all(requests)
-			.catch(() => {
-				if (channel === current && status !== 'disposed') {
-					stopLinks?.();
-					stopLinks = undefined;
-					current.dispose();
-					channel = undefined;
-					updateStatus('unavailable');
-				}
-			})
-			.finally(() => {
-				if (channel === current) {
-					inFlight = false;
-					schedule();
-				}
-			});
 	};
 	const onMessage = (event: MessageEvent) => {
 		if (status === 'disposed' || event.source !== win.parent || event.origin !== parentOrigin)
@@ -170,7 +169,7 @@ export function startNotebookBridge(options: NotebookBridgeOptions): BridgeHandl
 		excludedKeys = parsed.data.excludedKeys;
 		lastSent = {};
 		syncTitle = parsed.data.capabilities.includes(TITLE_CAPABILITY);
-		inFlight = false;
+		inFlight = {};
 		updateStatus('connecting');
 		channel = createChannelRpc<HostApi, NotebookApi>(
 			event.ports[0],
