@@ -107,6 +107,9 @@ function StakeholderApp({
 					Back to apps
 				</Link>
 				<h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title}</h1>
+				<Link to={`/projects/${pid}/notebooks/${nid}/previews`} className="text-sm">
+					Previews
+				</Link>
 				<ShareUrlMenu label="Share app" successMessage="App URL copied" />
 			</header>
 			{!canRun ? (

@@ -51,6 +51,7 @@ import { AppPoolStore } from './AppPoolStore';
 import { pullSourceRootPath, sandboxWorkspaceLayout } from './workspaceLayout';
 
 export interface CreateSessionInput {
+	idle_timeout_ms?: number;
 	notebook_id: NotebookId;
 	project_id: ProjectId;
 	user_id: UserId;
@@ -187,6 +188,7 @@ export class SessionService {
 		const now = new Date().toISOString();
 
 		const session: Session = {
+			...(input.idle_timeout_ms ? { idle_timeout_ms: input.idle_timeout_ms } : {}),
 			session_id: sessionId,
 			notebook_id: input.notebook_id,
 			project_id: input.project_id,

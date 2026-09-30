@@ -1,3 +1,4 @@
+import { NotebookPreviewService } from './content/NotebookPreviewService';
 import type { Bucket } from '../ports/bucket';
 import { noopMetrics } from '../ports/metrics';
 import type { Metrics } from '../ports/metrics';
@@ -594,6 +595,7 @@ export function createServices(
 		projects,
 		notebooks,
 		proposals,
+		previews: new NotebookPreviewService(bucket, notebooks),
 		sessions,
 		runtimeInspection,
 		jobs,
@@ -678,3 +680,6 @@ export {
 	WARM_POOL_MAX_IDLE_MS,
 } from './runtime/WarmPoolService';
 export type { WarmPoolConfig, WarmPoolClaim, WarmPoolProfile } from './runtime/WarmPoolService';
+
+export { NotebookPreviewService } from './content/NotebookPreviewService';
+export * from './content/notebookPreviews';

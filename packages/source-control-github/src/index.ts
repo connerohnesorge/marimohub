@@ -4,6 +4,7 @@ import type {
 	OpenChangeRequestInput,
 	OpenChangeRequestResult,
 	SourceBranchHead,
+	SourcePullRequest,
 	SourceControlPublisher,
 	SourceControlPublishStage,
 	SourceControlReader,
@@ -15,7 +16,7 @@ import type { GitHubAppPublisherOptions, GitHubAppPublisherRuntime } from './git
 import { GitHubPullRequests } from './githubPullRequests';
 import type { PullRequestCandidate } from './githubPullRequests';
 import { GitHubRepositoryWriter } from './githubRepository';
-import { nestedString, responseJson } from './githubResponses';
+import { nestedString, responseJson, stringField, isRecord } from './githubResponses';
 import {
 	parseRepository,
 	refPath,
@@ -36,6 +37,7 @@ interface GitHubPublicationContext {
 
 export class GitHubAppPublisher implements SourceControlPublisher, SourceControlReader {
 	readonly provider = 'github' as const;
+	readonly previews = true;
 	private readonly client: GitHubClient;
 	private readonly fetcher: NonNullable<GitHubAppPublisherRuntime['fetcher']>;
 
@@ -96,6 +98,84 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 			throw new ValidationError(`GitHub branch not found: ${branch}`);
 		}
 		return { commit: nestedString(await responseJson(response), 'commit', 'sha') };
+	}
+
+	async resolveCommit(repository: string, commit: string): Promise<SourceBranchHead> {
+		validateCommit(commit);
+		const { base, token } = await this.readContext(repository);
+		const response = await this.client.request(
+			`${base}/commits/${encodeURIComponent(commit)}`,
+			token,
+			{},
+			[404, 422],
+		);
+		if (!response.ok) throw new ValidationError('Commit not found in the configured repository');
+		return { commit: stringField(await responseJson(response), 'sha') };
+	}
+
+	async listBranches(repository: string, query: string) {
+		const { base, token } = await this.readContext(repository);
+		const data = await responseJson(
+			await this.client.request(`${base}/branches?per_page=100`, token),
+		);
+		if (!Array.isArray(data)) throw new UnavailableError('Invalid GitHub branch response');
+		return data
+			.map((item) => ({
+				value: stringField(item, 'name'),
+				label: stringField(item, 'name'),
+				commit: nestedString(item, 'commit', 'sha'),
+			}))
+			.filter((item) => item.value.toLowerCase().includes(query.toLowerCase()))
+			.slice(0, 30);
+	}
+
+	async listCommits(repository: string, query: string) {
+		if (/^[a-f0-9]{40}$/i.test(query)) {
+			const { commit } = await this.resolveCommit(repository, query);
+			return [{ value: commit, commit, label: commit.slice(0, 12) }];
+		}
+		const { base, token } = await this.readContext(repository);
+		const data = await responseJson(
+			await this.client.request(`${base}/commits?per_page=100`, token),
+		);
+		if (!Array.isArray(data)) throw new UnavailableError('Invalid GitHub commit response');
+		return data
+			.map((item) => {
+				const commit = stringField(item, 'sha');
+				return {
+					value: commit,
+					commit,
+					label: `${commit.slice(0, 12)} ${nestedString(item, 'commit', 'message').split('\n')[0]}`,
+				};
+			})
+			.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()))
+			.slice(0, 30);
+	}
+
+	async getPullRequest(repository: string, number: number): Promise<SourcePullRequest> {
+		const { owner, repo } = parseRepository(repository);
+		const token = await this.client.installationToken(owner, repo, 'preview');
+		const data = await responseJson(
+			await this.client.request(
+				`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`,
+				token,
+			),
+		);
+		if (!isRecord(data) || !isRecord(data.head))
+			throw new UnavailableError('Invalid GitHub pull request response');
+		const state = stringField(data, 'state');
+		if (state !== 'open' && state !== 'closed')
+			throw new UnavailableError('Invalid GitHub pull request state');
+		const head = data.head;
+		return {
+			number,
+			state,
+			branch: stringField(head, 'ref'),
+			commit: stringField(head, 'sha'),
+			sameRepository:
+				isRecord(head.repo) &&
+				stringField(head.repo, 'full_name').toLowerCase() === `${owner}/${repo}`.toLowerCase(),
+		};
 	}
 
 	async fetchWorkspace(

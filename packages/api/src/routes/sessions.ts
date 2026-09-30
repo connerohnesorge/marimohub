@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { all } from 'better-all';
 import type {
+	Millis,
 	SecondarySurfaceId,
 	WarmPoolClaim,
 	ResourceSecurityLabels,
@@ -21,6 +22,7 @@ import type {
 } from '@marimo-hub/core';
 import {
 	AppPoolService,
+	PREVIEW_IDLE_MS,
 	AppVisitSchema,
 	sleep,
 	BadRequestError,
@@ -70,6 +72,7 @@ import {
 	SurfaceForbiddenError,
 	workspaceSourcePolicy,
 } from '@marimo-hub/core';
+import { previewAppPoolPolicy, previewIdleTimeout, PREVIEW_MAX_SESSIONS } from '../previewPolicy';
 import { checkComputeProfile } from '../computeProfile';
 import { logObserver } from '../saga';
 import { appendAudit, errorMetadata, logEvent } from '../log';
@@ -1190,6 +1193,7 @@ export async function startNotebookSession(input: {
 	pid: ProjectId;
 	nid: NotebookId;
 	body: SessionCreateBody | undefined;
+	preview?: { id: string; notebook_id: NotebookId };
 	request: {
 		requestId?: string;
 		method: string;
@@ -1236,6 +1240,13 @@ export async function startNotebookSession(input: {
 	// claim that deleteNotebook just cleaned up, permanently (its cleanup never
 	// runs again).
 	const notebook = await notebooks.getNotebook(pid, nid);
+	if (
+		notebook.meta.preview &&
+		(input.preview?.id !== notebook.meta.preview.preview_id ||
+			input.preview?.notebook_id !== notebook.meta.preview.notebook_id)
+	)
+		throw new NotFoundError('Notebook not found');
+	const isPreview = !!notebook.meta.preview;
 	if (notebook.meta.status === 'deleted') {
 		throw new NotFoundError(`Notebook ${nid} not found`);
 	}
@@ -1254,12 +1265,21 @@ export async function startNotebookSession(input: {
 	// The session deadline is the earliest of the entitlement credential expiry
 	// and the subject security context expiry that satisfied any labels — an
 	// active session must not outlive either.
+	const previewRecord = isPreview
+		? await deps.services.previews.get(
+				pid,
+				notebook.meta.preview!.notebook_id,
+				notebook.meta.preview!.preview_id,
+			)
+		: undefined;
 	const authorizationExpiresAt = earliestDeadline(
 		entitlementAuthorizationDeadline(user),
-		authorization.subjectContextExpiresAt,
+		earliestDeadline(authorization.subjectContextExpiresAt, previewRecord?.expires_at),
 	);
 	const existingEditorClaim = mode === 'edit' ? await sessions.getEditorClaim(pid, nid) : undefined;
-	const sharing = effectiveEditorSharing(existingEditorClaim, deps.policy.editorSandboxSharing);
+	const sharing = isPreview
+		? 'exclusive'
+		: effectiveEditorSharing(existingEditorClaim, deps.policy.editorSandboxSharing);
 	const replacingAfterTakeover =
 		existingEditorClaim?.transfer?.phase === 'ready' &&
 		existingEditorClaim.transfer.requested_by === user.id;
@@ -1273,7 +1293,7 @@ export async function startNotebookSession(input: {
 	if (editorTemporary && sharing === 'shared') {
 		throw new BadRequestError('Temporary editor sessions are only available in exclusive mode');
 	}
-	const ephemeral = authorization.ephemeral || editorTemporary;
+	const ephemeral = authorization.ephemeral || editorTemporary || (isPreview && mode === 'edit');
 	const surfaceGrant = (
 		await sessionGrantsFor(
 			project,
@@ -1299,7 +1319,10 @@ export async function startNotebookSession(input: {
 		surfaceConfig(deps, id);
 	}
 	const userHome =
-		mode === 'edit' && sharing === 'exclusive' && roleAtLeast(authorization.role, 'editor')
+		!isPreview &&
+		mode === 'edit' &&
+		sharing === 'exclusive' &&
+		roleAtLeast(authorization.role, 'editor')
 			? deps.sandbox.userHome?.resolve(user)
 			: undefined;
 	const profileOverrideEligible = authorization.profileOverrideEligible;
@@ -1374,7 +1397,8 @@ export async function startNotebookSession(input: {
 		logStoredConfigFallback('base_image'),
 	);
 	const retryWithDefault = mode === 'edit' && body?.compute_profile === 'default';
-	let selectedComputeProfile = notebook.meta.compute_profile;
+	let selectedComputeProfile =
+		notebook.meta.compute_profile ?? (isPreview ? sandbox.previewComputeProfile : undefined);
 	if (body?.compute_profile !== undefined && body.compute_profile !== 'default') {
 		if (mode !== 'edit' || !profileOverrideEligible) {
 			throw new ForbiddenError('Compute profile selection requires a persistent edit session');
@@ -1384,7 +1408,7 @@ export async function startNotebookSession(input: {
 	const requestedComputeProfile = resolveComputeProfile(
 		sandbox,
 		retryWithDefault ? undefined : selectedComputeProfile,
-		sandbox.computeProfileOverride === 'editors' && profileOverrideEligible,
+		isPreview || (sandbox.computeProfileOverride === 'editors' && profileOverrideEligible),
 		() => logStoredConfigFallback('compute_profile'),
 	);
 	const provisioner = new SandboxProvisioner(compute);
@@ -1399,7 +1423,12 @@ export async function startNotebookSession(input: {
 			`Editing is currently owned by ${editorReuse.ownedByOther.user_id}`,
 		);
 	}
-	const appPool = new AppPoolService(deps.bucket, sessions, deps.policy.appPool, deps.metrics);
+	const appPool = new AppPoolService(
+		deps.bucket,
+		sessions,
+		isPreview ? previewAppPoolPolicy(deps.policy.appPool) : deps.policy.appPool,
+		deps.metrics,
+	);
 	if (mode === 'app' && !sourceVersionId)
 		throw new ConflictError('The app has no committed version');
 
@@ -1619,6 +1648,7 @@ export async function startNotebookSession(input: {
 						compute_resources: appliedComputeProfile.resources,
 						compute_from_snapshot: restoreFilesystemSnapshot !== undefined,
 						ephemeral,
+						idle_timeout_ms: isPreview ? PREVIEW_IDLE_MS : undefined,
 						mode,
 						source_version_id: sourceVersionId,
 						editor_sandbox_sharing: mode === 'edit' ? sharing : undefined,
@@ -1649,6 +1679,24 @@ export async function startNotebookSession(input: {
 					temporaryToRetire?.session_id,
 				),
 			)
+			.step('preview_cap', async () => {
+				if (!previewRecord) return;
+				const record = await deps.services.previews.get(
+					pid,
+					previewRecord.notebook_id,
+					previewRecord.id,
+				);
+				if (record.state !== 'active' || !record.runtime_ids.includes(nid))
+					throw new NotFoundError('Preview not found');
+				const queue = (await sessions.listActiveByProject(pid))
+					.filter((item) => record.runtime_ids.includes(item.notebook_id))
+					.sort(
+						(a, b) =>
+							a.started_at.localeCompare(b.started_at) || a.session_id.localeCompare(b.session_id),
+					);
+				if (queue.findIndex((item) => item.session_id === sessionId) >= PREVIEW_MAX_SESSIONS)
+					throw new ResourceExhaustedError('Preview session limit reached');
+			})
 			.step('editor_claim', {
 				do: async () => {
 					if (mode !== 'edit' || ephemeral) return;
@@ -1849,7 +1897,11 @@ export async function startNotebookSession(input: {
 								image,
 								resources: requestedComputeProfile.resources,
 								userHome,
-								sessionIdleTimeoutMs: sandbox.sessionLifetime?.idleTimeoutMsByMode[mode],
+								sessionIdleTimeoutMs: isPreview
+									? (previewIdleTimeout(
+											sandbox.sessionLifetime?.idleTimeoutMsByMode[mode],
+										) as Millis)
+									: sandbox.sessionLifetime?.idleTimeoutMsByMode[mode],
 								sessionEnv: this.$.sessionEnv,
 								entryNotebook: workspacePolicy.entryNotebook,
 								launchStrategy: launchStrategy.strategy,

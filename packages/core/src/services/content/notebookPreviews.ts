@@ -1,0 +1,62 @@
+import { z } from 'zod';
+import { NotebookIdSchema, ProjectIdSchema, UserIdSchema, VersionIdSchema } from '../../schema';
+import type { NotebookId, ProjectId } from '../../ids';
+
+export const PreviewIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
+export const PreviewSourceSchema = z.discriminatedUnion('type', [
+	z.strictObject({ type: z.literal('branch'), branch: z.string().min(1).max(250) }),
+	z.strictObject({ type: z.literal('commit'), commit: z.string().regex(/^[a-f0-9]{40}$/i) }),
+]);
+export const PreviewCreateSchema = z.strictObject({
+	name: z.string().trim().min(1).max(100),
+	source: PreviewSourceSchema,
+	compute_profile: z.string().min(1).optional(),
+	expires_at: z.iso.datetime().optional(),
+	pull_request: z.number().int().positive().optional(),
+});
+export const PreviewRecordSchema = z.object({
+	schema_version: z.literal(1),
+	id: PreviewIdSchema,
+	project_id: ProjectIdSchema,
+	notebook_id: NotebookIdSchema,
+	name: z.string(),
+	source: PreviewSourceSchema,
+	repository: z.string(),
+	root_path: z.string(),
+	entry_notebook: z.string(),
+	compute_profile: z.string().optional(),
+	expires_at: z.iso.datetime(),
+	pull_request: z.number().int().positive().optional(),
+	created_by: UserIdSchema,
+	created_at: z.iso.datetime(),
+	request_fingerprint: z.string(),
+	state: z.enum(['active', 'deleting', 'deleted']),
+	preparation: z.enum(['pending', 'preparing', 'ready', 'failed']),
+	checked_at: z.iso.datetime().optional(),
+	error: z.string().optional(),
+	lease: z.object({ token: z.string(), expires_at: z.number() }).optional(),
+	current: z
+		.object({ notebook_id: NotebookIdSchema, version_id: VersionIdSchema, commit: z.string() })
+		.optional(),
+	runtime_ids: z.array(NotebookIdSchema),
+	garbage_ids: z.array(NotebookIdSchema).default([]),
+	cleanup_after: z.number().optional(),
+});
+export const PreviewMaintenanceSchema = PreviewRecordSchema.pick({
+	project_id: true,
+	notebook_id: true,
+	id: true,
+	created_at: true,
+});
+export type NotebookPreview = z.infer<typeof PreviewRecordSchema>;
+export type PreviewCreate = z.infer<typeof PreviewCreateSchema>;
+export const previewPrefix = (pid: ProjectId, nid: NotebookId) => `_system/previews/${pid}/${nid}/`;
+export const previewKey = (pid: ProjectId, nid: NotebookId, id: string) =>
+	`${previewPrefix(pid, nid)}${id}.json`;
+export const PREVIEW_POLL_MS = 60_000;
+export const PREVIEW_IDLE_MS = 5 * 60_000;
+export const PREVIEW_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
+
+export const previewMaintenanceKey = (
+	record: Pick<NotebookPreview, 'project_id' | 'notebook_id' | 'id'>,
+) => `_system/preview-maintenance/${record.project_id}/${record.notebook_id}/${record.id}.json`;

@@ -1,3 +1,4 @@
+import previewsApp from './routes/previews';
 import type { MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { etag } from 'hono/etag';
@@ -530,6 +531,7 @@ export function createApi(rawDeps: ApiDeps) {
 	app.route(API_PREFIX, notebooksApp);
 	app.route(API_PREFIX, thumbnailsApp);
 	app.route(API_PREFIX, deepLinksApp);
+	app.route(API_PREFIX, previewsApp);
 	app.route(API_PREFIX, appsApp);
 	app.route(API_PREFIX, changeRequestsApp);
 	app.route(API_PREFIX, sessionsApp);

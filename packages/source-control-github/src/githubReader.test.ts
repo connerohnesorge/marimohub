@@ -48,14 +48,18 @@ function tarball(files: Record<string, string>, extra: Uint8Array[] = []): Uint8
 	return body;
 }
 
-function reader(routes: (url: URL, init?: RequestInit) => Response | null) {
+function reader(
+	routes: (url: URL, init?: RequestInit) => Response | null,
+	access: 'read' | 'preview' = 'read',
+) {
 	const fetcher = async (input: string, init?: RequestInit) => {
 		const url = new URL(input);
 		if (url.pathname === '/repos/owner/repo/installation') return response({ id: 42 });
 		if (url.pathname === '/app/installations/42/access_tokens') {
 			expect(JSON.parse(String(init?.body))).toEqual({
 				repositories: ['repo'],
-				permissions: { contents: 'read' },
+				permissions:
+					access === 'preview' ? { contents: 'read', pull_requests: 'read' } : { contents: 'read' },
 			});
 			return response({ token: 'installation-token' });
 		}
@@ -67,6 +71,35 @@ function reader(routes: (url: URL, init?: RequestInit) => Response | null) {
 }
 
 describe('GitHubAppPublisher reader', () => {
+	it('bounds branch completion and resolves only explicit full commit SHAs', async () => {
+		const sha = 'a'.repeat(40);
+		const github = reader((url) => {
+			if (url.pathname === '/repos/owner/repo/branches') {
+				expect(url.searchParams.get('per_page')).toBe('100');
+				return response(
+					Array.from({ length: 100 }, (_, i) => ({ name: `feature/${i}`, commit: { sha } })),
+				);
+			}
+			if (url.pathname === `/repos/owner/repo/commits/${sha}`) return response({ sha });
+			return null;
+		});
+		expect(await github.listBranches('owner/repo', 'feature/')).toHaveLength(30);
+		expect(await github.resolveCommit('owner/repo', sha)).toEqual({ commit: sha });
+		await expect(github.resolveCommit('owner/repo', 'main')).rejects.toThrow();
+	});
+
+	it('matches recent commit subjects and returns canonical SHA values', async () => {
+		const sha = 'a'.repeat(40);
+		const github = reader((url) =>
+			url.pathname === '/repos/owner/repo/commits'
+				? response([{ sha, commit: { message: 'Chart prototype\nLong description' } }])
+				: null,
+		);
+		expect(await github.listCommits('owner/repo', 'chart')).toEqual([
+			{ value: sha, commit: sha, label: `${sha.slice(0, 12)} Chart prototype` },
+		]);
+	});
+
 	it('resolves a branch head', async () => {
 		const github = reader((url) =>
 			url.pathname === '/repos/owner/repo/branches/main'
@@ -325,5 +358,102 @@ describe('collectTarballWorkspace', () => {
 		await expect(
 			collectTarballWorkspace(new Response(Uint8Array.from(GZIP_HEADER)), ''),
 		).rejects.toThrow(/missing end-of-archive marker/);
+	});
+});
+
+describe('GitHub preview source failures', () => {
+	it.each([404, 422])(
+		'rejects an unavailable pinned commit (%i) without exposing provider messages',
+		async (status) => {
+			const github = reader((url) =>
+				url.pathname.includes('/commits/')
+					? response({ message: 'provider-secret-must-not-leak' }, status)
+					: null,
+			);
+			await expect(github.resolveCommit('owner/repo', 'a'.repeat(40))).rejects.toThrow(
+				new ValidationError('Commit not found in the configured repository'),
+			);
+		},
+	);
+
+	it.each([403, 429, 503])(
+		'surfaces discovery HTTP %i instead of treating failure as an empty result',
+		async (status) => {
+			const github = reader((url) =>
+				url.pathname.endsWith('/branches')
+					? response({ message: 'provider-secret-must-not-leak' }, status)
+					: null,
+			);
+			const result = github.listBranches('owner/repo', '');
+			await expect(result).rejects.toThrow(UnavailableError);
+			await expect(result).rejects.toMatchObject({
+				message: `GitHub request failed with status ${status}`,
+			});
+		},
+	);
+
+	it.each([
+		{ name: 'non-array branches', type: 'branch', payload: {} },
+		{ name: 'branch missing name', type: 'branch', payload: [{ commit: { sha: 'a'.repeat(40) } }] },
+		{ name: 'branch missing SHA', type: 'branch', payload: [{ name: 'main', commit: {} }] },
+		{ name: 'non-array commits', type: 'commit', payload: null },
+		{ name: 'commit missing SHA', type: 'commit', payload: [{ commit: { message: 'Message' } }] },
+		{
+			name: 'commit missing subject',
+			type: 'commit',
+			payload: [{ sha: 'a'.repeat(40), commit: {} }],
+		},
+	])('rejects malformed suggestions: $name', async ({ type, payload }) => {
+		const github = reader((url) =>
+			/\/(branches|commits)$/.test(url.pathname) ? response(payload) : null,
+		);
+		await expect(
+			type === 'branch'
+				? github.listBranches('owner/repo', '')
+				: github.listCommits('owner/repo', ''),
+		).rejects.toThrow(UnavailableError);
+	});
+
+	it.each([
+		{ name: 'deleted head repository', repo: null, sameRepository: false },
+		{ name: 'fork repository', repo: { full_name: 'contributor/fork' }, sameRepository: false },
+		{
+			name: 'repository with different casing',
+			repo: { full_name: 'OWNER/Repo' },
+			sameRepository: true,
+		},
+	])(
+		'classifies a PR with a $name using read-only permissions',
+		async ({ repo, sameRepository }) => {
+			const github = reader(
+				(url) =>
+					url.pathname.endsWith('/pulls/42')
+						? response({ state: 'open', head: { ref: 'feature/chart', sha: 'a'.repeat(40), repo } })
+						: null,
+				'preview',
+			);
+			await expect(github.getPullRequest('owner/repo', 42)).resolves.toEqual({
+				number: 42,
+				state: 'open',
+				branch: 'feature/chart',
+				commit: 'a'.repeat(40),
+				sameRepository,
+			});
+		},
+	);
+
+	it.each([
+		{ state: 'open', head: null },
+		{
+			state: 'merged',
+			head: { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: 'owner/repo' } },
+		},
+		{ state: 'open', head: { ref: 'main', repo: { full_name: 'owner/repo' } } },
+	])('rejects malformed PR metadata: %j', async (payload) => {
+		const github = reader(
+			(url) => (url.pathname.endsWith('/pulls/42') ? response(payload) : null),
+			'preview',
+		);
+		await expect(github.getPullRequest('owner/repo', 42)).rejects.toThrow(UnavailableError);
 	});
 });

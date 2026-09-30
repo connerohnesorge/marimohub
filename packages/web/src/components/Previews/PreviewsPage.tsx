@@ -1,0 +1,226 @@
+import { useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { RadioButton, RadioField, RadioGroup, Label } from 'react-aria-components';
+import { toast } from 'sonner';
+import { useAppQuery } from '@/api/apps';
+import { useCapabilitiesQuery, useNotebookQuery } from '@/api/hooks';
+import { useCreatePreview, useDeletePreview, usePreviewsQuery } from '@/api/previews';
+import type { NotebookPreview } from '@/api/previews';
+import { Button, DialogModal } from '@/components/ui';
+import { SourceRefInput } from './SourceRefInput';
+
+export function PreviewBadge({ preview }: { preview: NotebookPreview }) {
+	return (
+		<span className="rounded border px-2 py-0.5 text-xs">
+			{preview.source_type === 'branch' ? 'Following branch' : 'Pinned commit'}
+		</span>
+	);
+}
+export function PreviewsPage() {
+	const { pid = '', nid = '' } = useParams();
+	const query = usePreviewsQuery(pid, nid);
+	const parent = useAppQuery(pid, nid);
+	const canManage = parent.data?.your_role === 'manager' || parent.data?.your_role === 'admin';
+	const [creating, setCreating] = useState(false);
+	const remove = useDeletePreview(pid, nid);
+	return (
+		<main className="mx-auto max-w-4xl space-y-6 p-6">
+			<Link to={`/projects/${pid}/notebooks/${nid}/app`} className="text-sm text-muted-foreground">
+				Back to notebook
+			</Link>
+			<div className="flex items-center justify-between">
+				<h1 className="text-xl font-semibold">Previews</h1>
+				{canManage && <Button onPress={() => setCreating(true)}>Create preview</Button>}
+			</div>
+			<p className="text-sm text-muted-foreground">
+				Share published previews with this notebook’s audience. Temporary editor changes are
+				discarded.
+			</p>
+			{query.isError && <p role="alert">{query.error.message}</p>}
+			{remove.isError && <p role="alert">{remove.error.message}</p>}
+			{query.isPending && <output>Loading previews…</output>}
+			{query.data?.length === 0 && <p>No previews yet.</p>}
+			{query.data?.map((preview) => (
+				<article key={preview.id} className="space-y-3 rounded-lg border p-4">
+					<div className="flex flex-wrap items-center gap-3">
+						<h2 className="font-medium">{preview.name}</h2>
+						<PreviewBadge preview={preview} />
+						<span className="text-xs">
+							{preview.state !== 'active' ? 'Deleting' : preview.preparation}
+						</span>
+					</div>
+					<p className="text-sm text-muted-foreground">
+						{preview.source?.type === 'branch' ? `${preview.source.branch} · ` : ''}
+						{preview.commit?.slice(0, 12) ?? 'Awaiting first revision'} · Expires{' '}
+						{new Date(preview.expires_at).toLocaleString()}
+					</p>
+					{preview.error && (
+						<p role="alert" className="text-sm">
+							{preview.error} {preview.commit && 'The last prepared revision remains available.'}
+						</p>
+					)}
+					<div className="flex flex-wrap gap-2">
+						{preview.state === 'active' && (
+							<Link
+								className="rounded border px-3 py-2 text-sm"
+								to={`/projects/${pid}/notebooks/${nid}/previews/${preview.id}`}
+							>
+								Open preview
+							</Link>
+						)}
+						<Button
+							variant="default"
+							onPress={() => {
+								void navigator.clipboard
+									.writeText(preview.url)
+									.then(() => toast.success('Preview link copied'))
+									.catch(() => toast.error('Unable to copy the link'));
+							}}
+						>
+							Copy link
+						</Button>
+						{preview.can.manage && (
+							<Button
+								variant="default"
+								isDisabled={remove.isPending}
+								onPress={() => remove.mutate(preview.id)}
+							>
+								Delete
+							</Button>
+						)}
+					</div>
+				</article>
+			))}
+			{creating && (
+				<DialogModal isOpen onClose={() => setCreating(false)} title="Create preview">
+					<CreatePreviewForm pid={pid} nid={nid} onCreated={() => setCreating(false)} />
+				</DialogModal>
+			)}
+		</main>
+	);
+}
+
+export function CreatePreviewForm({
+	pid,
+	nid,
+	onCreated,
+}: {
+	pid: string;
+	nid: string;
+	onCreated: () => void;
+}) {
+	const [type, setType] = useState<'branch' | 'commit'>('branch');
+	const [value, setValue] = useState('');
+	const [name, setName] = useState('');
+	const [profile, setProfile] = useState('');
+	const [requestKey, setRequestKey] = useState(() => crypto.randomUUID());
+	const capabilities = useCapabilitiesQuery();
+	const notebook = useNotebookQuery(pid, nid);
+	const create = useCreatePreview(pid, nid);
+	const valid =
+		name.trim() && value.trim() && (type === 'branch' || /^[a-f0-9]{40}$/i.test(value.trim()));
+	const change = (next: string) => {
+		setValue(next);
+		setRequestKey(crypto.randomUUID());
+	};
+	return (
+		<form
+			className="space-y-4"
+			onSubmit={(event) => {
+				event.preventDefault();
+				if (!valid) return;
+				create.mutate(
+					{
+						name: name.trim(),
+						source:
+							type === 'branch' ? { type, branch: value.trim() } : { type, commit: value.trim() },
+						...(profile ? { compute_profile: profile } : {}),
+						requestKey,
+					},
+					{ onSuccess: onCreated },
+				);
+			}}
+		>
+			<label className="block space-y-1 text-sm">
+				Name
+				<input
+					aria-label="Name"
+					required
+					className="block w-full rounded border bg-background p-2"
+					value={name}
+					onChange={(event) => {
+						setName(event.target.value);
+						setRequestKey(crypto.randomUUID());
+					}}
+					maxLength={100}
+				/>
+			</label>
+			{notebook.data?.source.type === 'git' && (
+				<p className="text-sm text-muted-foreground">Repository: {notebook.data.source.repo}</p>
+			)}
+			<RadioGroup
+				value={type}
+				onChange={(next) => {
+					setType(next as 'branch' | 'commit');
+					change('');
+				}}
+				className="space-y-2"
+			>
+				<Label className="text-sm font-medium">Source</Label>
+				<RadioField value="branch">
+					<RadioButton className="block cursor-pointer rounded border p-2 text-sm data-[selected]:border-primary data-[focus-visible]:outline-2 data-[focus-visible]:outline-ring">
+						Follow a branch
+					</RadioButton>
+				</RadioField>
+				<RadioField value="commit">
+					<RadioButton className="block cursor-pointer rounded border p-2 text-sm data-[selected]:border-primary data-[focus-visible]:outline-2 data-[focus-visible]:outline-ring">
+						Pin to a commit
+					</RadioButton>
+				</RadioField>
+			</RadioGroup>
+			<SourceRefInput key={type} pid={pid} nid={nid} type={type} value={value} onChange={change} />
+			<p className="text-sm text-muted-foreground">
+				{type === 'branch'
+					? 'Automatically updates when new commits are pushed to this branch.'
+					: 'Always runs this commit. New pushes will not update this preview. Enter the full 40-character SHA.'}
+			</p>
+			{capabilities.data?.compute_profile_override === 'editors' && (
+				<label className="block space-y-1 text-sm">
+					Compute profile
+					<select
+						className="block w-full rounded border bg-background p-2"
+						value={profile}
+						onChange={(event) => {
+							setProfile(event.target.value);
+							setRequestKey(crypto.randomUUID());
+						}}
+					>
+						<option value="">Preview default</option>
+						{capabilities.data.compute_profiles.map((item) => (
+							<option key={item.name} value={item.name}>
+								{item.name}
+							</option>
+						))}
+					</select>
+				</label>
+			)}
+			<p className="text-sm">Uses this notebook’s integrations and secrets.</p>
+			<p className="text-sm text-muted-foreground">
+				Inherits notebook access. Expires after 7 days.
+			</p>
+			{value && (
+				<p className="text-sm font-medium">
+					{type === 'branch' ? `Follows ${value} automatically` : `Pinned to ${value.slice(0, 12)}`}
+				</p>
+			)}
+			{create.isError && (
+				<p role="alert" className="text-sm">
+					{create.error.message}
+				</p>
+			)}
+			<Button type="submit" isDisabled={!valid || create.isPending}>
+				{create.isPending ? 'Preparing preview…' : 'Create preview'}
+			</Button>
+		</form>
+	);
+}

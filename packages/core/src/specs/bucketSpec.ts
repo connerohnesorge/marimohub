@@ -1,3 +1,9 @@
+import {
+	PreviewRecordSchema,
+	PreviewMaintenanceSchema,
+	previewKey,
+	previewMaintenanceKey,
+} from '../services/content/notebookPreviews';
 import { WarmPoolRecordSchema } from '../services/runtime/WarmPoolStore';
 import { AppPoolSchema } from '../services/runtime/AppPoolRouter';
 import { ThumbnailRecordSchema } from '../services/content/ThumbnailService';
@@ -102,6 +108,24 @@ const orgIntegration = paths.orgIntegration(IID);
 const integrationVersionTemplate = (key: string) => key.replace('000000', '{n}');
 
 const OBJECTS: BucketObject[] = [
+	{
+		name: 'NotebookPreview',
+		key: previewKey(PID, NID, '{preview_id}'),
+		schema: PreviewRecordSchema,
+		summary: 'Published preview revision, ownership, and terminal cleanup fence.',
+		mutability: 'cas',
+		owner: 'NotebookPreviewService',
+		tag: 'notebook',
+	},
+	{
+		name: 'NotebookPreviewMaintenance',
+		key: previewMaintenanceKey({ project_id: PID, notebook_id: NID, id: '{preview_id}' }),
+		schema: PreviewMaintenanceSchema,
+		summary: 'Preview reconciliation work index, removed after confirmed cleanup and grace.',
+		mutability: 'last-writer-wins',
+		owner: 'NotebookPreviewService',
+		tag: 'notebook',
+	},
 	{
 		name: 'Thumbnail',
 		key: notebook.thumbnail,

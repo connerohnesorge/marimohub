@@ -17,6 +17,7 @@ export interface ComboBoxOption {
 }
 
 export interface ComboBoxProps<T extends ComboBoxOption> {
+	retainSelection?: boolean;
 	label?: string;
 	'aria-label'?: string;
 	placeholder?: string;
@@ -43,6 +44,7 @@ export interface ComboBoxProps<T extends ComboBoxOption> {
  * a command palette rather than a form select.
  */
 export function ComboBox<T extends ComboBoxOption>({
+	retainSelection = false,
 	label,
 	'aria-label': ariaLabel,
 	placeholder,
@@ -61,7 +63,9 @@ export function ComboBox<T extends ComboBoxOption>({
 			aria-label={ariaLabel}
 			inputValue={inputValue}
 			onInputChange={onInputChange}
-			value={null}
+			value={
+				retainSelection ? (options.find((option) => option.id === inputValue)?.id ?? null) : null
+			}
 			onChange={(key) => {
 				if (typeof key === 'string') onSelect(key);
 			}}

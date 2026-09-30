@@ -147,6 +147,10 @@ These CAS-managed records also have one writer each:
   `_system/apps/{pid}/{nid}.json`.
 - `SessionService` owns each monotonic version-prune cutoff at
   `_system/version-prune-cutoffs/{pid}/{nid}.json`.
+- `NotebookPreviewService` owns each preview CAS record at
+  `_system/previews/{pid}/{nid}/{preview-id}.json`, its maintenance marker, and
+  hidden immutable runtime notebooks. Retain deletion tombstones. Runtime notebooks
+  never enter the catalog and inherit live parent authorization.
 - `NotebookProposalService` owns each proposal publication at
   `projects/{pid}/notebooks/{nid}/proposals/{proposal-id}/publication.json`.
 - `ProjectIntegrationsStore` owns each project integration head at

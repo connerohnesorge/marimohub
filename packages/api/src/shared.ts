@@ -218,12 +218,15 @@ export async function loadAuthorizedNotebook(
 	action: ProjectAction,
 ): Promise<NotebookDetail> {
 	const detail = await deps.services.notebooks.getNotebook(project.id, nid);
+	if (detail.meta.preview) throw new NotFoundError('Notebook not found');
 	if (detail.meta.status === 'deleted') {
 		throw new NotFoundError(`Notebook ${nid} not found`);
 	}
 	if (detail.meta.security_labels !== undefined) {
 		const actions: ProjectAction[] =
-			action === 'project.read' || action === 'app.read' ? [action] : ['project.read', action];
+			action === 'project.read' || action === 'app.read' || action === 'preview.manage'
+				? [action]
+				: ['project.read', action];
 		for (const requestedAction of actions) {
 			const decision = await authorizationService(deps).authorize(subject, requestedAction, {
 				kind: 'project',

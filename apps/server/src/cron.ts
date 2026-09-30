@@ -1,5 +1,10 @@
 import os from 'node:os';
-import { resolveJobSandboxEnv, scheduleProjectAlert, sweepAppPools } from '@marimo-hub/api';
+import {
+	resolveJobSandboxEnv,
+	scheduleProjectAlert,
+	sweepAppPools,
+	sweepPreviews,
+} from '@marimo-hub/api';
 import type { ApiDeps, JobsConfig } from '@marimo-hub/api';
 import {
 	MaintenanceLock,
@@ -139,6 +144,7 @@ export function startMaintenance(deps: ApiDeps, metrics: WideEventMetrics): () =
 			try {
 				await sweepAppPools(deps);
 				const sessionsExpired = await sessions.expireStale();
+				await sweepPreviews(deps);
 				const reconcile = await reconciler.reconcile();
 				await scheduleUnavailableAppAlerts(deps, reconcile.markedDeadSessions);
 				if (!reconcile.skipped && reconcile.orphanSandboxIds.length > 0) {

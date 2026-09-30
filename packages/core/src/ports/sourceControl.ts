@@ -172,6 +172,20 @@ export function assertGitDirectoryLimits(files: readonly SourceWorkspaceFile[]):
 	for (const file of files) limits.add(file.path, file.bytes.byteLength);
 }
 
+export interface SourceRefSuggestion {
+	value: string;
+	commit: string;
+	label: string;
+}
+
+export interface SourcePullRequest {
+	number: number;
+	state: 'open' | 'closed';
+	branch: string;
+	commit: string;
+	sameRepository: boolean;
+}
+
 /** The read side of a provider: resolve branch heads and fetch workspace trees. */
 export interface SourceControlReader {
 	/** Same id namespace as `SourceControlPublisher` (`github`, `gitlab`, …). */
@@ -183,6 +197,12 @@ export interface SourceControlReader {
 	 * same `github` id. Unsupported repositories stay push-only.
 	 */
 	supportsRepository(repository: string): boolean;
+	/** GitHub App readers expose this capability; other Git readers cannot publish previews. */
+	readonly previews?: boolean;
+	listBranches?(repository: string, query: string): Promise<SourceRefSuggestion[]>;
+	listCommits?(repository: string, query: string): Promise<SourceRefSuggestion[]>;
+	resolveCommit?(repository: string, commit: string): Promise<SourceBranchHead>;
+	getPullRequest?(repository: string, number: number): Promise<SourcePullRequest>;
 	/** Resolve the current tip of a branch. */
 	getBranchHead(repository: string, branch: string): Promise<SourceBranchHead>;
 	/**

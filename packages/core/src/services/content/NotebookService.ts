@@ -1,3 +1,4 @@
+import { previewKey, PreviewRecordSchema } from './notebookPreviews';
 import { ThumbnailService } from './ThumbnailService';
 import { all } from 'better-all';
 import type { Bucket } from '../../ports/bucket';
@@ -249,7 +250,10 @@ export class NotebookService {
 			throw new NotFoundError(`Notebook ${notebookId} not found`);
 		}
 
-		const meta = await readStored(NotebookMetaSchema, metaObj, nb.meta);
+		const meta = await this.resolvePreviewMeta(
+			projectId,
+			await readStored(NotebookMetaSchema, metaObj, nb.meta),
+		);
 		const source = await readStored(SourceSchema, sourceObj, nb.source);
 		const readme = readmeObj ? await readmeObj.text() : null;
 
@@ -260,7 +264,34 @@ export class NotebookService {
 		const key = paths.project(projectId).notebook(notebookId).meta;
 		const obj = await this.bucket.get(key);
 		if (!obj) throw new NotFoundError(`Notebook ${notebookId} not found`);
-		return readStored(NotebookMetaSchema, obj, key);
+		return this.resolvePreviewMeta(projectId, await readStored(NotebookMetaSchema, obj, key));
+	}
+
+	private async resolvePreviewMeta(
+		projectId: ProjectId,
+		meta: NotebookMeta,
+	): Promise<NotebookMeta> {
+		const notebookId = meta.id;
+		if (!meta.preview) return meta;
+		const parent = await this.getNotebookMeta(projectId, meta.preview.notebook_id);
+		const recordKey = previewKey(projectId, meta.preview.notebook_id, meta.preview.preview_id);
+		const object = await this.bucket.get(recordKey);
+		if (!object || parent.preview || parent.status === 'deleted')
+			throw new NotFoundError('Preview not found');
+		const record = await readStored(PreviewRecordSchema, object, recordKey);
+		if (
+			record.state !== 'active' ||
+			Date.parse(record.expires_at) <= Date.now() ||
+			!record.runtime_ids.includes(notebookId)
+		)
+			throw new NotFoundError('Preview not found');
+		return {
+			...parent,
+			id: notebookId,
+			preview: meta.preview,
+			title: record.name,
+			compute_profile: record.compute_profile,
+		};
 	}
 
 	async getNotebookSource(projectId: ProjectId, notebookId: NotebookId): Promise<Source> {
@@ -822,6 +853,7 @@ export class NotebookService {
 		actor: UserId,
 	): Promise<CommitSessionResult | null> {
 		const { meta, source } = await this.getNotebook(projectId, notebookId);
+		if (meta.preview) throw new ConflictError('Preview sessions cannot persist changes');
 		if (meta.status === 'deleted') {
 			return null;
 		}
@@ -1266,6 +1298,10 @@ export class NotebookService {
 		notebookId: NotebookId,
 		snapshot: FsSnapshot | null,
 	): Promise<{ previous: FsSnapshot | null }> {
+		const metaKey = paths.project(projectId).notebook(notebookId).meta;
+		const metaObject = await this.bucket.get(metaKey);
+		if (metaObject && (await readStored(NotebookMetaSchema, metaObject, metaKey)).preview)
+			throw new ConflictError('Preview sessions cannot persist changes');
 		const previous = await this.getFsSnapshot(projectId, notebookId);
 		const nb = paths.project(projectId).notebook(notebookId);
 		if (snapshot) {

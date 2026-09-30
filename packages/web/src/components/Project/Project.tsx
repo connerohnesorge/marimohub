@@ -583,6 +583,7 @@ function useProjectContent() {
 		else if (key === 'change-image') baseImageModal.open(nb);
 		else if (key === 'change-compute') computeProfileModal.open(nb);
 		else if (key === 'history') historyModal.open(nb);
+		else if (key === 'previews') void navigate(`/projects/${pid}/notebooks/${nb.id}/previews`);
 		else if (key === 'jobs')
 			void navigate(`/projects/${pid}/notebooks/${nb.id}/jobs`, { state: { title: nb.title } });
 		else if (key === 'browse-files') workspaceBrowser.open(nb);
@@ -669,6 +670,7 @@ function useProjectContent() {
 						]
 					: []),
 				...notebookHistoryActions(jobsAvailable),
+				{ id: 'previews', label: 'Previews', icon: <GitBranch className="size-4" /> },
 			],
 			NOTEBOOK_EXPORT_ACTIONS,
 			[{ id: 'delete', label: 'Delete', icon: <Trash2 className="size-4" />, danger: true }],

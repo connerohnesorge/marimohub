@@ -49,7 +49,14 @@ export function NotebookMenu({
 }: NotebookMenuProps) {
 	const navigate = useNavigate();
 	const source = useDisclosure();
-	const options: DropdownMenuOption[] = [];
+	const options: DropdownMenuOption[] = [
+		{
+			id: 'previews',
+			label: 'Previews',
+			href: `/projects/${projectId}/notebooks/${notebookId}/previews`,
+			icon: <GitBranch className="size-3.5" />,
+		},
+	];
 	if (onRename)
 		options.push({
 			id: 'rename',

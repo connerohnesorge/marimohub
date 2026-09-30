@@ -464,6 +464,7 @@ export const RuntimeSchema = z.object({
 export type Runtime = z.infer<typeof RuntimeSchema>;
 
 export const NotebookMetaSchema = z.object({
+	preview: z.object({ notebook_id: NotebookIdSchema, preview_id: z.string() }).optional(),
 	schema_version: SchemaVersionSchema,
 	id: NotebookIdSchema,
 	project_id: ProjectIdSchema,
@@ -494,9 +495,9 @@ export const NotebookMetaSchema = z.object({
 
 export type NotebookMeta = z.infer<typeof NotebookMetaSchema>;
 
-export type PublicNotebookMeta = Omit<NotebookMeta, 'schema_version'>;
+export type PublicNotebookMeta = Omit<NotebookMeta, 'schema_version' | 'preview'>;
 export function toPublicNotebookMeta(meta: NotebookMeta): PublicNotebookMeta {
-	const { schema_version: _schema_version, ...rest } = meta;
+	const { schema_version: _schema_version, preview: _preview, ...rest } = meta;
 	return rest;
 }
 
@@ -779,6 +780,7 @@ export type SurfaceState = z.infer<typeof SurfaceStateSchema>;
 // The API projection (`toSessionResponse` in routes/sessions.ts) is an explicit
 // pick, so preserved unknown keys never leak into a response.
 export const SessionSchema = z.looseObject({
+	idle_timeout_ms: z.number().int().positive().optional(),
 	session_id: SessionIdSchema,
 	notebook_id: NotebookIdSchema,
 	project_id: ProjectIdSchema,

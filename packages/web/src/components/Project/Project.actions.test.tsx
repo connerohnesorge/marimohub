@@ -33,6 +33,7 @@ describe('Project — Notebook Actions: configuration', () => {
 			'View static outputs',
 			'Version history',
 			'Jobs & schedules',
+			'Previews',
 			'Download notebook file',
 			'Download outputs (HTML)',
 			'Download workspace',
