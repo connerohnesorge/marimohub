@@ -151,6 +151,7 @@ minimumReleaseAgeExclude:
   - smol-toml@1.7.1
   # Renovate security update: csv-parse@7.0.2
   - csv-parse@7.0.2
+  - markdown-it@14.3.1
 
 onlyBuiltDependencies: []
 
