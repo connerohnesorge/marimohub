@@ -3,6 +3,7 @@ import {
 	BadRequestError,
 	createNotebookId,
 	createProjectId,
+	createSandboxId,
 	createServices,
 	KERNEL_AUTH_TOKEN_FILE,
 	KERNEL_AUTH_TOKEN_PATTERN,
@@ -2173,6 +2174,106 @@ describe('Session routes', () => {
 			(await createServices(bucket).sessions.getSession(pid, winner.session_id))
 				.authorization_expires_at,
 		).toBe(deadline);
+	});
+
+	it.each(['normal', 'claim-lost'] as const)(
+		'revalidates %s editor reuse after a concurrent stop',
+		async (reusePath) => {
+			const kernelProbe = vi.fn<NonNullable<ApiDeps['kernelProbe']>>();
+			const api = createTestApi({
+				bucket,
+				userId: ACTOR,
+				compute: makeFakeCompute(),
+				deps: { kernelProbe },
+			});
+			const first = await expectOk<ApiSession>(await api.request('POST', sessionsPath()));
+			const { sessions } = api.deps.services;
+			const stop = () => sessions.beginTerminating(pid, first.session_id);
+
+			if (reusePath === 'normal') {
+				kernelProbe.mockImplementationOnce(async () => {
+					await stop();
+					return 'alive';
+				});
+			} else {
+				vi.spyOn(sessions, 'findReusableEditor').mockResolvedValueOnce({ sharing: 'shared' });
+				const claimEditor = sessions.claimEditor.bind(sessions);
+				let lostClaim = false;
+				vi.spyOn(sessions, 'claimEditor').mockImplementation(async (...args) => {
+					const result = await claimEditor(...args);
+					lostClaim = !result.claimed;
+					return result;
+				});
+				const getSession = sessions.getSession.bind(sessions);
+				vi.spyOn(sessions, 'getSession').mockImplementation(async (...args) => {
+					const snapshot = await getSession(...args);
+					if (lostClaim && snapshot.session_id === first.session_id) {
+						lostClaim = false;
+						await stop();
+					}
+					return snapshot;
+				});
+			}
+
+			await expectError(await api.request('POST', sessionsPath()), 409, 'CONFLICT');
+			expect((await sessions.getSession(pid, first.session_id)).status).toBe('terminating');
+			expect((await sessions.getEditorClaim(pid, nid))?.session_id).toBe(first.session_id);
+		},
+	);
+
+	it('rejects editor reuse when authorization expires during the kernel probe', async () => {
+		const services = createServices(bucket);
+		const kernelProbe = vi.fn<NonNullable<ApiDeps['kernelProbe']>>();
+		const api = createTestApi({
+			bucket,
+			userId: ACTOR,
+			compute: makeFakeCompute(),
+			deps: { services, kernelProbe },
+		});
+		const first = await expectOk<ApiSession>(await api.request('POST', sessionsPath()));
+		kernelProbe.mockImplementationOnce(async () => {
+			await services.sessions.tightenAuthorizationDeadline(
+				pid,
+				first.session_id,
+				new Date(Date.now() - Millis.seconds(1)).toISOString(),
+			);
+			return 'alive';
+		});
+
+		await expectError(await api.request('POST', sessionsPath()), 409, 'CONFLICT');
+	});
+
+	it('refuses to reuse an expired editor until the sweep reclaims its sandbox', async () => {
+		const startedAt = new Date(Date.now() - Millis.minutes(7)).toISOString();
+		const stale = makeSession({
+			project_id: pid,
+			notebook_id: nid,
+			user_id: ACTOR,
+			status: 'expired',
+			sandbox_id: createSandboxId(),
+			started_at: startedAt,
+			last_heartbeat: startedAt,
+			surfaces: { marimo: { status: 'ready', port: 2718, started_at: startedAt } },
+		});
+		await bucket.put(paths.session(pid, stale.session_id), JSON.stringify(stale));
+		await bucket.put(
+			paths.editorClaim(pid, nid),
+			JSON.stringify({ session_id: stale.session_id, sharing: 'shared', claimed_at: startedAt }),
+		);
+		const post = createTestApi({ bucket, userId: ACTOR, compute: makeFakeCompute() }).request;
+		const services = createServices(bucket);
+
+		await expectError(await post('POST', sessionsPath()), 409, 'CONFLICT');
+		expect((await services.sessions.getEditorClaim(pid, nid))?.session_id).toBe(stale.session_id);
+
+		// What the lifecycle sweep's reclaim leaves behind.
+		await services.sessions.markSandboxReclaimed(pid, stale.session_id, new Date().toISOString());
+		await services.sessions.releaseEditorFor(stale);
+
+		const started = await expectOk<ApiSession>(await post('POST', sessionsPath()));
+		expect(started.session_id).not.toBe(stale.session_id);
+		expect(started.reused).not.toBe(true);
+		expect((await services.sessions.getEditorClaim(pid, nid))?.session_id).toBe(started.session_id);
 	});
 
 	it('POST /sessions hammered for one notebook reuses one record and never trips the cap', async () => {
