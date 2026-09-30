@@ -1196,11 +1196,12 @@ if exists __marimo__/session/{notebook}.py.json:
 patch versions/{vid}/version.json with html_snapshot / session_snapshot descriptors (§4.7)
 
 // 4. Capture the rest of the workspace IF PERSIST_WORKSPACE=workspace (best-effort).
-//    Source files (notebook.py / pyproject.toml) and __marimo__/ are excluded —
-//    they are persisted by steps 1–3 — as are regenerable Python artifacts
-//    (.venv/, __pycache__/). Everything else is mirrored into workspace/.
+//    Steps 1–2 own the root source files (notebook.py / pyproject.toml).
+//    Capture excludes those files and .venv/ or __pycache__/ at any depth.
+//    It includes __marimo__/ and hidden files, subject to path, file-type, and size limits.
+//    Step 3 separately saves only the selected HTML/session artifacts in versions/.
 if PERSIST_WORKSPACE == "workspace":
-  for each runtime file under the working dir (excluding notebook.py, pyproject.toml, __marimo__/, .venv/, __pycache__/):
+  for each eligible runtime file under the working dir (including hidden files and __marimo__/):
     PUT projects/{pid}/notebooks/{nid}/workspace/{path}    // binary-safe
   delete workspace/{path} objects no longer present in the sandbox  // mirror deletes
 
@@ -1223,7 +1224,7 @@ The version cut (steps 1–2) is the **durable record of the session's edits**, 
 | `workspace` | source files **plus** runtime files (e.g. `data/cars.csv`) | source files via the version cut, then mirror the rest of the working dir | brings back source **and** runtime files |
 
 - **Restore is unconditional.** On provision, the contents of `workspace/` are loaded into the sandbox working dir before marimo starts. Because `workspace/` reflects whatever was last captured, no mode branch is needed — `source` mode simply has only the two source files to restore.
-- **Capture is mode-gated and binary-safe.** Under `workspace`, every runtime file under the working dir (excluding `notebook.py`, `pyproject.toml`, `__marimo__/`, and regenerable Python artifacts `.venv/` / `__pycache__/`) is mirrored into `workspace/` byte-for-byte, so parquet, images, and `.db` files round-trip — not just UTF-8 text. **Mirror deletes** keep `workspace/` accurate: any `workspace/` object (other than the source files) no longer present in the sandbox is removed, which also cleans up stale data if a notebook is changed from `workspace` back to `source`.
+- **Capture is mode-gated and binary-safe.** Under `workspace`, capture copies runtime files from the working directory into `workspace/` without changing their bytes. This includes `__marimo__/`, hidden directories such as `.git/`, and dotfiles such as `.env` and `.gitignore`. Capture excludes the root source files (`notebook.py` and `pyproject.toml`), which the version cut saves separately. It also excludes `.venv/` and `__pycache__/` at any depth. **Mirror deletes** remove stored runtime files that no longer exist in the sandbox. A change from `workspace` to `source` also removes the stored runtime files.
 - **Caps.** Capture is bounded by a max total-bytes and max file-count limit; a file skipped because it would exceed the cap is logged (`console.warn`), never silently truncated.
 - **`workspace/` is never pruned.** Version pruning (§11) only reaps `versions/{vid}/`; the latest-only `workspace/` mirror is untouched.
 
