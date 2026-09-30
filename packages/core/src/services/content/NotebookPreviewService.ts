@@ -1,12 +1,13 @@
 import type { Bucket } from '../../ports/bucket';
 import type { SourceControlReader, SourceControlRegistry } from '../../ports/sourceControl';
-import type { NotebookId, ProjectId, UserId } from '../../ids';
+import type { NotebookId, ProjectId, SessionId, UserId } from '../../ids';
 import { createNotebookId, createVersionId } from '../../ids';
 import {
 	BadRequestError,
 	ConflictError,
 	NotFoundError,
 	PreconditionFailedError,
+	ResourceExhaustedError,
 } from '../../errors';
 import { paths } from '../../paths';
 import { sha256Hex } from '../../internal/sha256';
@@ -128,6 +129,8 @@ export class NotebookPreviewService {
 			state: 'active',
 			preparation: 'pending',
 			runtime_ids: [],
+			ready_runtime_ids: [],
+			admissions: [],
 			garbage_ids: [],
 		};
 		await this.bucket.put(
@@ -218,7 +221,7 @@ export class NotebookPreviewService {
 			const parent = await this.notebooks.getNotebook(record.project_id, record.notebook_id);
 			const now = new Date().toISOString();
 			await this.bucket.put(
-				nb.meta,
+				nb.previewMeta,
 				JSON.stringify({
 					...parent.meta,
 					id: runtimeId,
@@ -262,6 +265,7 @@ export class NotebookPreviewService {
 			const published = await this.mutateLeased(record, token, (current) => ({
 				...current,
 				current: { notebook_id: runtimeId, version_id: versionId, commit },
+				ready_runtime_ids: [...current.ready_runtime_ids, runtimeId],
 				preparation: 'ready',
 				error: undefined,
 				lease: undefined,
@@ -279,6 +283,89 @@ export class NotebookPreviewService {
 				checked_at: new Date().toISOString(),
 			}));
 		}
+	}
+
+	async reapAdmissions(
+		record: NotebookPreview,
+		isRetained: (id: SessionId) => Promise<boolean | undefined>,
+	): Promise<NotebookPreview> {
+		const removable = new Set<SessionId>();
+		for (const entry of record.admissions) {
+			const retained = await isRetained(entry.session_id);
+			if (
+				retained === false ||
+				(!entry.committed && retained === undefined && entry.expires_at <= Date.now())
+			)
+				removable.add(entry.session_id);
+		}
+		if (removable.size === 0) return record;
+		// A session committed after the scan must retain its reservation.
+		return this.mutate(record, (current) => ({
+			...current,
+			admissions: current.admissions.filter(
+				(entry) =>
+					!removable.has(entry.session_id) ||
+					entry.committed !==
+						record.admissions.find((old) => old.session_id === entry.session_id)?.committed,
+			),
+		}));
+	}
+
+	// Admission and pruning CAS the same record, before any session or sandbox is created.
+	async reserveAdmission(
+		record: NotebookPreview,
+		nid: NotebookId,
+		sid: SessionId,
+		limit: number,
+	): Promise<void> {
+		await this.mutate(record, (current) => {
+			if (
+				current.state !== 'active' ||
+				Date.parse(current.expires_at) <= Date.now() ||
+				!current.runtime_ids.includes(nid) ||
+				(!current.ready_runtime_ids.includes(nid) && current.current?.notebook_id !== nid)
+			)
+				throw new NotFoundError('Preview not found');
+			if (current.admissions.some((entry) => entry.session_id === sid)) return null;
+			if (current.admissions.length >= limit)
+				throw new ResourceExhaustedError('Preview session limit reached');
+			return {
+				...current,
+				admissions: [
+					...current.admissions,
+					{
+						session_id: sid,
+						notebook_id: nid,
+						expires_at: Date.now() + 600_000,
+						committed: false,
+					},
+				],
+			};
+		});
+	}
+
+	async releaseAdmission(record: NotebookPreview, sid: SessionId): Promise<void> {
+		await this.mutate(record, (current) => ({
+			...current,
+			admissions: current.admissions.filter((entry) => entry.session_id !== sid || entry.committed),
+		}));
+	}
+
+	async commitAdmission(record: NotebookPreview, sid: SessionId): Promise<void> {
+		await this.mutate(record, (current) => {
+			if (
+				current.state !== 'active' ||
+				Date.parse(current.expires_at) <= Date.now() ||
+				!current.admissions.some((entry) => entry.session_id === sid)
+			)
+				throw new NotFoundError('Preview not found');
+			return {
+				...current,
+				admissions: current.admissions.map((entry) =>
+					entry.session_id === sid ? { ...entry, committed: true } : entry,
+				),
+			};
+		});
 	}
 
 	async retire(record: NotebookPreview): Promise<NotebookPreview> {
@@ -325,15 +412,22 @@ export class NotebookPreviewService {
 		let record = initial;
 		if (record.state !== 'active' || record.lease) return;
 		for (const nid of record.runtime_ids) {
-			if (nid === record.current?.notebook_id || (await hasRuntime(nid))) continue;
+			if (
+				nid === record.current?.notebook_id ||
+				record.admissions.some((entry) => entry.notebook_id === nid) ||
+				(await hasRuntime(nid))
+			)
+				continue;
 			record = await this.mutate(record, (current) =>
 				current.state === 'active' &&
 				!current.lease &&
 				nid !== current.current?.notebook_id &&
-				current.runtime_ids.includes(nid)
+				current.runtime_ids.includes(nid) &&
+				!current.admissions.some((entry) => entry.notebook_id === nid)
 					? {
 							...current,
 							runtime_ids: current.runtime_ids.filter((id) => id !== nid),
+							ready_runtime_ids: current.ready_runtime_ids.filter((id) => id !== nid),
 							garbage_ids: [...current.garbage_ids, nid],
 						}
 					: null,

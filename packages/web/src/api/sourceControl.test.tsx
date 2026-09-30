@@ -7,6 +7,7 @@ const branch = (value: string) => ({ value, label: value, commit: 'a'.repeat(40)
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.useRealTimers();
 });
 
 describe('GitHub source completion requests', () => {
@@ -26,7 +27,15 @@ describe('GitHub source completion requests', () => {
 		);
 		await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
 		const oldSignal = (fetch.mock.calls[0][1] as RequestInit).signal;
+		vi.useFakeTimers();
 		rerender({ query: 'new' });
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(200);
+		});
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1);
+		});
+		vi.useRealTimers();
 		await waitFor(() => expect(result.current.data).toEqual([branch('feature/new')]));
 		expect(oldSignal?.aborted).toBe(true);
 		await act(async () => {
@@ -34,6 +43,24 @@ describe('GitHub source completion requests', () => {
 		});
 		expect(result.current.data).toEqual([branch('feature/new')]);
 		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('hides cached suggestions as soon as the input changes, before debounce completes', async () => {
+		const fetch = vi.fn().mockResolvedValue(jsonOk([branch('old')]));
+		vi.stubGlobal('fetch', fetch);
+		const { result, rerender } = renderHookWithClient(
+			({ query }) => useSourceBranchesQuery({ pid: 'project', nid: 'notebook', query }),
+			{ initialProps: { query: 'old' }, toaster: false },
+		);
+		await waitFor(() => expect(result.current.data).toEqual([branch('old')]));
+		vi.useFakeTimers();
+		rerender({ query: 'new' });
+		expect(result.current.data).toBeUndefined();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(199);
+		});
+		expect(result.current.data).toBeUndefined();
+		expect(fetch).toHaveBeenCalledOnce();
 	});
 
 	it('clears previous notebook suggestions when the new scope denies access', async () => {

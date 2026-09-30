@@ -277,9 +277,9 @@ app.openapi(list, async (c) => {
 	return c.json(
 		{
 			success: true as const,
-			data: (await deps.services.previews.list(pid, nid)).map((record) =>
-				present(record, can, resolvePublicBaseUrl(c, deps.sandbox.appBaseUrl)),
-			),
+			data: (await deps.services.previews.list(pid, nid))
+				.filter((record) => Date.parse(record.expires_at) > Date.now())
+				.map((record) => present(record, can, resolvePublicBaseUrl(c, deps.sandbox.appBaseUrl))),
 		},
 		200,
 	);

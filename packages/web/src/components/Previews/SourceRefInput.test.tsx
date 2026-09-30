@@ -45,6 +45,14 @@ describe('SourceRefInput', () => {
 		expect(screen.getByRole('combobox')).toHaveValue('feature/chart');
 		expect(submit).not.toHaveBeenCalled();
 	});
+	it('guides commit inputs to enter a full SHA when there are no suggestions', async () => {
+		queries.branches = { data: [], isFetching: false, isError: false };
+		const user = userEvent.setup();
+		render(<SourceRefInput pid="p" nid="n" type="commit" value="abc" onChange={() => {}} />);
+		await user.click(screen.getByRole('combobox'));
+		await user.keyboard('{ArrowDown}');
+		expect(screen.getByText('No suggestions. Enter a full commit SHA.')).toBeInTheDocument();
+	});
 	it('retains a manual ref through pending, error, empty, and late suggestions', async () => {
 		queries.branches = { data: [], isFetching: true, isError: false };
 		const user = userEvent.setup();
@@ -55,6 +63,12 @@ describe('SourceRefInput', () => {
 		view.rerender(<Harness submit={submit} />);
 		await user.tab();
 		expect(screen.getByRole('combobox')).toHaveValue('manual/new-branch');
+		queries.branches = { data: [], isFetching: false, isError: false };
+		view.rerender(<Harness submit={submit} />);
+		await user.click(screen.getByRole('combobox'));
+		await user.keyboard('{End} {Backspace}');
+		expect(screen.getByText('No suggestions. Enter a branch name.')).toBeInTheDocument();
+		expect(screen.getByRole('combobox')).toHaveValue('manual/new-branch');
 		queries.branches = {
 			data: [{ value: 'old', label: 'Old result', commit: 'b'.repeat(40) }],
 			isFetching: false,
@@ -62,6 +76,7 @@ describe('SourceRefInput', () => {
 		};
 		view.rerender(<Harness submit={submit} />);
 		expect(screen.getByRole('combobox')).toHaveValue('manual/new-branch');
+		await user.tab();
 		await user.click(screen.getByRole('button', { name: 'Create' }));
 		expect(submit).toHaveBeenCalledOnce();
 	});

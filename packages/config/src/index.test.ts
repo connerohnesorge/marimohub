@@ -68,6 +68,30 @@ describe('createFromEnv auth backend selection', () => {
 		).toThrow(/unknown key.*"small"/);
 	});
 
+	it.each(['none', 'docker'])(
+		'identifies invalid preview profiles on %s in startup diagnostics',
+		(backend) => {
+			const boot = vi.fn(() =>
+				createFromEnv({
+					...baseEnv,
+					MARIMOHUB_AUTH_BACKEND: 'dev',
+					MARIMOHUB_COMPUTE_BACKEND: backend,
+					MARIMOHUB_PREVIEW_COMPUTE_PROFILE: 'unknown',
+				}),
+			);
+			expect(boot).toThrow(
+				'MARIMOHUB_PREVIEW_COMPUTE_PROFILE must name an available compute profile',
+			);
+			expect(boot.mock.results[0]?.value).toMatchObject({
+				name: 'ConfigError',
+				opts: {
+					variable: 'MARIMOHUB_PREVIEW_COMPUTE_PROFILE',
+					docs: 'docs/configuration.md#compute',
+				},
+			});
+		},
+	);
+
 	it('wires the first compute profile into sandbox configuration', () => {
 		const deps = createFromEnv({
 			...baseEnv,

@@ -89,11 +89,12 @@ describe('schema conformance: api response shapes vs core public shapes', () => 
 	});
 
 	it('NotebookMeta omits storage version and internal preview ownership', () => {
-		expect(
-			shapeKeys(CoreNotebookMetaSchema).filter(
-				(key) => !['schema_version', 'preview'].includes(key),
-			),
-		).toEqual(shapeKeys(NotebookMetaResponseSchema));
+		const coreKeys = shapeKeys(CoreNotebookMetaSchema);
+		expect(coreKeys).toContain('schema_version');
+		expect(coreKeys).toContain('preview');
+		expect(coreKeys.filter((key) => !['schema_version', 'preview'].includes(key))).toEqual(
+			shapeKeys(NotebookMetaResponseSchema),
+		);
 	});
 
 	// Project omits `schema_version` and adds the request-scoped `your_role`.

@@ -6,6 +6,7 @@ import type { Session } from '@/types';
 import {
 	chooseNotebookAction,
 	makeFetch,
+	notebook,
 	renderProject,
 	runningSession,
 } from './Project.testWorld';
@@ -33,12 +34,19 @@ describe('Project — Notebook Actions: configuration', () => {
 			'View static outputs',
 			'Version history',
 			'Jobs & schedules',
-			'Previews',
 			'Download notebook file',
 			'Download outputs (HTML)',
 			'Download workspace',
 			'Delete',
 		]);
+	});
+
+	it('offers previews for Git notebooks', async () => {
+		const user = userEvent.setup();
+		makeFetch({ notebooks: [{ ...notebook(), source_type: 'git' }] });
+		await renderProject();
+		await user.click(screen.getByRole('button', { name: /Notebook actions for/ }));
+		expect(screen.getByRole('menuitem', { name: 'Previews' })).toBeInTheDocument();
 	});
 
 	it('opens the persisted workspace browser from the notebook menu', async () => {

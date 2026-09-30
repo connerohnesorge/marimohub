@@ -37,8 +37,13 @@ export async function sweepAppPools(
 			const pid = match[1];
 			const nid = match[2];
 			try {
-				const metaKey = paths.project(pid).notebook(nid).meta;
-				const metaObject = await deps.bucket.get(metaKey);
+				const notebook = paths.project(pid).notebook(nid);
+				let metaKey = notebook.meta;
+				let metaObject = await deps.bucket.get(metaKey);
+				if (!metaObject) {
+					metaKey = notebook.previewMeta;
+					metaObject = await deps.bucket.get(metaKey);
+				}
 				const meta = metaObject ? await readStored(NotebookMetaSchema, metaObject, metaKey) : null;
 				const policy = meta?.preview
 					? previewAppPoolPolicy(deps.policy.appPool)
@@ -67,7 +72,12 @@ export async function sweepAppPools(
 							: connections;
 					},
 					retire: async (member, session) => {
-						if (meta?.preview && session?.status === 'starting') return false;
+						if (
+							meta?.preview &&
+							session?.status === 'starting' &&
+							member.operation_expires_at > Date.now()
+						)
+							return false;
 						if (!session) {
 							await deps.compute
 								.create(member.sandbox_id, { owner: { projectId: pid, userId: member.user_id } })

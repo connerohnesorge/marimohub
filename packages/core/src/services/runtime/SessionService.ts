@@ -756,6 +756,11 @@ export class SessionService {
 		return notebookId ? sessions.filter((s) => s.notebook_id === notebookId) : sessions;
 	}
 
+	async listByProject(projectId: ProjectId, notebookId?: NotebookId): Promise<Session[]> {
+		const sessions = await this.scanProject(projectId, (session) => session);
+		return notebookId ? sessions.filter((session) => session.notebook_id === notebookId) : sessions;
+	}
+
 	/**
 	 * List a project's present sessions (`starting`/`running`/`terminating`) —
 	 * terminal sessions are excluded. Powers the per-notebook runtime-status

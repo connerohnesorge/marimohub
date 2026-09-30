@@ -1070,6 +1070,60 @@ describe('SessionService', () => {
 		});
 	});
 
+	describe('listByProject', () => {
+		it('includes unreclaimed terminal sessions and scans only the owning project', async () => {
+			const create = (pid = projectId, nid = notebookId) =>
+				sessions.createSession({
+					project_id: pid,
+					notebook_id: nid,
+					user_id: ACTOR,
+					sandbox_id: createSandboxId(),
+				});
+			const starting = await create();
+			const terminated = await create();
+			await sessions.markTerminated(projectId, terminated.session_id);
+			const failed = await create();
+			await sessions.markFailed(projectId, failed.session_id);
+			const otherNotebook = await create(projectId, createNotebookId());
+			const otherProject = await create(createProjectId());
+			const list = vi.spyOn(bucket, 'list');
+			const get = vi.spyOn(bucket, 'get');
+
+			expect(
+				(await sessions.listByProject(projectId)).map((session) => session.session_id).sort(),
+			).toEqual(
+				[
+					starting.session_id,
+					terminated.session_id,
+					failed.session_id,
+					otherNotebook.session_id,
+				].sort(),
+			);
+			const scoped = await sessions.listByProject(projectId, notebookId);
+			expect(scoped.map((session) => session.session_id).sort()).toEqual(
+				[starting.session_id, terminated.session_id, failed.session_id].sort(),
+			);
+			expect(scoped.filter((session) => session.status !== 'starting')).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ status: 'terminated', sandbox_id: terminated.sandbox_id }),
+					expect.objectContaining({ status: 'failed', sandbox_id: failed.sandbox_id }),
+				]),
+			);
+			expect(scoped.every((session) => !session.sandbox_reclaimed_at)).toBe(true);
+			expect(list).toHaveBeenCalled();
+			expect(
+				list.mock.calls.every(
+					([options]) => options?.prefix === paths.sessionsForProject(projectId),
+				),
+			).toBe(true);
+			expect(get.mock.calls.map(([key]) => key)).not.toContain(
+				paths.session(otherProject.project_id, otherProject.session_id),
+			);
+			list.mockRestore();
+			get.mockRestore();
+		});
+	});
+
 	describe('listActiveByProject', () => {
 		it('returns only the project’s active (non-terminal) sessions', async () => {
 			const otherProject = createProjectId();

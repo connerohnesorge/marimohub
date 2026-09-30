@@ -11,17 +11,16 @@ interface SourceQuery {
 function useSourceRefsQuery(
 	{ pid, nid, query, enabled = true }: SourceQuery,
 	type: 'branch' | 'commit',
-	resolve = false,
 ) {
 	const debounced = useDebouncedValue(query, 200);
-	return useQuery({
-		queryKey: ['source-refs', pid, nid, type, resolve, debounced],
+	const result = useQuery({
+		queryKey: ['source-refs', pid, nid, type, debounced],
 		queryFn: ({ signal }) =>
 			apiData(
 				apiClient.GET('/api/v1/projects/{pid}/notebooks/{nid}/source/refs', {
 					params: {
 						path: { pid, nid },
-						query: { type, query: debounced, resolve: resolve ? 'true' : 'false' },
+						query: { type, query: debounced },
 					},
 					signal,
 				}),
@@ -31,13 +30,11 @@ function useSourceRefsQuery(
 		gcTime: 60_000,
 		retry: false,
 	});
+	return { ...result, data: query === debounced ? result.data : undefined };
 }
 export function useSourceBranchesQuery(input: SourceQuery) {
 	return useSourceRefsQuery(input, 'branch');
 }
 export function useSourceCommitsQuery(input: SourceQuery) {
 	return useSourceRefsQuery(input, 'commit');
-}
-export function useSourceRefResolutionQuery(input: SourceQuery & { type: 'branch' | 'commit' }) {
-	return useSourceRefsQuery(input, input.type, true);
 }

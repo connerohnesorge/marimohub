@@ -85,7 +85,7 @@ describe('GitHubAppPublisher reader', () => {
 		});
 		expect(await github.listBranches('owner/repo', 'feature/')).toHaveLength(30);
 		expect(await github.resolveCommit('owner/repo', sha)).toEqual({ commit: sha });
-		await expect(github.resolveCommit('owner/repo', 'main')).rejects.toThrow();
+		await expect(github.resolveCommit('owner/repo', 'main')).rejects.toThrow(ValidationError);
 	});
 
 	it('matches recent commit subjects and returns canonical SHA values', async () => {
@@ -99,6 +99,24 @@ describe('GitHubAppPublisher reader', () => {
 			{ value: sha, commit: sha, label: `${sha.slice(0, 12)} Chart prototype` },
 		]);
 	});
+
+	it.each([13, 25, 39])(
+		'matches %i-character SHA prefixes against the full commit',
+		async (length) => {
+			const sha = 'abcdef0123456789abcdef0123456789abcdef0123';
+			const github = reader((url) =>
+				url.pathname === '/repos/owner/repo/commits'
+					? response([
+							{ sha, commit: { message: 'Prototype' } },
+							{ sha: 'b'.repeat(40), commit: { message: 'Unrelated' } },
+						])
+					: null,
+			);
+			expect(await github.listCommits('owner/repo', sha.slice(0, length).toUpperCase())).toEqual([
+				{ value: sha, commit: sha, label: `${sha.slice(0, 12)} Prototype` },
+			]);
+		},
+	);
 
 	it('resolves a branch head', async () => {
 		const github = reader((url) =>

@@ -15,6 +15,7 @@ import {
 } from './ids';
 import type { UserId } from './ids';
 import { createServices } from './services';
+import { NotFoundError } from './errors';
 import { MemoryBucket } from './testing/MemoryBucket';
 import { traceContext, traced } from './tracing';
 
@@ -134,6 +135,20 @@ describe('createServices tracing option', () => {
 		expect(service?.attributes).toEqual({ 'marimohub.user_id': 'user-1' });
 		const bucket = spans.find((s) => s.name === 'Bucket.get');
 		expect(String(bucket?.attributes['bucket.key'])).toContain('user-1');
+	});
+
+	it('traces preview failures and their storage calls when enabled', async () => {
+		const services = createServices(new MemoryBucket(), undefined, { tracing: true });
+		await expect(
+			services.previews.get(createProjectId(), createNotebookId(), 'a'.repeat(32)),
+		).rejects.toThrow(NotFoundError);
+		const spans = exporter.getFinishedSpans();
+		const preview = spans.find((span) => span.name === 'NotebookPreviewService.get');
+		expect(preview?.status.code).toBe(2);
+		expect(preview?.events.some((event) => event.name === 'exception')).toBe(true);
+		expect(spans.find((span) => span.name === 'Bucket.get')?.parentSpanContext?.spanId).toBe(
+			preview?.spanContext().spanId,
+		);
 	});
 
 	it('leaves everything unwrapped by default', async () => {

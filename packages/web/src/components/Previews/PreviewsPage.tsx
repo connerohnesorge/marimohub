@@ -1,12 +1,12 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { RadioButton, RadioField, RadioGroup, Label } from 'react-aria-components';
-import { toast } from 'sonner';
 import { useAppQuery } from '@/api/apps';
 import { useCapabilitiesQuery, useNotebookQuery } from '@/api/hooks';
 import { useCreatePreview, useDeletePreview, usePreviewsQuery } from '@/api/previews';
 import type { NotebookPreview } from '@/api/previews';
 import { Button, DialogModal } from '@/components/ui';
+import { copyPreviewLink } from './copyPreviewLink';
 import { SourceRefInput } from './SourceRefInput';
 
 export function PreviewBadge({ preview }: { preview: NotebookPreview }) {
@@ -30,7 +30,7 @@ export function PreviewsPage() {
 			</Link>
 			<div className="flex items-center justify-between">
 				<h1 className="text-xl font-semibold">Previews</h1>
-				{canManage && <Button onPress={() => setCreating(true)}>Create preview</Button>}
+				{canManage && <PreviewCreation pid={pid} nid={nid} onCreate={() => setCreating(true)} />}
 			</div>
 			<p className="text-sm text-muted-foreground">
 				Share published previews with this notebook’s audience. Temporary editor changes are
@@ -68,15 +68,7 @@ export function PreviewsPage() {
 								Open preview
 							</Link>
 						)}
-						<Button
-							variant="default"
-							onPress={() => {
-								void navigator.clipboard
-									.writeText(preview.url)
-									.then(() => toast.success('Preview link copied'))
-									.catch(() => toast.error('Unable to copy the link'));
-							}}
-						>
+						<Button variant="default" onPress={() => void copyPreviewLink(preview.url)}>
 							Copy link
 						</Button>
 						{preview.can.manage && (
@@ -100,6 +92,23 @@ export function PreviewsPage() {
 	);
 }
 
+function PreviewCreation({
+	pid,
+	nid,
+	onCreate,
+}: {
+	pid: string;
+	nid: string;
+	onCreate: () => void;
+}) {
+	const notebook = useNotebookQuery(pid, nid);
+	return notebook.data?.source.type === 'git' ? (
+		<Button onPress={onCreate}>Create preview</Button>
+	) : notebook.data ? (
+		<p className="text-sm text-muted-foreground">Preview creation requires a Git notebook.</p>
+	) : null;
+}
+
 export function CreatePreviewForm({
 	pid,
 	nid,
@@ -113,7 +122,7 @@ export function CreatePreviewForm({
 	const [value, setValue] = useState('');
 	const [name, setName] = useState('');
 	const [profile, setProfile] = useState('');
-	const [requestKey, setRequestKey] = useState(() => crypto.randomUUID());
+	const requestKey = useRef<string | null>(null);
 	const capabilities = useCapabilitiesQuery();
 	const notebook = useNotebookQuery(pid, nid);
 	const create = useCreatePreview(pid, nid);
@@ -121,7 +130,7 @@ export function CreatePreviewForm({
 		name.trim() && value.trim() && (type === 'branch' || /^[a-f0-9]{40}$/i.test(value.trim()));
 	const change = (next: string) => {
 		setValue(next);
-		setRequestKey(crypto.randomUUID());
+		requestKey.current = null;
 	};
 	return (
 		<form
@@ -129,13 +138,14 @@ export function CreatePreviewForm({
 			onSubmit={(event) => {
 				event.preventDefault();
 				if (!valid) return;
+				if (requestKey.current === null) requestKey.current = crypto.randomUUID();
 				create.mutate(
 					{
 						name: name.trim(),
 						source:
 							type === 'branch' ? { type, branch: value.trim() } : { type, commit: value.trim() },
 						...(profile ? { compute_profile: profile } : {}),
-						requestKey,
+						requestKey: requestKey.current,
 					},
 					{ onSuccess: onCreated },
 				);
@@ -150,7 +160,7 @@ export function CreatePreviewForm({
 					value={name}
 					onChange={(event) => {
 						setName(event.target.value);
-						setRequestKey(crypto.randomUUID());
+						requestKey.current = null;
 					}}
 					maxLength={100}
 				/>
@@ -192,7 +202,7 @@ export function CreatePreviewForm({
 						value={profile}
 						onChange={(event) => {
 							setProfile(event.target.value);
-							setRequestKey(crypto.randomUUID());
+							requestKey.current = null;
 						}}
 					>
 						<option value="">Preview default</option>

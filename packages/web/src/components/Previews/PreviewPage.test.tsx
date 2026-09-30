@@ -2,6 +2,8 @@ import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Route, Routes } from 'react-router-dom';
+import { apiClient } from '@/api/client';
+import { SESSION_LIFECYCLE_TIMEOUT_MS } from '@/api/hooks';
 import { userKeys } from '@/api/queryKeys';
 import { AuthProvider } from '@/context/AuthContext';
 import { ThemeProvider } from '@/context/ThemeContext';
@@ -45,9 +47,12 @@ function setup({ appUser = false } = {}) {
 			}
 			if (url === `${endpoint}/sessions`) {
 				return jsonOk({
-					notebook_id: 'runtime',
+					notebook_id: appUser ? `runtime-${version}` : 'runtime',
 					session_id: `${userId}-session`,
 					preview_version_id: version,
+					...(appUser
+						? { app_assignment: { visit_id: `visit-${version}`, generation: version } }
+						: {}),
 					...(appUser ? {} : { user_id: userId, source_version_id: version }),
 				});
 			}
@@ -58,7 +63,7 @@ function setup({ appUser = false } = {}) {
 				if (url.endsWith('/heartbeat'))
 					return jsonOk({
 						status: 'running',
-						sandbox_url: `https://sandbox.example.com/${userId}`,
+						sandbox_url: `https://sandbox.example.com/${userId}/${url.includes('runtime-second-version') ? 'second' : 'first'}`,
 					});
 			}
 			throw new Error(`Unexpected request: ${method} ${url}`);
@@ -107,12 +112,15 @@ beforeEach(() => {
 afterEach(() => {
 	sessionStorage.clear();
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 describe('PreviewPage', () => {
 	it('restores only the current user’s editor and discards it before opening another', async () => {
 		sessionStorage.setItem(storageKey('alice'), JSON.stringify(savedEditor));
 		const { calls } = setup();
+		const post = vi.spyOn(apiClient, 'POST');
+		const remove = vi.spyOn(apiClient, 'DELETE');
 		const user = userEvent.setup();
 		expect(await screen.findByTitle('Review preview')).toHaveAttribute(
 			'src',
@@ -121,6 +129,14 @@ describe('PreviewPage', () => {
 		await user.click(screen.getByRole('button', { name: 'Discard edits and open latest' }));
 		await waitFor(() =>
 			expect(calls).toContainEqual({ url: `${endpoint}/sessions`, method: 'POST' }),
+		);
+		expect(post).toHaveBeenCalledWith(
+			'/api/v1/projects/{pid}/notebooks/{nid}/previews/{preview_id}/sessions',
+			expect.objectContaining({ timeout: SESSION_LIFECYCLE_TIMEOUT_MS }),
+		);
+		expect(remove).toHaveBeenCalledWith(
+			'/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}',
+			expect.objectContaining({ timeout: SESSION_LIFECYCLE_TIMEOUT_MS }),
 		);
 		const deletion = calls.findIndex((call) => call.method === 'DELETE');
 		expect(calls[deletion].url).toContain('/alice-session');
@@ -171,7 +187,7 @@ describe('PreviewPage', () => {
 	);
 
 	it('shows an updated revision to app-users while keeping their existing app open', async () => {
-		const { advanceBranch } = setup({ appUser: true });
+		const { advanceBranch, calls } = setup({ appUser: true });
 		const user = userEvent.setup();
 		await user.click(await screen.findByRole('button', { name: 'Open app' }));
 		const frame = await screen.findByTitle('Review preview');
@@ -184,5 +200,45 @@ describe('PreviewPage', () => {
 		await waitFor(() =>
 			expect(screen.queryByText(/A newer revision is available/)).not.toBeInTheDocument(),
 		);
+		await waitFor(() =>
+			expect(screen.getByTitle('Review preview')).toHaveAttribute(
+				'src',
+				expect.stringContaining('/second'),
+			),
+		);
+		expect(
+			calls.some(
+				(call) => call.url.includes('runtime-second-version') && call.url.endsWith('/heartbeat'),
+			),
+		).toBe(true);
+		expect(
+			calls.some(
+				(call) => call.url.includes('runtime-first-version') && call.url.endsWith('/leave'),
+			),
+		).toBe(true);
+	});
+	it('releases app visits on pagehide and unmount, but retains them in the back-forward cache', async () => {
+		const { unmount, calls } = setup({ appUser: true });
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open app' }));
+		await screen.findByTitle('Review preview');
+		await act(async () =>
+			window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })),
+		);
+		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(0);
+		await act(async () =>
+			window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })),
+		);
+		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(1);
+		const leave = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/leave'));
+		expect(leave?.[1]?.keepalive).toBe(true);
+		expect(JSON.parse(String(leave?.[1]?.body))).toEqual({
+			visit_id: 'visit-first-version',
+			generation: 'first-version',
+		});
+		await act(async () => unmount());
+		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(2);
+		window.dispatchEvent(new PageTransitionEvent('pagehide'));
+		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(2);
 	});
 });

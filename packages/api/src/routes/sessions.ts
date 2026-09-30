@@ -1607,6 +1607,23 @@ export async function startNotebookSession(input: {
 				};
 		observer.tag('compute_profile', appliedComputeProfile.name);
 		await saga(observer)
+			.step('preview_admission', async () => {
+				if (!previewRecord) return;
+				const record = await deps.services.previews.get(
+					pid,
+					previewRecord.notebook_id,
+					previewRecord.id,
+				);
+				const reaped = await deps.services.previews.reapAdmissions(record, async (id) => {
+					try {
+						return !(await sessions.getSession(pid, id)).sandbox_reclaimed_at;
+					} catch (error) {
+						if (error instanceof NotFoundError) return;
+						throw error;
+					}
+				});
+				await deps.services.previews.reserveAdmission(reaped, nid, sessionId, PREVIEW_MAX_SESSIONS);
+			})
 			.step('capacity', () =>
 				enforceSessionCap(deps, mode, pid, user.id, temporaryToRetire?.session_id),
 			)
@@ -1679,23 +1696,8 @@ export async function startNotebookSession(input: {
 					temporaryToRetire?.session_id,
 				),
 			)
-			.step('preview_cap', async () => {
-				if (!previewRecord) return;
-				const record = await deps.services.previews.get(
-					pid,
-					previewRecord.notebook_id,
-					previewRecord.id,
-				);
-				if (record.state !== 'active' || !record.runtime_ids.includes(nid))
-					throw new NotFoundError('Preview not found');
-				const queue = (await sessions.listActiveByProject(pid))
-					.filter((item) => record.runtime_ids.includes(item.notebook_id))
-					.sort(
-						(a, b) =>
-							a.started_at.localeCompare(b.started_at) || a.session_id.localeCompare(b.session_id),
-					);
-				if (queue.findIndex((item) => item.session_id === sessionId) >= PREVIEW_MAX_SESSIONS)
-					throw new ResourceExhaustedError('Preview session limit reached');
+			.step('preview_admission_commit', async () => {
+				if (previewRecord) await deps.services.previews.commitAdmission(previewRecord, sessionId);
 			})
 			.step('editor_claim', {
 				do: async () => {
@@ -2019,6 +2021,8 @@ export async function startNotebookSession(input: {
 			).catch(() => {});
 		}
 		if (!sandboxMayExist) await recordSandboxCleanup().catch(() => {});
+		if (previewRecord && !sessionRecordAttempted && !sandboxMayExist)
+			await deps.services.previews.releaseAdmission(previewRecord, sessionId).catch(() => {});
 
 		if (err instanceof EditorClaimLostError) {
 			observer.tag('editor_claim_lost', true);

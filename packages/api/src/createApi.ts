@@ -1,4 +1,3 @@
-import previewsApp from './routes/previews';
 import type { MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { etag } from 'hono/etag';
@@ -25,6 +24,7 @@ import { createAiProxy } from './routes/ai';
 import eventsApp from './routes/events';
 import gitSyncApp from './routes/gitSync';
 import notebooksApp from './routes/notebooks';
+import previewsApp from './routes/previews';
 import thumbnailsApp from './routes/thumbnails';
 import changeRequestsApp from './routes/changeRequests';
 import projectsApp from './routes/projects';

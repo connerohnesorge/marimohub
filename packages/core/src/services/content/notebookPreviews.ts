@@ -1,11 +1,28 @@
 import { z } from 'zod';
-import { NotebookIdSchema, ProjectIdSchema, UserIdSchema, VersionIdSchema } from '../../schema';
+import {
+	NotebookIdSchema,
+	ProjectIdSchema,
+	SessionIdSchema,
+	UserIdSchema,
+	VersionIdSchema,
+} from '../../schema';
 import type { NotebookId, ProjectId } from '../../ids';
 
 export const PreviewIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
 export const PreviewSourceSchema = z.discriminatedUnion('type', [
-	z.strictObject({ type: z.literal('branch'), branch: z.string().min(1).max(250) }),
-	z.strictObject({ type: z.literal('commit'), commit: z.string().regex(/^[a-f0-9]{40}$/i) }),
+	z.strictObject({
+		type: z.literal('branch'),
+		branch: z
+			.string()
+			.min(1)
+			.max(250)
+			.regex(
+				// Git refs cannot contain ASCII controls or ref-expression operators.
+				// eslint-disable-next-line no-control-regex
+				/^(?!@(?:$|\{))(?![-/])(?!.*(?:\.\.|\/\/|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))[^/]+(?:\/[^/]+)*(?<![/.])$/,
+			),
+	}),
+	z.strictObject({ type: z.literal('commit'), commit: z.string().regex(/^[a-fA-F0-9]{40}$/) }),
 ]);
 export const PreviewCreateSchema = z.strictObject({
 	name: z.string().trim().min(1).max(100),
@@ -39,6 +56,17 @@ export const PreviewRecordSchema = z.object({
 		.object({ notebook_id: NotebookIdSchema, version_id: VersionIdSchema, commit: z.string() })
 		.optional(),
 	runtime_ids: z.array(NotebookIdSchema),
+	ready_runtime_ids: z.array(NotebookIdSchema).default([]),
+	admissions: z
+		.array(
+			z.object({
+				session_id: SessionIdSchema,
+				notebook_id: NotebookIdSchema,
+				expires_at: z.number(),
+				committed: z.boolean().default(false),
+			}),
+		)
+		.default([]),
 	garbage_ids: z.array(NotebookIdSchema).default([]),
 	cleanup_after: z.number().optional(),
 });

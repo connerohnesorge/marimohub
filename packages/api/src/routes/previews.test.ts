@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	createServices,
+	createSessionId,
+	NotFoundError,
+	ResourceExhaustedError,
 	paths,
 	PreviewCreateSchema,
 	sessionPersistsEdits,
@@ -97,7 +100,7 @@ async function create(input = body) {
 	const result = await expectOk<{ id: string }>(await api.request('POST', base, input));
 	return api.deps.services.previews.get(pid, nid, result.id);
 }
-async function userApi(role: 'app-user' | 'viewer' | 'editor' | 'manager', name = role) {
+async function userApi(role: 'app-user' | 'viewer' | 'editor' | 'manager', name: string = role) {
 	await api.deps.services.projects.addMember(pid, { user_id: uid(name) }, role, ACTOR);
 	return createTestApi({
 		bucket: api.bucket,
@@ -176,6 +179,9 @@ describe('Notebook previews', () => {
 			nid,
 		]);
 		const child = record.current!.notebook_id;
+		// Older replicas only know meta.json, so they cannot read or rewrite this runtime.
+		expect(await api.bucket.get(paths.project(pid).notebook(child).meta)).toBeNull();
+		expect(await api.bucket.get(paths.project(pid).notebook(child).previewMeta)).not.toBeNull();
 		for (const [method, suffix, input] of [
 			['GET', '', undefined],
 			['PATCH', '', { title: 'changed' }],
@@ -342,7 +348,7 @@ describe('Notebook previews', () => {
 		await sweepPreviews(api.deps);
 		expect((await api.deps.services.previews.get(pid, nid, record.id)).state).toBe('deleted');
 		for (const child of record.runtime_ids)
-			expect(await api.bucket.get(paths.project(pid).notebook(child).meta)).toBeNull();
+			expect(await api.bucket.get(paths.project(pid).notebook(child).previewMeta)).toBeNull();
 		await expectError(
 			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
 			404,
@@ -394,6 +400,10 @@ describe('Notebook previews', () => {
 			compartments: ['review'],
 		});
 		await api.bucket.put(key, JSON.stringify({ ...meta, status: 'deleted' }));
+		await expectError(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+			404,
+		);
 		await expect(api.deps.services.notebooks.getSecurityLabels(pid, child)).rejects.toThrow();
 		await sweepPreviews(api.deps);
 		expect((await api.deps.services.previews.get(pid, nid, record.id)).state).toBe('deleted');
@@ -515,7 +525,7 @@ describe('Notebook previews', () => {
 		const pruned = await api.deps.services.previews.get(pid, nid, original.id);
 		expect(pruned.runtime_ids).toEqual([updated.current!.notebook_id]);
 		expect(
-			await api.bucket.get(paths.project(pid).notebook(original.current!.notebook_id).meta),
+			await api.bucket.get(paths.project(pid).notebook(original.current!.notebook_id).previewMeta),
 		).toBeNull();
 		await api.deps.services.previews.retire(pruned);
 		vi.useFakeTimers();
@@ -581,6 +591,23 @@ describe('Preview failure recovery and boundaries', () => {
 	it.each([
 		{ name: 'empty name', input: { ...body, name: '  ' } },
 		{ name: 'empty branch', input: { ...body, source: { type: 'branch', branch: '' } } },
+		...[
+			'bad..branch',
+			'bad@{branch',
+			'bad.lock',
+			'.hidden/ref',
+			'bad ref',
+			'bad~ref',
+			'/bad',
+			'bad/',
+			'bad//ref',
+			'bad.',
+			'-bad',
+			'@',
+		].map((branch) => ({
+			name: `invalid branch ${branch}`,
+			input: { ...body, source: { type: 'branch', branch } },
+		})),
 		{ name: 'short SHA', input: { ...body, source: { type: 'commit', commit: 'abcdef' } } },
 		{
 			name: 'mixed selectors',
@@ -720,6 +747,7 @@ describe('Preview failure recovery and boundaries', () => {
 			await api.request('POST', `${base}/${created.id}/sessions`, { mode: 'edit' }),
 		);
 		vi.setSystemTime(expires);
+		expect(await expectOk(await api.request('GET', base))).toEqual([]);
 		await expectError(await api.request('GET', `${base}/${created.id}`), 404);
 		await expectError(
 			await api.request('POST', `${base}/${created.id}/sessions`, { mode: 'app' }),
@@ -806,7 +834,9 @@ describe('Preview failure recovery and boundaries', () => {
 		expect(record.preparation).toBe('failed');
 		expect(record.current).toBeUndefined();
 		const failedRuntime = record.runtime_ids[0];
-		expect(await api.bucket.get(paths.project(pid).notebook(failedRuntime).meta)).not.toBeNull();
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(failedRuntime).previewMeta),
+		).not.toBeNull();
 		writes.mockRestore();
 		const recovered = await api.deps.services.previews.reconcile(
 			record,
@@ -848,5 +878,190 @@ describe('Preview failure recovery and boundaries', () => {
 			updated.current!.notebook_id,
 		]);
 		expect(await api.bucket.get(paths.project(pid).notebook(session.notebook_id).meta)).toBeNull();
+	});
+});
+
+describe('Preview admission fencing', () => {
+	it('enforces the preview-wide limit through launches and reuses reclaimed capacity', async () => {
+		const record = await create();
+		const sessions: Session[] = [];
+		for (let i = 0; i < 10; i++) {
+			const reviewer = await userApi('editor', `reviewer-${i}`);
+			sessions.push(
+				await expectOk<Session>(
+					await reviewer.request('POST', `${base}/${record.id}/sessions`, { mode: 'edit' }),
+				),
+			);
+		}
+		await expectError(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'edit' }),
+			429,
+		);
+		const first = sessions[0];
+		await expectOk(
+			await api.request(
+				'DELETE',
+				`/projects/${pid}/notebooks/${first.notebook_id}/sessions/${first.session_id}`,
+			),
+		);
+		await expectOk(await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'edit' }));
+		expect((await api.deps.services.previews.get(pid, nid, record.id)).admissions).toHaveLength(10);
+	});
+
+	it('releases an unused reservation when the project app cap rejects provisioning', async () => {
+		api = createTestApi({
+			bucket: api.bucket,
+			compute: api.deps.compute,
+			deps: {
+				sourceControl: api.deps.sourceControl,
+				policy: { maxAppsPerProject: 1 },
+			},
+		});
+		const record = await create();
+		const first = await expectOk<Session>(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+		);
+		head = NEXT;
+		await api.deps.services.previews.reconcile(record, api.deps.sourceControl, true);
+		await expectError(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+			429,
+		);
+		expect((await api.deps.services.previews.get(pid, nid, record.id)).admissions).toEqual([
+			expect.objectContaining({ session_id: first.session_id }),
+		]);
+	});
+
+	it('rejects a missing ownership ledger instead of deleting an untracked runtime', async () => {
+		const record = await create();
+		const key = `_system/previews/${pid}/${nid}/${record.id}.json`;
+		const { runtime_ids: _runtimeIds, ...corrupt } = record;
+		await api.bucket.put(key, JSON.stringify(corrupt));
+		await expect(api.deps.services.previews.get(pid, nid, record.id)).rejects.toThrow(
+			'Stored data is temporarily unavailable',
+		);
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
+		).not.toBeNull();
+	});
+
+	it('atomically admits only one concurrent contender for the last slot', async () => {
+		const record = await create();
+		const service = api.deps.services.previews;
+		for (let i = 0; i < 9; i++)
+			await service.reserveAdmission(record, record.current!.notebook_id, createSessionId(), 10);
+		const outcomes = await Promise.allSettled(
+			Array.from({ length: 2 }, () =>
+				service.reserveAdmission(record, record.current!.notebook_id, createSessionId(), 10),
+			),
+		);
+		expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+		const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+		expect(rejected).toMatchObject({ reason: expect.any(ResourceExhaustedError) });
+		expect((await service.get(pid, nid, record.id)).admissions).toHaveLength(10);
+	});
+
+	it('retains an old runtime when admission wins after the prune session scan', async () => {
+		const record = await create();
+		head = NEXT;
+		const service = api.deps.services.previews;
+		const updated = await service.reconcile(record, api.deps.sourceControl, true);
+		const old = record.current!.notebook_id;
+		const sid = createSessionId();
+		await service.prune(
+			updated,
+			async (runtime) => {
+				expect(runtime).toBe(old);
+				await service.reserveAdmission(updated, old, sid, 10);
+				return false;
+			},
+			async () => {
+				throw new Error('Admitted runtime must not be retired');
+			},
+		);
+		expect((await service.get(pid, nid, record.id)).runtime_ids).toContain(old);
+		expect(await api.bucket.get(paths.project(pid).notebook(old).previewMeta)).not.toBeNull();
+	});
+
+	it('rejects a delayed admission after pruning fenced the old runtime', async () => {
+		const record = await create();
+		head = NEXT;
+		const service = api.deps.services.previews;
+		const updated = await service.reconcile(record, api.deps.sourceControl, true);
+		await service.prune(
+			updated,
+			async () => false,
+			async () => true,
+		);
+		await expect(
+			service.reserveAdmission(record, record.current!.notebook_id, createSessionId(), 10),
+		).rejects.toThrow(NotFoundError);
+	});
+
+	it('does not reap a reservation that commits after an expired reservation scan', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		const record = await create();
+		const service = api.deps.services.previews;
+		const sid = createSessionId();
+		await service.reserveAdmission(record, record.current!.notebook_id, sid, 10);
+		const reserved = await service.get(pid, nid, record.id);
+		vi.setSystemTime(Date.now() + 600_001);
+		const reaped = await service.reapAdmissions(reserved, async (): Promise<undefined> => {
+			await service.commitAdmission(reserved, sid);
+		});
+		expect(reaped.admissions).toEqual([
+			expect.objectContaining({ session_id: sid, committed: true }),
+		]);
+		const reclaimed = await service.reapAdmissions(reaped, async () => false);
+		expect(reclaimed.admissions).toEqual([]);
+	});
+
+	it('reaps crashed reservations and fences their delayed session record commits', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		const record = await create();
+		const service = api.deps.services.previews;
+		const sid = createSessionId();
+		await service.reserveAdmission(record, record.current!.notebook_id, sid, 10);
+		const reserved = await service.get(pid, nid, record.id);
+		vi.setSystemTime(Date.now() + 600_001);
+		expect(
+			(
+				await service.reapAdmissions(
+					reserved,
+					vi.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
+				)
+			).admissions,
+		).toEqual([]);
+		await expect(service.commitAdmission(reserved, sid)).rejects.toThrow(NotFoundError);
+	});
+
+	it('rejects a partially prepared runtime while continuing to serve its published predecessor', async () => {
+		const original = await create();
+		const put = api.bucket.put.bind(api.bucket);
+		const started = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		vi.spyOn(api.bucket, 'put').mockImplementation(async (key, bytes, options) => {
+			if (key.endsWith('/workspace/notebook.py')) {
+				started.resolve();
+				await proceed.promise;
+			}
+			return put(key, bytes, options);
+		});
+		head = NEXT;
+		const updating = api.deps.services.previews.reconcile(original, api.deps.sourceControl, true);
+		await started.promise;
+		try {
+			const record = await api.deps.services.previews.get(pid, nid, original.id);
+			const reserved = record.runtime_ids.find((id) => id !== original.current!.notebook_id)!;
+			await expect(api.deps.services.notebooks.getNotebookMeta(pid, reserved)).rejects.toThrow(
+				NotFoundError,
+			);
+			await expect(
+				api.deps.services.notebooks.getNotebookMeta(pid, original.current!.notebook_id),
+			).resolves.toMatchObject({ id: original.current!.notebook_id });
+		} finally {
+			proceed.resolve();
+			await updating;
+		}
 	});
 });

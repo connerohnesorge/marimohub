@@ -82,20 +82,24 @@ async function scheduleUnavailableAppAlerts(
 /**
  * Node-side maintenance loop — the replacement for the Cloudflare Workers
  * `scheduled()` cron. Each run, in order:
- *  1. `expireStale()`     — flip sessions with stale heartbeats to `expired`.
- *  2. `reconcile()`       — cross-check records against the compute provider:
+ *  1. `sweepAppPools()` — reconcile app assignments and retire idle pool members.
+ *  2. `expireStale()` — flip sessions with stale heartbeats to `expired`.
+ *  3. `sweepPreviews()` — refresh sources, expire previews, and reclaim revisions.
+ *  4. `reconcile()` — cross-check records against the compute provider:
  *     tear down sandboxes left running by terminal records (the billing leak),
  *     mark records whose sandbox has vanished as terminated, reap orphans.
- *  3. `reapTerminated()`  — delete terminal records past their retention window.
- *  4. `expireSnapshots()` — prune catalog snapshots past retention (keeping
+ *  5. `reapTerminated()` — delete terminal records past their retention window.
+ *  6. `expireSnapshots()` — prune catalog snapshots past retention (keeping
  *     current/previous + a recent floor) so the bucket doesn't grow unbounded.
- *  5. `pruneEvents()`     — drop event-day folders past retention.
- *  6. `pruneExpiredPayloads()` — delete expired proposal change bytes while
+ *  7. `pruneEvents()` / `idempotency.prune()` — drop expired events and request records.
+ *  8. `pruneExpiredPayloads()` — delete expired proposal change bytes while
  *     retaining proposal and publication metadata.
- *  7. `claimPendingInvites()` — replace resolvable email invites with user ids.
- *  8. `sweepDeletedProjects()` / `sweepDeletedNotebooks()` — purge the storage of
+ *  9. `claimPendingInvites()` — replace resolvable email invites with user ids.
+ * 10. `sweepDeletedProjects()` / `sweepDeletedNotebooks()` — purge the storage of
  *     soft-deleted projects/notebooks past their grace period. Projects first, so
  *     a deleted project's notebooks are reclaimed by the project subtree wipe.
+ * 11. `jobs.prune()` — prune retained job runs and their maintenance markers.
+ * 12. `reapFilesystemSnapshots()` — reclaim snapshots orphaned by notebook deletion.
  *
  * All operations are idempotent. The deployment runs this on a single replica
  * (a dedicated `replicas: 1` Deployment, gated by MARIMOHUB_RUN_MAINTENANCE),

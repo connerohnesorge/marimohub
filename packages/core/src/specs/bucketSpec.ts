@@ -191,6 +191,15 @@ const OBJECTS: BucketObject[] = [
 		mutability: 'last-writer-wins',
 		tag: 'notebook',
 	},
+
+	{
+		name: 'PreviewRuntimeMeta',
+		key: notebook.previewMeta,
+		schema: NotebookMetaSchema,
+		summary: 'Immutable runtime metadata isolated from older notebook writers.',
+		mutability: 'immutable',
+		tag: 'notebook',
+	},
 	{
 		name: 'Source',
 		key: notebook.source,

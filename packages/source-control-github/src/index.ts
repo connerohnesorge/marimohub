@@ -148,7 +148,11 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 					label: `${commit.slice(0, 12)} ${nestedString(item, 'commit', 'message').split('\n')[0]}`,
 				};
 			})
-			.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()))
+			.filter(
+				(item) =>
+					item.label.toLowerCase().includes(query.toLowerCase()) ||
+					item.commit.toLowerCase().startsWith(query.toLowerCase()),
+			)
 			.slice(0, 30);
 	}
 

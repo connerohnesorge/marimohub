@@ -2788,6 +2788,7 @@ components:
                   type: string
                   minLength: 1
                   maxLength: 250
+                  pattern: ^(?!@(?:$|\{))(?![-/])(?!.*(?:\.\.|\/\/|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))[^/]+(?:\/[^/]+)*(?<![/.])$
               required:
                 - type
                 - branch
@@ -2800,7 +2801,7 @@ components:
                     - commit
                 commit:
                   type: string
-                  pattern: ^[a-f0-9]{40}$/i
+                  pattern: ^[a-fA-F0-9]{40}$
               required:
                 - type
                 - commit
@@ -12354,6 +12355,7 @@ paths:
                           type: string
                           minLength: 1
                           maxLength: 250
+                          pattern: ^(?!@(?:$|\{))(?![-/])(?!.*(?:\.\.|\/\/|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))[^/]+(?:\/[^/]+)*(?<![/.])$
                       required:
                         - type
                         - branch
@@ -12366,7 +12368,7 @@ paths:
                             - commit
                         commit:
                           type: string
-                          pattern: ^[a-f0-9]{40}$/i
+                          pattern: ^[a-fA-F0-9]{40}$
                       required:
                         - type
                         - commit

@@ -240,31 +240,40 @@ export class NotebookService {
 
 	async getNotebook(projectId: ProjectId, notebookId: NotebookId): Promise<NotebookDetail> {
 		const nb = paths.project(projectId).notebook(notebookId);
-		const [metaObj, readmeObj, sourceObj] = await Promise.all([
-			this.bucket.get(nb.meta),
+		const [storedMeta, readmeObj, sourceObj] = await Promise.all([
+			this.readNotebookMeta(projectId, notebookId),
 			this.bucket.get(nb.readme),
 			this.bucket.get(nb.source),
 		]);
 
-		if (!metaObj || !sourceObj) {
+		if (!sourceObj) {
 			throw new NotFoundError(`Notebook ${notebookId} not found`);
 		}
 
-		const meta = await this.resolvePreviewMeta(
-			projectId,
-			await readStored(NotebookMetaSchema, metaObj, nb.meta),
-		);
+		const meta = await this.resolvePreviewMeta(projectId, storedMeta);
 		const source = await readStored(SourceSchema, sourceObj, nb.source);
 		const readme = readmeObj ? await readmeObj.text() : null;
 
 		return { meta, readme, source };
 	}
 
+	private async readNotebookMeta(
+		projectId: ProjectId,
+		notebookId: NotebookId,
+	): Promise<NotebookMeta> {
+		const nb = paths.project(projectId).notebook(notebookId);
+		const normal = await this.bucket.get(nb.meta);
+		if (normal) return readStored(NotebookMetaSchema, normal, nb.meta);
+		// Old replicas cannot strip the preview marker by rewriting ordinary meta.json.
+		const object = await this.bucket.get(nb.previewMeta);
+		if (!object) throw new NotFoundError(`Notebook ${notebookId} not found`);
+		const meta = await readStored(NotebookMetaSchema, object, nb.previewMeta);
+		if (!meta.preview) throw new NotFoundError('Preview not found');
+		return meta;
+	}
+
 	async getNotebookMeta(projectId: ProjectId, notebookId: NotebookId): Promise<NotebookMeta> {
-		const key = paths.project(projectId).notebook(notebookId).meta;
-		const obj = await this.bucket.get(key);
-		if (!obj) throw new NotFoundError(`Notebook ${notebookId} not found`);
-		return this.resolvePreviewMeta(projectId, await readStored(NotebookMetaSchema, obj, key));
+		return this.resolvePreviewMeta(projectId, await this.readNotebookMeta(projectId, notebookId));
 	}
 
 	private async resolvePreviewMeta(
@@ -282,7 +291,8 @@ export class NotebookService {
 		if (
 			record.state !== 'active' ||
 			Date.parse(record.expires_at) <= Date.now() ||
-			!record.runtime_ids.includes(notebookId)
+			!record.runtime_ids.includes(notebookId) ||
+			(!record.ready_runtime_ids.includes(notebookId) && record.current?.notebook_id !== notebookId)
 		)
 			throw new NotFoundError('Preview not found');
 		return {

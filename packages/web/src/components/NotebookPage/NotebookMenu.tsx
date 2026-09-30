@@ -84,14 +84,6 @@ export function NotebookMenu({
 			separatorBefore: options.length > 0,
 		});
 
-	if (options.length === 0) {
-		return (
-			<span className="truncate px-2 text-[13px] font-medium" title={title}>
-				{title}
-			</span>
-		);
-	}
-
 	return (
 		<>
 			<RouterLinks navigate={(href) => void navigate(href, { state: { title } })}>

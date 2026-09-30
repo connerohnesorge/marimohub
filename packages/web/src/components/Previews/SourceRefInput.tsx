@@ -21,7 +21,9 @@ export function SourceRefInput({
 		? 'Searching GitHub…'
 		: query.isError
 			? 'Suggestions are unavailable. You can still enter a value.'
-			: 'No suggestions. Enter a branch name or full commit SHA.';
+			: type === 'branch'
+				? 'No suggestions. Enter a branch name.'
+				: 'No suggestions. Enter a full commit SHA.';
 	return (
 		<div className="space-y-2">
 			<ComboBox

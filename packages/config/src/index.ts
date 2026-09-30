@@ -653,6 +653,10 @@ export function createFromEnv(
 	)
 		throw new ConfigError(
 			'MARIMOHUB_PREVIEW_COMPUTE_PROFILE must name an available compute profile',
+			{
+				variable: 'MARIMOHUB_PREVIEW_COMPUTE_PROFILE',
+				docs: 'docs/configuration.md#compute',
+			},
 		);
 	const editorSandboxSharing = parseEditorSandboxSharing(env);
 	const userHome = makeSandboxUserHome(env, editorSandboxSharing);

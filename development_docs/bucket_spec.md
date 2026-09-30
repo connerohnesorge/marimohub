@@ -1560,18 +1560,21 @@ Pool CAS transitions remain authoritative when maintenance passes overlap.
 ## Notebook preview records
 
 `NotebookPreviewService` owns each CAS record at `_system/previews/{pid}/{nid}/{preview-id}.json`.
-Records hold the source, prepared revision, and runtime notebook IDs. Deletion is permanent.
+Records hold the source, prepared revision, runtime ownership ledger, and session admission reservations. Deletion is permanent.
 Retained tombstones prevent idempotency keys from recreating deleted previews.
 
 `_system/preview-maintenance/{pid}/{nid}/{preview-id}.json` indexes records for reconciliation.
 Creation writes the marker first. Orphan markers remain for one day to tolerate interrupted creation.
 After confirmed deletion and a 15-minute cleanup grace period, cleanup removes the marker but retains the preview record.
 
-Each revision has a unique internal notebook ID, immutable workspace, and `meta.preview` ownership.
+Each revision has a unique internal notebook ID, immutable workspace, and `preview` ownership marker in `preview-runtime.json`.
+Ordinary `meta.json` is absent, preventing older replicas from rewriting metadata without preview protections.
 These notebooks never enter catalog snapshots or share pools, source artifacts, or editors with the parent.
-Metadata reads use current parent labels and configuration, and reject inactive owners.
+Metadata reads require a published revision, use current parent labels and configuration, and reject inactive owners.
 Normal notebook APIs reject internal IDs. Session APIs allow authorized access to running preview sessions.
 
 Reconciliation retains revisions with unreclaimed sessions. It moves unused revisions into `garbage_ids` before deleting their artifacts.
-Late admissions fail the ownership check. Cleanup waits for starting sessions and retries failed destruction without capturing edits.
+Admission reservations and pruning share the preview CAS record, so admitted revisions cannot be pruned before session creation.
+Committed reservations remain until sandbox reclamation; abandoned reservations without sessions expire after ten minutes.
+Late admissions fail the ownership check. Cleanup defers fresh starting sessions and retries failed destruction without capturing edits.
 App pool tombstones remain under their normal owner.

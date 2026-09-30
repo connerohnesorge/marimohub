@@ -13,15 +13,24 @@ async function retirePreviewRuntime(
 	nid: NotebookPreview['notebook_id'],
 ): Promise<boolean> {
 	let complete = true;
-	for (const session of await deps.services.sessions.listSessions(nid)) {
-		if (session.status === 'starting') {
+	for (const session of await deps.services.sessions.listByProject(pid, nid)) {
+		if (
+			session.status === 'starting' &&
+			Date.now() - Date.parse(session.started_at) <
+				Math.max(deps.sandbox.startupTimeoutMs ?? 900_000, 900_000)
+		) {
 			complete = false;
 			continue;
 		}
 		if (session.sandbox_reclaimed_at) continue;
 		try {
-			await deps.services.sessions.beginTerminating(pid, session.session_id);
-			await sessionRetirer(deps).retire(session, { captureBeforeDestroy: false });
+			const result = await deps.services.sessions.beginTerminating(pid, session.session_id);
+			if (!result.transitioned && result.session.status === 'terminating') {
+				complete = false;
+				continue;
+			}
+			if (result.session.sandbox_reclaimed_at) continue;
+			await sessionRetirer(deps).retire(result.session, { captureBeforeDestroy: false });
 			if (!(await deps.services.sessions.getSession(pid, session.session_id)).sandbox_reclaimed_at)
 				complete = false;
 		} catch (error) {
@@ -52,21 +61,37 @@ export async function sweepPreviews(deps: ApiDeps): Promise<void> {
 						if (error instanceof NotFoundError) return null;
 						throw error;
 					});
-				record =
-					!project || project.status === 'deleted' || !parent || parent.status === 'deleted'
-						? await deps.services.previews.retire(record)
-						: await deps.services.previews.reconcile(record, deps.sourceControl);
+				if (
+					!project ||
+					project.status === 'deleted' ||
+					!parent ||
+					parent.status === 'deleted' ||
+					Date.parse(record.expires_at) <= Date.now()
+				)
+					record = await deps.services.previews.retire(record);
+				else if (deps.sourceControl)
+					record = await deps.services.previews.reconcile(record, deps.sourceControl);
 			}
 			if (record.state !== 'active') await cleanupPreview(deps, record);
-			else
+			else {
+				record = await deps.services.previews.reapAdmissions(record, async (sid) => {
+					try {
+						return !(await deps.services.sessions.getSession(record.project_id, sid))
+							.sandbox_reclaimed_at;
+					} catch (error) {
+						if (error instanceof NotFoundError) return;
+						throw error;
+					}
+				});
 				await deps.services.previews.prune(
 					record,
 					async (nid) =>
-						(await deps.services.sessions.listSessions(nid)).some(
+						(await deps.services.sessions.listByProject(record.project_id, nid)).some(
 							(session) => !session.sandbox_reclaimed_at,
 						),
 					(pid, nid) => retirePreviewRuntime(deps, pid, nid),
 				);
+			}
 		} catch (error) {
 			logOperationalError(
 				'preview_reconciliation_failed',
@@ -82,9 +107,26 @@ export async function retireNotebookPreviews(
 	pid: NotebookPreview['project_id'],
 	nid?: NotebookPreview['notebook_id'],
 ): Promise<void> {
-	const records = nid
-		? await deps.services.previews.list(pid, nid)
-		: (await deps.services.previews.all()).filter((item) => item.project_id === pid);
-	for (const record of records)
-		await cleanupPreview(deps, await deps.services.previews.retire(record));
+	const logFailure = (error: unknown, previewId?: string) =>
+		logOperationalError(
+			'preview_retirement_failed',
+			{ operation: 'preview.retire', project_id: pid, notebook_id: nid, preview_id: previewId },
+			error,
+		);
+	let records: NotebookPreview[];
+	try {
+		records = nid
+			? await deps.services.previews.list(pid, nid)
+			: (await deps.services.previews.all()).filter((item) => item.project_id === pid);
+	} catch (error) {
+		logFailure(error);
+		return;
+	}
+	for (const record of records) {
+		try {
+			await cleanupPreview(deps, await deps.services.previews.retire(record));
+		} catch (error) {
+			logFailure(error, record.id);
+		}
+	}
 }

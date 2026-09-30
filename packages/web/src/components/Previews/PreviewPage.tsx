@@ -2,7 +2,6 @@ import { isNotFoundError } from '@/api/request';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
-import { toast } from 'sonner';
 import { apiClient, apiData } from '@/api/client';
 import { usePreviewQuery } from '@/api/previews';
 import { Button } from '@/components/ui';
@@ -10,6 +9,8 @@ import { NotebookFrame } from '@/components/NotebookPage/NotebookFrame';
 import { useNotebookFrameLocation } from '@/hooks/useNotebookFrameLocation';
 import { useTheme } from '@/context/ThemeContext';
 import { useAuth } from '@/context/AuthContext';
+import { SESSION_LIFECYCLE_TIMEOUT_MS } from '@/api/hooks';
+import { copyPreviewLink } from './copyPreviewLink';
 import { PreviewBadge } from './PreviewsPage';
 
 type Runtime = {
@@ -68,6 +69,7 @@ function PreviewRuntime({
 				await apiData(
 					apiClient.DELETE('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}', {
 						params: { path: { pid, nid: runtime.nid, sid: runtime.sid } },
+						timeout: SESSION_LIFECYCLE_TIMEOUT_MS,
 					}),
 				).catch((error: unknown) => {
 					if (!isNotFoundError(error)) throw error;
@@ -77,6 +79,7 @@ function PreviewRuntime({
 				apiClient.POST('/api/v1/projects/{pid}/notebooks/{nid}/previews/{preview_id}/sessions', {
 					params: { path: { pid, nid, preview_id: previewId } },
 					body: { mode, ...(mode === 'app' ? { app_visit_id: crypto.randomUUID() } : {}) },
+					timeout: SESSION_LIFECYCLE_TIMEOUT_MS,
 				}),
 			);
 		},
@@ -108,8 +111,8 @@ function PreviewRuntime({
 		retry: false,
 		gcTime: 0,
 	});
-	useEffect(
-		() => () => {
+	useEffect(() => {
+		const leave = () => {
 			if (runtime?.assignment)
 				void apiClient
 					.POST('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave', {
@@ -118,9 +121,16 @@ function PreviewRuntime({
 						keepalive: true,
 					})
 					.catch(() => {});
-		},
-		[pid, runtime],
-	);
+		};
+		const onPageHide = (event: PageTransitionEvent) => {
+			if (!event.persisted) leave();
+		};
+		window.addEventListener('pagehide', onPageHide);
+		return () => {
+			window.removeEventListener('pagehide', onPageHide);
+			leave();
+		};
+	}, [pid, runtime]);
 	const { theme } = useTheme();
 	const sandboxUrl =
 		!session.isError && !preview.isError && session.data?.status === 'running'
@@ -144,15 +154,7 @@ function PreviewRuntime({
 				<h1 className="font-medium">{record.name}</h1>
 				<PreviewBadge preview={record} />
 				<span className="text-xs text-muted-foreground">Latest: {record.commit?.slice(0, 12)}</span>
-				<Button
-					variant="default"
-					onPress={() => {
-						void navigator.clipboard
-							.writeText(record.url)
-							.then(() => toast.success('Preview link copied'))
-							.catch(() => toast.error('Unable to copy the link'));
-					}}
-				>
+				<Button variant="default" onPress={() => void copyPreviewLink(record.url)}>
 					Copy link
 				</Button>
 				{record.can.app && (

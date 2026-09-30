@@ -595,7 +595,7 @@ export function createServices(
 		projects,
 		notebooks,
 		proposals,
-		previews: new NotebookPreviewService(bucket, notebooks),
+		previews: wrap('NotebookPreviewService', new NotebookPreviewService(bucket, notebooks)),
 		sessions,
 		runtimeInspection,
 		jobs,

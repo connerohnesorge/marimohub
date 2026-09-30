@@ -125,7 +125,9 @@ describe('ConfiguredSourceControlRegistry', () => {
 		])
 			await expect(invoke()).rejects.toThrow('Repository denied');
 		expect(authorize).toHaveBeenCalledTimes(4);
-		expect(authorize).toHaveBeenCalledWith('private/repo', projectId);
+		expect(authorize.mock.calls).toEqual(
+			Array.from({ length: 4 }, () => ['private/repo', projectId]),
+		);
 		expect(adapter.listBranches).not.toHaveBeenCalled();
 		expect(adapter.getPullRequest).not.toHaveBeenCalled();
 	});
