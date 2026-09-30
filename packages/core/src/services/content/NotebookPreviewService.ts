@@ -274,7 +274,15 @@ export class NotebookPreviewService {
 			if (published.current?.notebook_id !== runtimeId) await deleteByPrefix(this.bucket, nb.base);
 			return published;
 		} catch (error) {
-			if (error instanceof NotFoundError) return this.retire(record);
+			if (error instanceof NotFoundError) {
+				const parent = await this.notebooks
+					.getNotebookMeta(record.project_id, record.notebook_id)
+					.catch((failure) => {
+						if (failure instanceof NotFoundError) return null;
+						throw failure;
+					});
+				if (!parent || parent.status === 'deleted') return this.retire(record);
+			}
 			return this.mutateLeased(record, token, (current) => ({
 				...current,
 				preparation: 'failed',
@@ -292,9 +300,10 @@ export class NotebookPreviewService {
 		const removable = new Set<SessionId>();
 		for (const entry of record.admissions) {
 			const retained = await isRetained(entry.session_id);
+			// Committed sessions disappear only after reclamation; pending starts may not exist yet.
 			if (
 				retained === false ||
-				(!entry.committed && retained === undefined && entry.expires_at <= Date.now())
+				(retained === undefined && (entry.committed || entry.expires_at <= Date.now()))
 			)
 				removable.add(entry.session_id);
 		}

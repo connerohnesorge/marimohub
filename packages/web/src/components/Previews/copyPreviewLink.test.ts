@@ -23,6 +23,7 @@ describe('copyPreviewLink', () => {
 		});
 		await copyPreviewLink('https://hub.example/preview');
 		expect(toast.error).toHaveBeenCalledWith('Unable to copy the link');
+		expect(toast.success).not.toHaveBeenCalled();
 	});
 
 	it('copies the share URL and reports success', async () => {

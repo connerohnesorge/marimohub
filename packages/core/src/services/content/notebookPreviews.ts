@@ -15,7 +15,6 @@ export const PreviewSourceSchema = z.discriminatedUnion('type', [
 		branch: z
 			.string()
 			.min(1)
-			.max(250)
 			.regex(
 				// Git refs cannot contain ASCII controls or ref-expression operators.
 				// eslint-disable-next-line no-control-regex
@@ -51,7 +50,12 @@ export const PreviewRecordSchema = z.object({
 	preparation: z.enum(['pending', 'preparing', 'ready', 'failed']),
 	checked_at: z.iso.datetime().optional(),
 	error: z.string().optional(),
-	lease: z.object({ token: z.string(), expires_at: z.number() }).optional(),
+	lease: z
+		.object({
+			token: z.string(),
+			expires_at: z.number().describe('Lease deadline in milliseconds since the Unix epoch.'),
+		})
+		.optional(),
 	current: z
 		.object({ notebook_id: NotebookIdSchema, version_id: VersionIdSchema, commit: z.string() })
 		.optional(),
@@ -62,13 +66,18 @@ export const PreviewRecordSchema = z.object({
 			z.object({
 				session_id: SessionIdSchema,
 				notebook_id: NotebookIdSchema,
-				expires_at: z.number(),
+				expires_at: z
+					.number()
+					.describe('Uncommitted admission deadline in milliseconds since the Unix epoch.'),
 				committed: z.boolean().default(false),
 			}),
 		)
 		.default([]),
 	garbage_ids: z.array(NotebookIdSchema).default([]),
-	cleanup_after: z.number().optional(),
+	cleanup_after: z
+		.number()
+		.describe('Earliest maintenance-marker removal time in milliseconds since the Unix epoch.')
+		.optional(),
 });
 export const PreviewMaintenanceSchema = PreviewRecordSchema.pick({
 	project_id: true,

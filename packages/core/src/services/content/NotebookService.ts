@@ -1308,9 +1308,7 @@ export class NotebookService {
 		notebookId: NotebookId,
 		snapshot: FsSnapshot | null,
 	): Promise<{ previous: FsSnapshot | null }> {
-		const metaKey = paths.project(projectId).notebook(notebookId).meta;
-		const metaObject = await this.bucket.get(metaKey);
-		if (metaObject && (await readStored(NotebookMetaSchema, metaObject, metaKey)).preview)
+		if ((await this.readNotebookMeta(projectId, notebookId)).preview)
 			throw new ConflictError('Preview sessions cannot persist changes');
 		const previous = await this.getFsSnapshot(projectId, notebookId);
 		const nb = paths.project(projectId).notebook(notebookId);

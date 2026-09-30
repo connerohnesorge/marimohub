@@ -71,24 +71,23 @@ describe('createFromEnv auth backend selection', () => {
 	it.each(['none', 'docker'])(
 		'identifies invalid preview profiles on %s in startup diagnostics',
 		(backend) => {
-			const boot = vi.fn(() =>
+			expect(() =>
 				createFromEnv({
 					...baseEnv,
 					MARIMOHUB_AUTH_BACKEND: 'dev',
 					MARIMOHUB_COMPUTE_BACKEND: backend,
 					MARIMOHUB_PREVIEW_COMPUTE_PROFILE: 'unknown',
 				}),
+			).toThrow(
+				expect.objectContaining({
+					name: 'ConfigError',
+					message: 'MARIMOHUB_PREVIEW_COMPUTE_PROFILE must name an available compute profile',
+					opts: {
+						variable: 'MARIMOHUB_PREVIEW_COMPUTE_PROFILE',
+						docs: 'docs/configuration.md#compute',
+					},
+				}),
 			);
-			expect(boot).toThrow(
-				'MARIMOHUB_PREVIEW_COMPUTE_PROFILE must name an available compute profile',
-			);
-			expect(boot.mock.results[0]?.value).toMatchObject({
-				name: 'ConfigError',
-				opts: {
-					variable: 'MARIMOHUB_PREVIEW_COMPUTE_PROFILE',
-					docs: 'docs/configuration.md#compute',
-				},
-			});
 		},
 	);
 

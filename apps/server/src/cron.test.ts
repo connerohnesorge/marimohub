@@ -76,6 +76,16 @@ describe('startMaintenance', () => {
 		});
 	});
 
+	it('sweeps previews before expiring session startup records', async () => {
+		const previews = vi.spyOn(deps.services.previews, 'all');
+		const expire = vi.spyOn(deps.services.sessions, 'expireStale');
+		stop = startMaintenance(deps, metrics);
+		await flushRun();
+		expect(previews).toHaveBeenCalledOnce();
+		expect(expire).toHaveBeenCalledOnce();
+		expect(previews.mock.invocationCallOrder[0]).toBeLessThan(expire.mock.invocationCallOrder[0]);
+	});
+
 	it('prunes job history in the maintenance cycle and reports the counts', async () => {
 		const project = await deps.services.projects.createProject(
 			{ name: 'p', description: '' },

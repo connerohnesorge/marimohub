@@ -14,8 +14,12 @@ async function retirePreviewRuntime(
 ): Promise<boolean> {
 	let complete = true;
 	for (const session of await deps.services.sessions.listByProject(pid, nid)) {
+		// Another maintenance cycle may have expired a session still provisioning.
 		if (
-			session.status === 'starting' &&
+			(session.status === 'starting' ||
+				(session.status === 'expired' &&
+					(!session.authorization_expires_at ||
+						Date.now() < Date.parse(session.authorization_expires_at)))) &&
 			Date.now() - Date.parse(session.started_at) <
 				Math.max(deps.sandbox.startupTimeoutMs ?? 900_000, 900_000)
 		) {

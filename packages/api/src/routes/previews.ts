@@ -248,7 +248,14 @@ app.openapi(create, async (c) => {
 	const { pid, nid } = c.req.valid('param');
 	const access = await manageable(deps, pid, nid, user);
 	const input = c.req.valid('json');
-	if (input.compute_profile) checkComputeProfile(deps.sandbox, input.compute_profile);
+	if (input.compute_profile) {
+		checkComputeProfile(deps.sandbox, input.compute_profile);
+		if (
+			input.compute_profile === 'default' &&
+			!deps.sandbox.computeProfiles?.some((profile) => profile.name === 'default')
+		)
+			input.compute_profile = undefined;
+	}
 	const record = await deps.services.previews.create(
 		pid,
 		nid,

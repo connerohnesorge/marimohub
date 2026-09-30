@@ -46,7 +46,7 @@ describe('Project — Notebook Actions: configuration', () => {
 		makeFetch({ notebooks: [{ ...notebook(), source_type: 'git' }] });
 		await renderProject();
 		await user.click(screen.getByRole('button', { name: /Notebook actions for/ }));
-		expect(screen.getByRole('menuitem', { name: 'Previews' })).toBeInTheDocument();
+		expect(await screen.findByRole('menuitem', { name: 'Previews' })).toBeInTheDocument();
 	});
 
 	it('opens the persisted workspace browser from the notebook menu', async () => {

@@ -71,7 +71,7 @@ function reader(
 }
 
 describe('GitHubAppPublisher reader', () => {
-	it('bounds branch completion and resolves only explicit full commit SHAs', async () => {
+	it('bounds branch completion and rejects non-SHA commit references', async () => {
 		const sha = 'a'.repeat(40);
 		const github = reader((url) => {
 			if (url.pathname === '/repos/owner/repo/branches') {
@@ -87,6 +87,18 @@ describe('GitHubAppPublisher reader', () => {
 		expect(await github.resolveCommit('owner/repo', sha)).toEqual({ commit: sha });
 		await expect(github.resolveCommit('owner/repo', 'main')).rejects.toThrow(ValidationError);
 	});
+
+	it.each([7, 39, 40])(
+		'resolves a %i-character commit reference to its canonical SHA',
+		async (length) => {
+			const sha = 'abcdef0123456789abcdef0123456789abcdef0123';
+			const ref = sha.slice(0, length);
+			const github = reader((url) =>
+				url.pathname === `/repos/owner/repo/commits/${ref}` ? response({ sha }) : null,
+			);
+			expect(await github.resolveCommit('owner/repo', ref)).toEqual({ commit: sha });
+		},
+	);
 
 	it('matches recent commit subjects and returns canonical SHA values', async () => {
 		const sha = 'a'.repeat(40);

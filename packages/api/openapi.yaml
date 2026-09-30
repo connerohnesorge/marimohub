@@ -2787,7 +2787,6 @@ components:
                 branch:
                   type: string
                   minLength: 1
-                  maxLength: 250
                   pattern: ^(?!@(?:$|\{))(?![-/])(?!.*(?:\.\.|\/\/|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))[^/]+(?:\/[^/]+)*(?<![/.])$
               required:
                 - type
@@ -12354,7 +12353,6 @@ paths:
                         branch:
                           type: string
                           minLength: 1
-                          maxLength: 250
                           pattern: ^(?!@(?:$|\{))(?![-/])(?!.*(?:\.\.|\/\/|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))[^/]+(?:\/[^/]+)*(?<![/.])$
                       required:
                         - type

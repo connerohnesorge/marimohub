@@ -1,15 +1,16 @@
+import { APP_HEARTBEAT_INTERVAL_MS } from '@marimo-hub/core/constants';
 import { isNotFoundError } from '@/api/request';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
-import { apiClient, apiData } from '@/api/client';
+import { apiClient, apiData, ApiRequestError } from '@/api/client';
 import { usePreviewQuery } from '@/api/previews';
 import { Button } from '@/components/ui';
 import { NotebookFrame } from '@/components/NotebookPage/NotebookFrame';
 import { useNotebookFrameLocation } from '@/hooks/useNotebookFrameLocation';
 import { useTheme } from '@/context/ThemeContext';
 import { useAuth } from '@/context/AuthContext';
-import { SESSION_LIFECYCLE_TIMEOUT_MS } from '@/api/hooks';
+import { SESSION_LIFECYCLE_TIMEOUT_MS, useCapabilitiesQuery } from '@/api/hooks';
 import { copyPreviewLink } from './copyPreviewLink';
 import { PreviewBadge } from './PreviewsPage';
 
@@ -21,6 +22,14 @@ type Runtime = {
 	version?: string;
 	assignment?: { visit_id: string; generation: string };
 };
+function isTerminalSessionError(error: unknown): boolean {
+	return (
+		error instanceof ApiRequestError &&
+		error.status !== undefined &&
+		[403, 404, 409].includes(error.status)
+	);
+}
+
 function readRuntime(key: string, userId: string): Runtime | null {
 	try {
 		const value = JSON.parse(sessionStorage.getItem(key) ?? 'null') as Runtime | null;
@@ -63,6 +72,12 @@ function PreviewRuntime({
 	const storageKey = `preview-session:${userId}:${pid}:${nid}:${previewId}`;
 	const [runtime, setRuntime] = useState<Runtime | null>(() => readRuntime(storageKey, userId));
 	const preview = usePreviewQuery(pid, nid, previewId);
+	const capabilities = useCapabilitiesQuery();
+	const heartbeatInterval =
+		runtime?.mode === 'app'
+			? (capabilities.data?.app_pool?.heartbeat_interval_seconds ??
+					APP_HEARTBEAT_INTERVAL_MS / 1000) * 1000
+			: 15_000;
 	const start = useMutation({
 		mutationFn: async (mode: 'app' | 'edit') => {
 			if (runtime?.mode === 'edit')
@@ -98,7 +113,15 @@ function PreviewRuntime({
 		},
 	});
 	const session = useQuery({
-		queryKey: ['preview-session', userId, pid, previewId, runtime?.nid, runtime?.sid],
+		queryKey: [
+			'preview-session',
+			userId,
+			pid,
+			previewId,
+			runtime?.nid,
+			runtime?.sid,
+			runtime?.assignment?.visit_id,
+		],
 		queryFn: () =>
 			apiData(
 				apiClient.POST('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/heartbeat', {
@@ -107,7 +130,9 @@ function PreviewRuntime({
 				}),
 			),
 		enabled: !!runtime && !!preview.data && !preview.isError,
-		refetchInterval: 15_000,
+		refetchInterval: (query) =>
+			isTerminalSessionError(query.state.error) ? false : heartbeatInterval,
+		refetchIntervalInBackground: true,
 		retry: false,
 		gcTime: 0,
 	});
@@ -132,8 +157,9 @@ function PreviewRuntime({
 		};
 	}, [pid, runtime]);
 	const { theme } = useTheme();
+	const sessionEnded = isTerminalSessionError(session.error);
 	const sandboxUrl =
-		!session.isError && !preview.isError && session.data?.status === 'running'
+		!sessionEnded && !preview.isError && session.data?.status === 'running'
 			? session.data.sandbox_url
 			: undefined;
 	const frame = useNotebookFrameLocation(sandboxUrl, theme, runtime?.mode === 'app');
@@ -199,12 +225,16 @@ function PreviewRuntime({
 					{start.error.message}
 				</p>
 			)}
-			{session.isError && (
+			{sessionEnded && (
 				<p role="alert" className="p-4">
 					This session has ended or is unavailable. Open the preview again.
 				</p>
 			)}
-			{start.isPending || (runtime && session.isPending) ? (
+			{session.isError && !sessionEnded && (
+				<output className="block p-4">Unable to check the session. Retrying…</output>
+			)}
+			{start.isPending ||
+			(runtime && !sessionEnded && (!session.data || session.data.status === 'starting')) ? (
 				<output className="p-6">Starting preview…</output>
 			) : sandboxUrl ? (
 				<div className="min-h-0 flex-1">

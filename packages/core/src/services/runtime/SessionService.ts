@@ -757,7 +757,12 @@ export class SessionService {
 	}
 
 	async listByProject(projectId: ProjectId, notebookId?: NotebookId): Promise<Session[]> {
-		const sessions = await this.scanProject(projectId, (session) => session);
+		// Cleanup cannot prove reclamation when a session record is unreadable.
+		const sessions = await this.scanPrefix(
+			paths.sessionsForProject(projectId),
+			(session) => session,
+			'throw',
+		);
 		return notebookId ? sessions.filter((session) => session.notebook_id === notebookId) : sessions;
 	}
 

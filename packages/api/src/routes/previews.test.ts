@@ -1065,3 +1065,157 @@ describe('Preview admission fencing', () => {
 		}
 	});
 });
+
+describe('Preview source and compute boundaries', () => {
+	it.each([251, 255, 256])('accepts a valid branch name with %i characters', async (length) => {
+		const branch = 'a'.repeat(length);
+		const record = await create({ ...body, source: { type: 'branch', branch } });
+		expect(record.preparation).toBe('ready');
+		expect(reader.getBranchHead).toHaveBeenCalledWith('owner/repo', branch);
+	});
+
+	it.each(['branch', 'workspace', 'pull request'] as const)(
+		'retains the last revision after a provider NotFoundError for %s and retries later',
+		async (operation) => {
+			const result = await expectOk<{ id: string }>(
+				await api.request('POST', base, {
+					...body,
+					...(operation === 'pull request' ? { pull_request: 1 } : {}),
+				}),
+			);
+			const record = await api.deps.services.previews.get(pid, nid, result.id);
+			const method =
+				operation === 'branch'
+					? reader.getBranchHead
+					: operation === 'workspace'
+						? reader.fetchWorkspace
+						: reader.getPullRequest!;
+			vi.mocked(method).mockRejectedValueOnce(new NotFoundError('Source unavailable'));
+			head = NEXT;
+			const failed = await api.deps.services.previews.reconcile(
+				record,
+				api.deps.sourceControl,
+				true,
+			);
+			expect(failed).toMatchObject({
+				state: 'active',
+				preparation: 'failed',
+				current: record.current,
+			});
+			expect(failed.lease).toBeUndefined();
+			const session = await expectOk<Session>(
+				await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+			);
+			expect(session.source_version_id).toBe(record.current!.version_id);
+			const recovered = await api.deps.services.previews.reconcile(
+				failed,
+				api.deps.sourceControl,
+				true,
+			);
+			expect(recovered).toMatchObject({
+				state: 'active',
+				preparation: 'ready',
+				current: { commit: NEXT },
+			});
+		},
+	);
+
+	it('keeps a pinned preview retryable when its initial commit lookup returns NotFoundError', async () => {
+		vi.mocked(reader.resolveCommit!).mockRejectedValueOnce(new NotFoundError('Commit unavailable'));
+		const result = await expectOk<{ id: string }>(
+			await api.request('POST', base, {
+				...body,
+				source: { type: 'commit', commit: SHA },
+			}),
+		);
+		const record = await api.deps.services.previews.get(pid, nid, result.id);
+		expect(record).toMatchObject({ state: 'active', preparation: 'failed' });
+		expect(record.current).toBeUndefined();
+		await expectError(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+			409,
+		);
+		const recovered = await api.deps.services.previews.reconcile(
+			record,
+			api.deps.sourceControl,
+			true,
+		);
+		expect(recovered).toMatchObject({
+			state: 'active',
+			preparation: 'ready',
+			current: { commit: SHA },
+		});
+	});
+
+	it('retires a preview when parent metadata is confirmed missing', async () => {
+		const record = await create();
+		await api.bucket.delete(paths.project(pid).notebook(nid).meta);
+		const result = await api.deps.services.previews.reconcile(record, api.deps.sourceControl, true);
+		expect(result.state).toBe('deleting');
+	});
+
+	it('refuses filesystem snapshot writes for hidden preview runtimes', async () => {
+		const record = await create();
+		const child = record.current!.notebook_id;
+		const nb = paths.project(pid).notebook(child);
+		expect(await api.bucket.get(nb.meta)).toBeNull();
+		await expect(
+			api.deps.services.notebooks.setFsSnapshot(pid, child, {
+				snapshot_id: 'discard-only',
+				captured_at: new Date().toISOString(),
+			}),
+		).rejects.toThrow('Preview sessions cannot persist changes');
+		expect(await api.bucket.get(nb.fsSnapshot)).toBeNull();
+	});
+
+	it.each([
+		{ requested: undefined, expected: 'small', stored: undefined, namedDefault: false },
+		{ requested: 'default', expected: 'small', stored: undefined, namedDefault: false },
+		{ requested: 'normal', expected: 'normal', stored: 'normal', namedDefault: false },
+		{ requested: 'large', expected: 'large', stored: 'large', namedDefault: false },
+		{ requested: 'default', expected: 'default', stored: 'default', namedDefault: true },
+	])(
+		'selects $expected for override $requested (named default: $namedDefault) despite the parent profile',
+		async ({ requested, expected, stored, namedDefault }) => {
+			const parentKey = paths.project(pid).notebook(nid).meta;
+			const parent = await api.deps.services.notebooks.getNotebookMeta(pid, nid);
+			await api.bucket.put(parentKey, JSON.stringify({ ...parent, compute_profile: 'large' }));
+			const compute = makeFakeCompute();
+			api = createTestApi({
+				bucket: api.bucket,
+				compute,
+				deps: {
+					sourceControl: api.deps.sourceControl,
+					sandbox: {
+						...api.deps.sandbox,
+						computeProfileOverride: 'editors',
+						previewComputeProfile: 'small',
+						computeProfiles: [
+							{ name: 'normal', resources: { cpu: 4 } },
+							{ name: 'large', resources: { cpu: 8 } },
+							{ name: 'small', resources: { cpu: 1 } },
+							...(namedDefault ? [{ name: 'default', resources: { cpu: 2 } }] : []),
+						],
+					},
+				},
+			});
+			const result = await expectOk<{ id: string }>(
+				await api.request('POST', base, {
+					...body,
+					...(requested ? { compute_profile: requested } : {}),
+				}),
+			);
+			const record = await api.deps.services.previews.get(pid, nid, result.id);
+			expect(record.compute_profile).toBe(stored);
+			for (const mode of ['edit', 'app'] as const) {
+				const session = await expectOk<Session>(
+					await api.request('POST', `${base}/${record.id}/sessions`, { mode }),
+				);
+				expect(session.compute_profile).toBe(expected);
+			}
+			expect((await api.deps.services.notebooks.getNotebookMeta(pid, nid)).compute_profile).toBe(
+				'large',
+			);
+		},
+	);
+});

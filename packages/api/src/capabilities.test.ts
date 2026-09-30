@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { MemoryBucket, uid } from '@marimo-hub/core/testing';
+import { DEFAULT_APP_POOL_POLICY } from '@marimo-hub/core';
 import type { Authenticator } from '@marimo-hub/core';
 import { createApi } from './createApi';
 import { expectError, expectOk, makeTestDeps, stubSourceControl } from './testing';
@@ -26,6 +27,23 @@ describe('GET /api/v1/capabilities', () => {
 		);
 		expect(data.app_pool).toEqual({ heartbeat_interval_seconds: 30 });
 	});
+
+	it.each([
+		[8_000, 2],
+		[1_000, 0.25],
+		[240_000, 30],
+	])(
+		'advertises safe heartbeats for a %i ms visit lease',
+		async (userLeaseMs, heartbeatSeconds) => {
+			const deps = makeTestDeps(new MemoryBucket(), {
+				authenticator: authed,
+				policy: { appPool: { ...DEFAULT_APP_POOL_POLICY, userLeaseMs } },
+			});
+			expect(await expectOk(await createApi(deps).request('/api/v1/capabilities'))).toMatchObject({
+				app_pool: { heartbeat_interval_seconds: heartbeatSeconds },
+			});
+		},
+	);
 
 	it('reports federation available when WIF is configured', async () => {
 		const deps = makeTestDeps(new MemoryBucket(), { authenticator: authed, wif: stubWif });

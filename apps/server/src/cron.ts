@@ -83,8 +83,8 @@ async function scheduleUnavailableAppAlerts(
  * Node-side maintenance loop — the replacement for the Cloudflare Workers
  * `scheduled()` cron. Each run, in order:
  *  1. `sweepAppPools()` — reconcile app assignments and retire idle pool members.
- *  2. `expireStale()` — flip sessions with stale heartbeats to `expired`.
- *  3. `sweepPreviews()` — refresh sources, expire previews, and reclaim revisions.
+ *  2. `sweepPreviews()` — refresh sources, expire previews, and reclaim revisions.
+ *  3. `expireStale()` — flip sessions with stale heartbeats to `expired`.
  *  4. `reconcile()` — cross-check records against the compute provider:
  *     tear down sandboxes left running by terminal records (the billing leak),
  *     mark records whose sandbox has vanished as terminated, reap orphans.
@@ -147,8 +147,8 @@ export function startMaintenance(deps: ApiDeps, metrics: WideEventMetrics): () =
 			}
 			try {
 				await sweepAppPools(deps);
-				const sessionsExpired = await sessions.expireStale();
 				await sweepPreviews(deps);
+				const sessionsExpired = await sessions.expireStale();
 				const reconcile = await reconciler.reconcile();
 				await scheduleUnavailableAppAlerts(deps, reconcile.markedDeadSessions);
 				if (!reconcile.skipped && reconcile.orphanSandboxIds.length > 0) {

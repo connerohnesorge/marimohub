@@ -1956,7 +1956,6 @@ components:
                 branch:
                   type: string
                   minLength: 1
-                  maxLength: 250
                   pattern: ^(?!@(?:$|\{))(?![-/])(?!.*(?:\.\.|\/\/|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))[^/]+(?:\/[^/]+)*(?<![/.])$
               required:
                 - type
@@ -2024,6 +2023,7 @@ components:
               type: string
             expires_at:
               type: number
+              description: Lease deadline in milliseconds since the Unix epoch.
           required:
             - token
             - expires_at
@@ -2061,6 +2061,8 @@ components:
                 type: string
               expires_at:
                 type: number
+                description: Uncommitted admission deadline in milliseconds since the Unix
+                  epoch.
               committed:
                 default: false
                 type: boolean
@@ -2075,6 +2077,8 @@ components:
             type: string
         cleanup_after:
           type: number
+          description: Earliest maintenance-marker removal time in milliseconds since the
+            Unix epoch.
       required:
         - schema_version
         - id

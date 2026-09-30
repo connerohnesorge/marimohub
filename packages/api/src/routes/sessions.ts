@@ -2021,7 +2021,7 @@ export async function startNotebookSession(input: {
 			).catch(() => {});
 		}
 		if (!sandboxMayExist) await recordSandboxCleanup().catch(() => {});
-		if (previewRecord && !sessionRecordAttempted && !sandboxMayExist)
+		if (previewRecord && !sessionRecordAttempted)
 			await deps.services.previews.releaseAdmission(previewRecord, sessionId).catch(() => {});
 
 		if (err instanceof EditorClaimLostError) {

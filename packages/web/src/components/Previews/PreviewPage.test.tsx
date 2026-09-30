@@ -21,9 +21,16 @@ const savedEditor = {
 	version: 'first-version',
 };
 
-function setup({ appUser = false } = {}) {
+type HeartbeatResponse = 'running' | 'starting' | 'network' | number;
+function setup({
+	appUser = false,
+	heartbeatIntervalSeconds = 30,
+	heartbeat = 'running' as HeartbeatResponse,
+} = {}) {
+	let heartbeatResponse = heartbeat;
 	let userId: string | null = 'alice';
 	let version = 'first-version';
+	let appStarts = 0;
 	const calls: { url: string; method: string }[] = [];
 	vi.stubGlobal(
 		'fetch',
@@ -31,6 +38,8 @@ function setup({ appUser = false } = {}) {
 			const url = String(input);
 			const method = init?.method ?? 'GET';
 			calls.push({ url, method });
+			if (url === '/api/v1/capabilities')
+				return jsonOk({ app_pool: { heartbeat_interval_seconds: heartbeatIntervalSeconds } });
 			if (url === '/api/v1/me') return jsonOk({ id: userId, email: `${userId}@example.com` });
 			if (url === endpoint) {
 				return jsonOk({
@@ -46,12 +55,18 @@ function setup({ appUser = false } = {}) {
 				});
 			}
 			if (url === `${endpoint}/sessions`) {
+				appStarts++;
 				return jsonOk({
 					notebook_id: appUser ? `runtime-${version}` : 'runtime',
 					session_id: `${userId}-session`,
 					preview_version_id: version,
 					...(appUser
-						? { app_assignment: { visit_id: `visit-${version}`, generation: version } }
+						? {
+								app_assignment: {
+									visit_id: `visit-${version}${appStarts > 1 ? `-${appStarts}` : ''}`,
+									generation: version,
+								},
+							}
 						: {}),
 					...(appUser ? {} : { user_id: userId, source_version_id: version }),
 				});
@@ -60,11 +75,15 @@ function setup({ appUser = false } = {}) {
 				if (url.includes('/alice-session') && userId !== 'alice')
 					return jsonError('FORBIDDEN', 'Another user owns this editor', 403);
 				if (method === 'DELETE' || url.endsWith('/leave')) return jsonOk(null);
-				if (url.endsWith('/heartbeat'))
+				if (url.endsWith('/heartbeat')) {
+					if (heartbeatResponse === 'network') throw new TypeError('Network unavailable');
+					if (typeof heartbeatResponse === 'number')
+						return jsonError('INTERNAL_ERROR', 'Heartbeat failed', heartbeatResponse);
 					return jsonOk({
-						status: 'running',
+						status: heartbeatResponse,
 						sandbox_url: `https://sandbox.example.com/${userId}/${url.includes('runtime-second-version') ? 'second' : 'first'}`,
 					});
+				}
 			}
 			throw new Error(`Unexpected request: ${method} ${url}`);
 		}),
@@ -85,6 +104,15 @@ function setup({ appUser = false } = {}) {
 	return {
 		...view,
 		calls,
+		setHeartbeatResponse(next: HeartbeatResponse) {
+			heartbeatResponse = next;
+		},
+		async refetchHeartbeat(next: HeartbeatResponse) {
+			heartbeatResponse = next;
+			await act(async () => {
+				await view.client.invalidateQueries({ queryKey: ['preview-session'] });
+			});
+		},
 		async signIn(next: string | null) {
 			userId = next;
 			await act(async () => {
@@ -113,6 +141,7 @@ afterEach(() => {
 	sessionStorage.clear();
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 describe('PreviewPage', () => {
@@ -240,5 +269,110 @@ describe('PreviewPage', () => {
 		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(2);
 		window.dispatchEvent(new PageTransitionEvent('pagehide'));
 		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(2);
+	});
+	it('renews app visits at the advertised interval', async () => {
+		const { calls, refetchHeartbeat } = setup({ appUser: true, heartbeatIntervalSeconds: 2 });
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open app' }));
+		await screen.findByTitle('Review preview');
+		vi.useFakeTimers();
+		await refetchHeartbeat('running');
+		const count = calls.filter((call) => call.url.endsWith('/heartbeat')).length;
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1_999);
+		});
+		expect(calls.filter((call) => call.url.endsWith('/heartbeat'))).toHaveLength(count);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(1);
+		});
+		expect(calls.filter((call) => call.url.endsWith('/heartbeat'))).toHaveLength(count + 1);
+	});
+
+	it.each([500, 503, 'network'] as const)(
+		'keeps a running preview visible and retries a transient %s heartbeat failure',
+		async (failure) => {
+			const { refetchHeartbeat, setHeartbeatResponse } = setup({
+				appUser: true,
+				heartbeatIntervalSeconds: 2,
+			});
+			const user = userEvent.setup();
+			await user.click(await screen.findByRole('button', { name: 'Open app' }));
+			const frame = await screen.findByTitle('Review preview');
+			vi.useFakeTimers();
+			await refetchHeartbeat(failure);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(1);
+			});
+			expect(screen.getByText('Unable to check the session. Retrying…')).toBeInTheDocument();
+			expect(screen.getByTitle('Review preview')).toBe(frame);
+			expect(screen.queryByText(/This session has ended/)).not.toBeInTheDocument();
+			setHeartbeatResponse('running');
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(2_000);
+			});
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(1);
+			});
+			expect(screen.queryByText('Unable to check the session. Retrying…')).not.toBeInTheDocument();
+			expect(screen.getByTitle('Review preview')).toBe(frame);
+		},
+	);
+
+	it.each([403, 404, 409])(
+		'ends a preview after a confirmed %s heartbeat response',
+		async (status) => {
+			const { refetchHeartbeat, calls } = setup({ appUser: true });
+			const user = userEvent.setup();
+			await user.click(await screen.findByRole('button', { name: 'Open app' }));
+			await screen.findByTitle('Review preview');
+			await refetchHeartbeat(status);
+			expect(await screen.findByText(/This session has ended/)).toBeInTheDocument();
+			expect(screen.queryByTitle('Review preview')).not.toBeInTheDocument();
+			vi.useFakeTimers();
+			const count = calls.filter((call) => call.url.endsWith('/heartbeat')).length;
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(60_000);
+			});
+			expect(calls.filter((call) => call.url.endsWith('/heartbeat'))).toHaveLength(count);
+		},
+	);
+
+	it('starts a fresh heartbeat after readmission to the same sandbox with a new visit', async () => {
+		const { refetchHeartbeat, setHeartbeatResponse } = setup({ appUser: true });
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open app' }));
+		await screen.findByTitle('Review preview');
+		await refetchHeartbeat(409);
+		await screen.findByText(/This session has ended/);
+		setHeartbeatResponse('running');
+		await user.click(screen.getByRole('button', { name: 'Open latest app' }));
+		expect(await screen.findByTitle('Review preview')).toBeInTheDocument();
+		expect(screen.queryByText(/This session has ended/)).not.toBeInTheDocument();
+	});
+
+	it('keeps checking an admitted preview when its first heartbeat fails transiently', async () => {
+		const { refetchHeartbeat } = setup({ appUser: true, heartbeat: 503 });
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open app' }));
+		expect(await screen.findByText('Unable to check the session. Retrying…')).toBeInTheDocument();
+		expect(screen.getByText('Starting preview…')).toBeInTheDocument();
+		expect(screen.queryByText(/Choose an app or temporary editor/)).not.toBeInTheDocument();
+		await refetchHeartbeat('running');
+		expect(await screen.findByTitle('Review preview')).toBeInTheDocument();
+	});
+
+	it('shows provisioning while an admitted app is still starting', async () => {
+		const { refetchHeartbeat, client } = setup({ appUser: true, heartbeat: 'starting' });
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open app' }));
+		await waitFor(() =>
+			expect(client.getQueriesData({ queryKey: ['preview-session'] })[0]?.[1]).toMatchObject({
+				status: 'starting',
+			}),
+		);
+		expect(screen.getByText('Starting preview…')).toBeInTheDocument();
+		expect(screen.queryByText(/Choose an app or temporary editor/)).not.toBeInTheDocument();
+		await refetchHeartbeat('running');
+		expect(await screen.findByTitle('Review preview')).toBeInTheDocument();
 	});
 });

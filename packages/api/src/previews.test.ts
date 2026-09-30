@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AppPoolService, createSandboxId } from '@marimo-hub/core';
+import {
+	AppPoolService,
+	createSandboxId,
+	createSessionId,
+	Millis,
+	paths,
+	StoredObjectError,
+	WarmPoolService,
+	WarmPoolStore,
+} from '@marimo-hub/core';
 import type { NotebookId, NotebookPreview, ProjectId, SourceControlReader } from '@marimo-hub/core';
 import { ACTOR, fakeComputeFrom, makeFakeSandbox } from '@marimo-hub/core/testing';
 import { createInitializedBucket, createTestApi, expectOk, stubSourceControl } from './testing';
@@ -76,6 +85,84 @@ async function runningSession(notebookId = preview.current!.notebook_id) {
 }
 
 describe('preview maintenance', () => {
+	it('reaps committed admissions after session retention without dropping in-flight reservations', async () => {
+		const { sessions, previews } = api.deps.services;
+		const session = await runningSession();
+		await previews.reserveAdmission(preview, session.notebook_id, session.session_id, 10);
+		await previews.commitAdmission(preview, session.session_id);
+		await sessions.markTerminated(pid, session.session_id);
+		await sessions.markSandboxReclaimed(pid, session.session_id, new Date().toISOString());
+		const pending = createSessionId();
+		await previews.reserveAdmission(preview, session.notebook_id, pending, 10);
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1);
+		expect(await sessions.reapTerminated(Millis.seconds(0))).toBe(1);
+
+		await sweepPreviews(api.deps);
+
+		expect((await previews.get(pid, nid, preview.id)).admissions).toEqual([
+			expect.objectContaining({ session_id: pending, committed: false }),
+		]);
+	});
+
+	it('releases preview capacity when a warm app claim fails before session creation', async () => {
+		const compute = { ...api.deps.compute, connectExisting: () => fake.instance };
+		const warmPool = new WarmPoolService(
+			new WarmPoolStore(api.bucket, 'kubernetes'),
+			compute,
+			api.deps.services.sessions,
+			{
+				enabled: true,
+				size: 1,
+				profiles: [{ key: 'default', resources: {} }],
+				creationTimeoutMs: 300_000,
+				minimumRemainingMs: 60_000,
+			},
+		);
+		const warmApi = createTestApi({
+			bucket: api.bucket,
+			compute,
+			deps: { ...api.deps, compute, warmPool },
+		});
+		await warmPool.sweep();
+		vi.spyOn(AppPoolService.prototype, 'bindWarmSandbox').mockRejectedValue(
+			new Error('reservation expired'),
+		);
+		const response = await warmApi.request(
+			'POST',
+			`/projects/${pid}/notebooks/${nid}/previews/${preview.id}/sessions`,
+			{ mode: 'app' },
+		);
+
+		expect(response.status).toBeGreaterThanOrEqual(400);
+		expect(fake.calls.destroy).toBeGreaterThan(0);
+		expect(await api.deps.services.sessions.listByProject(pid)).toEqual([]);
+		expect((await api.deps.services.previews.get(pid, nid, preview.id)).admissions).toEqual([]);
+	});
+
+	it('defers recently expired preview editors until the startup grace period ends', async () => {
+		const sessions = api.deps.services.sessions;
+		const session = await sessions.createSession({
+			project_id: pid,
+			notebook_id: preview.current!.notebook_id,
+			user_id: ACTOR,
+			sandbox_id: createSandboxId(),
+			mode: 'edit',
+			ephemeral: true,
+		});
+		const started = Date.now();
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(started + 6 * 60_000);
+		expect(await sessions.expireStale()).toBe(1);
+		const retiring = await api.deps.services.previews.retire(preview);
+
+		await cleanupPreview(api.deps, retiring);
+		expect(fake.calls.destroy).toBe(0);
+		expect((await sessions.getSession(pid, session.session_id)).status).toBe('expired');
+
+		clock.mockReturnValue(started + 16 * 60_000);
+		await cleanupPreview(api.deps, retiring);
+		expect(fake.calls.destroy).toBe(1);
+	});
+
 	it.each([
 		{ scope: 'project', failure: 'list' },
 		{ scope: 'project', failure: 'retire' },
@@ -211,4 +298,23 @@ describe('preview maintenance', () => {
 			expect((await pool.store.read(pid, child))!.members).toHaveLength(expired ? 0 : 1);
 		},
 	);
+
+	it('keeps a preview deleting until an unreadable session is repaired and reclaimed', async () => {
+		const session = await runningSession();
+		const key = paths.session(pid, session.session_id);
+		await api.bucket.put(key, JSON.stringify({ ...session, status: 'corrupt' }));
+		const retiring = await api.deps.services.previews.retire(preview);
+		const runtimeMeta = paths.project(pid).notebook(session.notebook_id).previewMeta;
+
+		await expect(cleanupPreview(api.deps, retiring)).rejects.toThrow(StoredObjectError);
+
+		expect(fake.calls.destroy).toBe(0);
+		expect((await api.deps.services.previews.get(pid, nid, preview.id)).state).toBe('deleting');
+		expect(await api.bucket.get(runtimeMeta)).not.toBeNull();
+		await api.bucket.put(key, JSON.stringify(session));
+		await cleanupPreview(api.deps, retiring);
+		expect(fake.calls.destroy).toBe(1);
+		expect((await api.deps.services.previews.get(pid, nid, preview.id)).state).toBe('deleted');
+		expect(await api.bucket.get(runtimeMeta)).toBeNull();
+	});
 });
