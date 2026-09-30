@@ -13,7 +13,11 @@ function LocationState() {
 describe('Notebook header', () => {
 	it('lets app viewers discover previews through the notebook menu', async () => {
 		const user = userEvent.setup();
-		makeFetch({ role: 'viewer', session: runningSession({ mode: 'app' }) });
+		makeFetch({
+			role: 'viewer',
+			previewProviders: ['github'],
+			session: runningSession({ mode: 'app' }),
+		});
 		renderPage('app');
 		await screen.findByRole('button', { name: /Session Running/ });
 		expect(screen.getByText('Forecast')).toBeVisible();
@@ -22,6 +26,16 @@ describe('Notebook header', () => {
 			'href',
 			'/projects/proj-x/notebooks/nb-1/previews',
 		);
+	});
+
+	it('shows a plain app title when previews are unavailable', async () => {
+		makeFetch({ role: 'viewer', session: runningSession({ mode: 'app' }) });
+		renderPage('app');
+		await screen.findByRole('button', { name: /Session Running/ });
+		expect(screen.getByText('Forecast')).toBeVisible();
+		expect(
+			screen.queryByRole('button', { name: 'Forecast — notebook menu' }),
+		).not.toBeInTheDocument();
 	});
 
 	it('preserves the notebook title when following the Jobs link', async () => {

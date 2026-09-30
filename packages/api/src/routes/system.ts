@@ -105,10 +105,12 @@ const capabilitiesRoute = createRoute({
 
 app.openapi(capabilitiesRoute, (c) => {
 	const deps = c.get('deps');
+	const previewReader = deps.sourceControl?.getReader('github');
 	return ok(c, {
 		federation: { available: Boolean(deps.wif) },
 		integrations: { available: Boolean(deps.integrations) },
 		source_control: {
+			preview_providers: previewReader?.previews && previewReader.resolveCommit ? ['github'] : [],
 			change_request_providers: [...(deps.sourceControl?.publisherProviders() ?? [])],
 			sync_providers: [...(deps.sourceControl?.readerProviders() ?? [])],
 			pull_source_providers: [...(deps.sourceControl?.pullSourceProviders() ?? [])],

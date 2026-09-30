@@ -41,13 +41,22 @@ describe('Project — Notebook Actions: configuration', () => {
 		]);
 	});
 
-	it('offers previews for Git notebooks', async () => {
-		const user = userEvent.setup();
-		makeFetch({ notebooks: [{ ...notebook(), source_type: 'git' }] });
-		await renderProject();
-		await user.click(screen.getByRole('button', { name: /Notebook actions for/ }));
-		expect(await screen.findByRole('menuitem', { name: 'Previews' })).toBeInTheDocument();
-	});
+	it.each([false, true])(
+		'offers previews for Git notebooks only with the integration: %s',
+		async (enabled) => {
+			const user = userEvent.setup();
+			makeFetch({
+				notebooks: [{ ...notebook(), source_type: 'git' }],
+				capabilities: { source_control: { preview_providers: enabled ? ['github'] : [] } },
+			});
+			await renderProject();
+			await user.click(screen.getByRole('button', { name: /Notebook actions for/ }));
+			await screen.findByRole('menu');
+			if (enabled)
+				expect(await screen.findByRole('menuitem', { name: 'Previews' })).toBeInTheDocument();
+			else expect(screen.queryByRole('menuitem', { name: 'Previews' })).not.toBeInTheDocument();
+		},
+	);
 
 	it('opens the persisted workspace browser from the notebook menu', async () => {
 		const user = userEvent.setup();

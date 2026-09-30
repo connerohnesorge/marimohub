@@ -1,3 +1,4 @@
+import { hasNotebookPreviews } from '@/api/previews';
 import { PageTitle } from '@/components/ui/PageTitle';
 import { useProjectThumbnails } from '@/api/thumbnails';
 import { Thumbnail } from '@/components/Notebook/Thumbnail';
@@ -671,7 +672,7 @@ function useProjectContent() {
 						]
 					: []),
 				...notebookHistoryActions(jobsAvailable),
-				...(nb.source_type === 'git'
+				...(nb.source_type === 'git' && hasNotebookPreviews(capabilities)
 					? [{ id: 'previews', label: 'Previews', icon: <GitBranch className="size-4" /> }]
 					: []),
 			],

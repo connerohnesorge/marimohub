@@ -1480,6 +1480,10 @@ export const CapabilitiesResponseSchema = z
 		federation: z.object({ available: z.boolean() }),
 		integrations: z.object({ available: z.boolean() }),
 		source_control: z.object({
+			preview_providers: z.array(z.string()).openapi({
+				description: 'Provider ids configured to publish notebook previews through a GitHub App.',
+				example: ['github'],
+			}),
 			change_request_providers: z.array(z.string()).openapi({
 				description:
 					'Provider ids configured to publish pull requests, merge requests, or equivalents from notebook sessions.',

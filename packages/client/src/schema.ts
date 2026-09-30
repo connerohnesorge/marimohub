@@ -2210,6 +2210,13 @@ export interface components {
 			};
 			source_control: {
 				/**
+				 * @description Provider ids configured to publish notebook previews through a GitHub App.
+				 * @example [
+				 *       "github"
+				 *     ]
+				 */
+				preview_providers: string[];
+				/**
 				 * @description Provider ids configured to publish pull requests, merge requests, or equivalents from notebook sessions.
 				 * @example [
 				 *       "github"

@@ -3,10 +3,12 @@ import userEvent from '@testing-library/user-event';
 import { screen } from '@testing-library/react';
 import { Route, Routes } from 'react-router-dom';
 import { renderWithClient } from '@/test/render';
+import type * as PreviewsApi from '@/api/previews';
 import { CreatePreviewForm, PreviewsPage } from './PreviewsPage';
 
 const state = vi.hoisted(() => ({
 	role: 'manager',
+	previewProviders: ['github'] as string[] | undefined,
 	sourceType: 'local',
 	notebook: vi.fn(),
 	create: vi.fn(),
@@ -14,9 +16,15 @@ const state = vi.hoisted(() => ({
 vi.mock('@/api/apps', () => ({ useAppQuery: () => ({ data: { your_role: state.role } }) }));
 vi.mock('@/api/hooks', () => ({
 	useNotebookQuery: () => state.notebook(),
-	useCapabilitiesQuery: () => ({ data: {} }),
+	useCapabilitiesQuery: () => ({
+		data: state.previewProviders
+			? { source_control: { preview_providers: state.previewProviders } }
+			: undefined,
+		isSuccess: state.previewProviders !== undefined,
+	}),
 }));
-vi.mock('@/api/previews', () => ({
+vi.mock('@/api/previews', async (importOriginal) => ({
+	...(await importOriginal<typeof PreviewsApi>()),
 	usePreviewsQuery: () => ({ data: [] }),
 	useDeletePreview: () => ({ mutate: vi.fn() }),
 	useCreatePreview: () => ({ mutate: state.create }),
@@ -44,6 +52,7 @@ function setup() {
 beforeEach(() => {
 	state.create.mockReset();
 	state.role = 'manager';
+	state.previewProviders = ['github'];
 	state.sourceType = 'local';
 	state.notebook
 		.mockReset()
@@ -62,6 +71,21 @@ describe('preview creation eligibility', () => {
 		setup();
 		expect(screen.getByRole('button', { name: 'Create preview' })).toBeInTheDocument();
 	});
+
+	it.each([[], undefined])(
+		'hides creation without confirmed preview capability: %s',
+		(providers) => {
+			state.previewProviders = providers;
+			state.sourceType = 'git';
+			setup();
+			expect(screen.queryByRole('button', { name: 'Create preview' })).not.toBeInTheDocument();
+			expect(state.notebook).not.toHaveBeenCalled();
+			if (providers)
+				expect(
+					screen.getByText('Preview creation requires a GitHub App connection.'),
+				).toBeInTheDocument();
+		},
+	);
 
 	it('does not request privileged notebook source data for app-users', () => {
 		state.role = 'app-user';

@@ -167,6 +167,14 @@ components:
         source_control:
           type: object
           properties:
+            preview_providers:
+              type: array
+              items:
+                type: string
+              description: Provider ids configured to publish notebook previews through a
+                GitHub App.
+              example:
+                - github
             change_request_providers:
               type: array
               items:
@@ -192,6 +200,7 @@ components:
               example:
                 - github
           required:
+            - preview_providers
             - change_request_providers
             - sync_providers
             - pull_source_providers

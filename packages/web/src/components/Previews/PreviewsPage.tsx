@@ -3,7 +3,12 @@ import { Link, useParams } from 'react-router-dom';
 import { RadioButton, RadioField, RadioGroup, Label } from 'react-aria-components';
 import { useAppQuery } from '@/api/apps';
 import { useCapabilitiesQuery, useNotebookQuery } from '@/api/hooks';
-import { useCreatePreview, useDeletePreview, usePreviewsQuery } from '@/api/previews';
+import {
+	hasNotebookPreviews,
+	useCreatePreview,
+	useDeletePreview,
+	usePreviewsQuery,
+} from '@/api/previews';
 import type { NotebookPreview } from '@/api/previews';
 import { Button, DialogModal } from '@/components/ui';
 import { copyPreviewLink } from './copyPreviewLink';
@@ -18,6 +23,8 @@ export function PreviewBadge({ preview }: { preview: NotebookPreview }) {
 }
 export function PreviewsPage() {
 	const { pid = '', nid = '' } = useParams();
+	const capabilities = useCapabilitiesQuery();
+	const previewsAvailable = hasNotebookPreviews(capabilities.data);
 	const query = usePreviewsQuery(pid, nid);
 	const parent = useAppQuery(pid, nid);
 	const canManage = parent.data?.your_role === 'manager' || parent.data?.your_role === 'admin';
@@ -30,12 +37,17 @@ export function PreviewsPage() {
 			</Link>
 			<div className="flex items-center justify-between">
 				<h1 className="text-xl font-semibold">Previews</h1>
-				{canManage && <PreviewCreation pid={pid} nid={nid} onCreate={() => setCreating(true)} />}
+				{canManage && previewsAvailable && (
+					<PreviewCreation pid={pid} nid={nid} onCreate={() => setCreating(true)} />
+				)}
 			</div>
 			<p className="text-sm text-muted-foreground">
 				Share published previews with this notebook’s audience. Temporary editor changes are
 				discarded.
 			</p>
+			{capabilities.isSuccess && !previewsAvailable && (
+				<p>Preview creation requires a GitHub App connection.</p>
+			)}
 			{query.isError && <p role="alert">{query.error.message}</p>}
 			{remove.isError && <p role="alert">{remove.error.message}</p>}
 			{query.isPending && <output>Loading previews…</output>}
@@ -83,7 +95,7 @@ export function PreviewsPage() {
 					</div>
 				</article>
 			))}
-			{creating && (
+			{creating && previewsAvailable && (
 				<DialogModal isOpen onClose={() => setCreating(false)} title="Create preview">
 					<CreatePreviewForm pid={pid} nid={nid} onCreated={() => setCreating(false)} />
 				</DialogModal>
@@ -127,7 +139,10 @@ export function CreatePreviewForm({
 	const notebook = useNotebookQuery(pid, nid);
 	const create = useCreatePreview(pid, nid);
 	const valid =
-		name.trim() && value.trim() && (type === 'branch' || /^[a-f0-9]{40}$/i.test(value.trim()));
+		hasNotebookPreviews(capabilities.data) &&
+		name.trim() &&
+		value.trim() &&
+		(type === 'branch' || /^[a-f0-9]{40}$/i.test(value.trim()));
 	const change = (next: string) => {
 		setValue(next);
 		requestKey.current = null;

@@ -103,6 +103,7 @@ describe('GET /api/v1/capabilities', () => {
 		const none = makeTestDeps(new MemoryBucket(), { authenticator: authed });
 		expect(await expectOk(await createApi(none).request('/api/v1/capabilities'))).toMatchObject({
 			source_control: {
+				preview_providers: [],
 				change_request_providers: [],
 				sync_providers: [],
 				pull_source_providers: [],
@@ -126,12 +127,40 @@ describe('GET /api/v1/capabilities', () => {
 			await expectOk(await createApi(configured).request('/api/v1/capabilities')),
 		).toMatchObject({
 			source_control: {
+				preview_providers: [],
 				change_request_providers: ['github'],
 				sync_providers: ['github'],
 				pull_source_providers: ['github'],
 			},
 		});
 	});
+
+	it.each([
+		{ previews: undefined, resolveCommit: vi.fn(), expected: [] },
+		{ previews: false, resolveCommit: vi.fn(), expected: [] },
+		{ previews: true, resolveCommit: undefined, expected: [] },
+		{ previews: true, resolveCommit: vi.fn(), expected: ['github'] },
+	])(
+		'advertises preview providers only for capable GitHub App readers: $expected',
+		async ({ previews, resolveCommit, expected }) => {
+			const deps = makeTestDeps(new MemoryBucket(), {
+				authenticator: authed,
+				sourceControl: stubSourceControl({
+					reader: {
+						provider: 'github',
+						previews,
+						resolveCommit,
+						supportsRepository: () => true,
+						getBranchHead: vi.fn(),
+						fetchWorkspace: vi.fn(),
+					},
+				}),
+			});
+			expect(await expectOk(await createApi(deps).request('/api/v1/capabilities'))).toMatchObject({
+				source_control: { preview_providers: expected },
+			});
+		},
+	);
 
 	it('reports the role derived from the current OIDC session', async () => {
 		const authenticator: Authenticator = {

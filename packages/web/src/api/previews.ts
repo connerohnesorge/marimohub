@@ -3,6 +3,11 @@ import type { components } from '@marimo-hub/client';
 import { apiClient, apiData } from './client';
 
 export type NotebookPreview = components['schemas']['NotebookPreview'];
+export function hasNotebookPreviews(
+	capabilities: { source_control?: { preview_providers?: string[] } } | undefined,
+): boolean {
+	return capabilities?.source_control?.preview_providers?.includes('github') ?? false;
+}
 export type PreviewInput = {
 	name: string;
 	source: { type: 'branch'; branch: string } | { type: 'commit'; commit: string };

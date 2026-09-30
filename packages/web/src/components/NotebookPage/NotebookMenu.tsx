@@ -32,6 +32,7 @@ interface NotebookMenuProps {
 	gitSource?: { repo: string; branch: string };
 	canSync: boolean;
 	showJobs: boolean;
+	showPreviews?: boolean;
 	onRename?: () => void;
 	onEditThumbnail?: () => void;
 }
@@ -44,19 +45,20 @@ export function NotebookMenu({
 	gitSource,
 	canSync,
 	showJobs,
+	showPreviews = false,
 	onRename,
 	onEditThumbnail,
 }: NotebookMenuProps) {
 	const navigate = useNavigate();
 	const source = useDisclosure();
-	const options: DropdownMenuOption[] = [
-		{
+	const options: DropdownMenuOption[] = [];
+	if (showPreviews)
+		options.push({
 			id: 'previews',
 			label: 'Previews',
 			href: `/projects/${projectId}/notebooks/${notebookId}/previews`,
 			icon: <GitBranch className="size-3.5" />,
-		},
-	];
+		});
 	if (onRename)
 		options.push({
 			id: 'rename',
@@ -83,6 +85,9 @@ export function NotebookMenu({
 			icon: <GitBranch className="size-3.5" />,
 			separatorBefore: options.length > 0,
 		});
+
+	if (options.length === 0)
+		return <span className="truncate text-[13px] font-medium">{title}</span>;
 
 	return (
 		<>
