@@ -439,6 +439,19 @@ function parseMcpConfig(env: Env, externalIssuer?: string): McpConfig | undefine
 			docs: 'docs/mcp.md',
 		});
 	}
+	// Mirrors @hono/mcp's checkIssuerUrl
+	if (
+		parsed.url.protocol !== 'https:' &&
+		parsed.url.hostname !== 'localhost' &&
+		parsed.url.hostname !== '127.0.0.1'
+	) {
+		throw new ConfigError('MARIMOHUB_APP_BASE_URL must use HTTPS when MARIMOHUB_MCP=on', {
+			variable: 'MARIMOHUB_APP_BASE_URL',
+			remediation:
+				'set MARIMOHUB_APP_BASE_URL to a https:// URL. Plain http:// is accepted only for localhost and 127.0.0.1.',
+			docs: 'docs/mcp.md',
+		});
+	}
 	const publicBaseUrl = normalizeBaseUrl(parsed.url);
 	if (
 		externalIssuer &&

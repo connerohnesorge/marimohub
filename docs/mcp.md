@@ -27,6 +27,9 @@ https://hub.example.com/mcp
 
 OAuth discovery uses the base URL to publish stable, absolute URLs. The MCP dialog in the user menu shows the MCP URL and client setup instructions.
 
+It must use HTTPS: the OAuth issuer is derived from it, and the server refuses to start
+with a plain `http://` URL unless the host is `localhost` or `127.0.0.1`.
+
 ## Connect a client
 
 For Claude Code, run:

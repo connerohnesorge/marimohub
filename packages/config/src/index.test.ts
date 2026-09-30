@@ -1802,6 +1802,32 @@ describe('createFromEnv MCP config', () => {
 			}),
 		).toThrow(/credential-free HTTP\(S\) URL/);
 	});
+
+	it.each(['http://192.168.0.10:3901', 'http://hub.example.com', 'http://[::1]:3901'])(
+		'rejects plain HTTP outside localhost: %s',
+		(baseUrl) => {
+			expect(() =>
+				createFromEnv({
+					...baseEnv,
+					MARIMOHUB_MCP: 'on',
+					MARIMOHUB_APP_BASE_URL: baseUrl,
+				}),
+			).toThrow(/must use HTTPS when MARIMOHUB_MCP=on/);
+		},
+	);
+	it.each([
+		['http://localhost:3901', 'http://localhost:3901'],
+		['http://127.0.0.1:3901', 'http://127.0.0.1:3901'],
+		['http://LOCALHOST:3901', 'http://localhost:3901'],
+	])('accepts loopback HTTP: %s → %s', (baseUrl, expected) => {
+		expect(
+			createFromEnv({
+				...baseEnv,
+				MARIMOHUB_MCP: 'on',
+				MARIMOHUB_APP_BASE_URL: baseUrl,
+			}).mcp,
+		).toEqual({ publicBaseUrl: expected });
+	});
 });
 
 describe('external issuer MCP composition', () => {
@@ -1851,6 +1877,15 @@ describe('external issuer MCP composition', () => {
 				MARIMOHUB_AUTH_OIDC_ACCESS_TOKEN_AUDIENCE: 'hub-api',
 			}).mcp,
 		).toBeUndefined();
+	});
+	it('rejects plain HTTP even with an external issuer', () => {
+		expect(() =>
+			createFromEnv({
+				...env,
+				MARIMOHUB_APP_BASE_URL: 'http://hub.example.com/hub/',
+				MARIMOHUB_AUTH_OIDC_ACCESS_TOKEN_AUDIENCE: 'http://hub.example.com/hub/mcp',
+			}),
+		).toThrow(/must use HTTPS when MARIMOHUB_MCP=on/);
 	});
 });
 

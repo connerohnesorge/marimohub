@@ -1715,7 +1715,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_MCP',
 						name: 'MCP server',
 						description:
-							'Enables the MCP endpoint and OAuth server. Requires `MARIMOHUB_APP_BASE_URL`. Values: `on`, `off`.',
+							'Enables the MCP endpoint and OAuth server. Requires an HTTPS `MARIMOHUB_APP_BASE_URL` (plain http is accepted only for localhost and 127.0.0.1). Values: `on`, `off`.',
 						default: 'off',
 						example: 'on',
 					},

@@ -482,7 +482,7 @@ The built-in OAuth 2.1 server exposes notebooks to MCP clients. MCP is off by de
 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
-| `MARIMOHUB_MCP` | Enables the MCP endpoint and OAuth server. Requires `MARIMOHUB_APP_BASE_URL`. Values: `on`, `off`. | — | `off` | `on` |
+| `MARIMOHUB_MCP` | Enables the MCP endpoint and OAuth server. Requires an HTTPS `MARIMOHUB_APP_BASE_URL` (plain http is accepted only for localhost and 127.0.0.1). Values: `on`, `off`. | — | `off` | `on` |
 
 ## Jobs
 
