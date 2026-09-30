@@ -256,11 +256,18 @@ class ModalSandboxInstance implements SandboxInstance {
 			pty?: boolean;
 		},
 	): Promise<ContainerProcess<string>> {
+		const timeout = options?.timeout;
+		if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0)) {
+			throw new RangeError('Sandbox exec timeout must be finite and nonnegative');
+		}
 		const sandbox = await this.getSandbox();
 		return sandbox.exec(command, {
 			mode: 'text',
 			...(options?.cwd ? { workdir: options.cwd } : {}),
-			...(options?.timeout !== undefined ? { timeoutMs: options.timeout } : {}),
+			// Modal requires whole seconds; round up to preserve the caller's budget.
+			...(timeout !== undefined && timeout > 0
+				? { timeoutMs: Math.ceil(timeout / 1000) * 1000 }
+				: {}),
 			env: { ...this.env, ...definedEnv(options?.env) },
 			...(options?.pty ? { pty: true } : {}),
 		});
