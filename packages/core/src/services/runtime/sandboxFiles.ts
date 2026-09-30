@@ -17,6 +17,7 @@ import {
 	workspaceDirectoryFromMarkerPath,
 	workspaceDirectoryMarkerPath,
 } from '../../integrations/remoteWorkspace';
+import { isRegenerableArtifactPath } from '../../integrations/workspaceIgnore';
 import { listAllKeys, listAllObjects } from '../catalog/storage';
 import type { CommitSessionInput } from '../content/NotebookService';
 
@@ -122,20 +123,49 @@ async function createSandboxDirectories(
 	if (command.length > 'mkdir -p'.length) await execute(command);
 }
 
-/**
- * `commitSession` owns the root source files. Python environments and bytecode
- * caches are regenerated rather than persisted. Directory exclusions apply at
- * any depth; source-file exclusions apply only at the workspace root.
- */
-const WORKSPACE_EXCLUDE = ['notebook.py', 'pyproject.toml', '.venv/', '__pycache__/'];
+/** `commitSession` owns these; capture never uploads or mirror-deletes them. */
+const ROOT_SOURCE_FILES = new Set(['notebook.py', 'pyproject.toml']);
 
-function isExcluded(rel: string): boolean {
+function isRootSourceFile(rel: string): boolean {
+	return ROOT_SOURCE_FILES.has(rel);
+}
+
+// Hooks are executable code; restoring them would run user-supplied scripts on
+// the next `git` command if file modes were ever preserved.
+function isGitHooksPath(rel: string): boolean {
 	const segments = rel.split('/');
-	return WORKSPACE_EXCLUDE.some((ex) =>
-		// Directory entries (`foo/`) match a `foo` segment at any depth (e.g. nested
-		// `pkg/__pycache__/x.pyc`); bare entries are exact root-level files.
-		ex.endsWith('/') ? segments.includes(ex.slice(0, -1)) : rel === ex,
-	);
+	return segments.some((segment, index) => segment === '.git' && segments[index + 1] === 'hooks');
+}
+
+function isCaptureExcluded(rel: string): boolean {
+	return isRootSourceFile(rel) || isRegenerableArtifactPath(rel) || isGitHooksPath(rel);
+}
+
+/**
+ * Mirror-delete leaves regenerable paths alone, as it always did for `.venv/`
+ * and `__pycache__/`: a copy uploaded through the files API is not capture's to
+ * remove. Stored hooks are removed.
+ */
+function isMirrorProtected(rel: string): boolean {
+	return isRootSourceFile(rel) || isRegenerableArtifactPath(rel);
+}
+
+/** The repository a path belongs to (`.git`, `pkg/.git`, …), or null outside any `.git`. */
+function gitGroupOf(rel: string): string | null {
+	const segments = rel.split('/');
+	const index = segments.indexOf('.git');
+	return index === -1 ? null : segments.slice(0, index + 1).join('/');
+}
+
+/**
+ * Capture priority under the shared count/byte budget. `.git` is handled
+ * separately; the rest must not let marimo caches or dotfiles crowd out data.
+ */
+function captureTier(rel: string): number {
+	const segments = rel.split('/');
+	if (segments.includes('__marimo__')) return 1;
+	if (segments.some((segment) => segment.startsWith('.'))) return 2;
+	return 0;
 }
 
 /** What a workspace restore actually moved into the sandbox. */
@@ -179,7 +209,7 @@ export async function restoreWorkspace(
 		if (!rel) continue;
 		const markerDirectory = workspaceDirectoryFromMarkerPath(rel);
 		if (markerDirectory !== null) {
-			if (!markerDirectory) continue;
+			if (!markerDirectory || isGitHooksPath(markerDirectory)) continue;
 			if (
 				options.excludeRelativeRoots?.some(
 					(root) => markerDirectory === root || markerDirectory.startsWith(`${root}/`),
@@ -197,7 +227,10 @@ export async function restoreWorkspace(
 			directories.push(`${workingDir}/${markerDirectory}`);
 			continue;
 		}
-		if (options.excludeRelativeRoots?.some((root) => rel === root || rel.startsWith(`${root}/`))) {
+		if (
+			isGitHooksPath(rel) ||
+			options.excludeRelativeRoots?.some((root) => rel === root || rel.startsWith(`${root}/`))
+		) {
 			continue;
 		}
 		// A poisoned key (e.g. from a compromised/synced source) whose relative path
@@ -263,13 +296,16 @@ export async function restoreWorkspace(
  * Capture the notebook's `workspace/` folder from the sandbox working directory
  * back into the bucket on teardown. `NotebookService.commitSession` owns the
  * root source files (`notebook.py`, `pyproject.toml`), so capture excludes them.
- * Capture also excludes `.venv/` and `__pycache__/` at any depth.
+ * Capture also excludes regenerable caches (see `workspaceIgnore`) at any depth
+ * and `.git/hooks/`.
  *
  * In `workspace` mode, capture includes `__marimo__/` and hidden files, subject
  * to path, file-type, and size limits. The workspace copies of marimo artifacts
  * are separate from the selected HTML/session artifacts saved in versions.
- * Each file is read with a byte/deadline budget and written to its `workspace/`
- * key. In `source` mode no runtime
+ * Visible files claim the budget first, then `__marimo__/`, then other hidden
+ * paths. Each Git directory (`.git/`, `pkg/.git/`, …) goes last and
+ * all-or-nothing, because a partial repository restores corrupt. Each file is read with a byte/deadline budget and written
+ * to its `workspace/` key. In `source` mode no runtime
  * files are uploaded. Both modes then mirror-delete: any key under `workspace/`
  * (other than the excluded source files) that is no longer present in the sandbox
  * is removed, keeping `workspace/` an accurate latest-only mirror and cleaning up
@@ -290,8 +326,9 @@ export async function captureWorkspace(
 	const nb = paths.project(projectId).notebook(notebookId);
 
 	// Relative paths currently present in the sandbox working dir, excluding source
-	// files and regenerable Python artifacts. Used to upload files and drive mirror-deletes.
+	// files and regenerable artifacts. Used to upload files and drive mirror-deletes.
 	const present = new Set<string>();
+	const retainedGitGroups = new Set<string>();
 
 	if (mode === 'workspace') {
 		const listing = await sandbox.listFiles(workingDir, { recursive: true, includeHidden: true });
@@ -312,39 +349,90 @@ export async function captureWorkspace(
 		// upload), so the decision never waits on a read.
 		const selected: string[] = [];
 		const directoryMarkers: string[] = [];
-		let totalBytes = 0;
+		const candidates: { rel: string; size: number; tier: number }[] = [];
+		const gitGroups = new Map<
+			string,
+			{ files: string[]; directoryMarkers: string[]; bytes: number; fitsPerFileCap: boolean }
+		>();
+		const gitGroupFor = (group: string) => {
+			let entry = gitGroups.get(group);
+			if (!entry) {
+				entry = { files: [], directoryMarkers: [], bytes: 0, fitsPerFileCap: true };
+				gitGroups.set(group, entry);
+			}
+			return entry;
+		};
 		for (const file of listing.files) {
 			const rel = file.relativePath;
-			if (!isSafeWorkspacePath(rel) || isWorkspaceInternalPath(rel) || isExcluded(rel)) {
+			if (!isSafeWorkspacePath(rel) || isWorkspaceInternalPath(rel) || isCaptureExcluded(rel)) {
 				continue;
 			}
+			const group = gitGroupOf(rel);
 			if (file.type === 'directory') {
-				directoryMarkers.push(workspaceDirectoryMarkerPath(rel));
+				(group === null ? directoryMarkers : gitGroupFor(group).directoryMarkers).push(
+					workspaceDirectoryMarkerPath(rel),
+				);
 				continue;
 			}
 			if (file.type !== 'file') continue;
 			present.add(rel);
+			if (group !== null) {
+				const entry = gitGroupFor(group);
+				entry.files.push(rel);
+				entry.bytes += file.size;
+				if (file.size > MAX_WORKSPACE_FILE_BYTES) entry.fitsPerFileCap = false;
+				continue;
+			}
+			candidates.push({ rel, size: file.size, tier: captureTier(rel) });
+		}
+		// Stable sort keeps listing order within a tier.
+		candidates.sort((left, right) => left.tier - right.tier);
 
+		let totalBytes = 0;
+		for (const { rel, size } of candidates) {
 			if (selected.length >= MAX_WORKSPACE_FILES) {
 				console.warn(
 					`captureWorkspace: file count cap (${MAX_WORKSPACE_FILES}) reached; skipping ${rel}`,
 				);
 				continue;
 			}
-			if (file.size > MAX_WORKSPACE_FILE_BYTES) {
+			if (size > MAX_WORKSPACE_FILE_BYTES) {
 				console.warn(
-					`captureWorkspace: per-file cap (${MAX_WORKSPACE_FILE_BYTES}) exceeded; skipping ${rel} (${file.size} bytes)`,
+					`captureWorkspace: per-file cap (${MAX_WORKSPACE_FILE_BYTES}) exceeded; skipping ${rel} (${size} bytes)`,
 				);
 				continue;
 			}
-			if (totalBytes + file.size > MAX_WORKSPACE_BYTES) {
+			if (totalBytes + size > MAX_WORKSPACE_BYTES) {
 				console.warn(
-					`captureWorkspace: total-byte cap (${MAX_WORKSPACE_BYTES}) would be exceeded; skipping ${rel} (${file.size} bytes)`,
+					`captureWorkspace: total-byte cap (${MAX_WORKSPACE_BYTES}) would be exceeded; skipping ${rel} (${size} bytes)`,
 				);
 				continue;
 			}
 			selected.push(rel);
-			totalBytes += file.size;
+			totalBytes += size;
+		}
+
+		// Root repository first, then nested ones in listing order.
+		const orderedGitGroups = [...gitGroups].sort(
+			([left], [right]) => Number(right === '.git') - Number(left === '.git'),
+		);
+		for (const [group, entry] of orderedGitGroups) {
+			if (
+				entry.fitsPerFileCap &&
+				selected.length + entry.files.length <= MAX_WORKSPACE_FILES &&
+				totalBytes + entry.bytes <= MAX_WORKSPACE_BYTES
+			) {
+				selected.push(...entry.files);
+				directoryMarkers.push(...entry.directoryMarkers);
+				totalBytes += entry.bytes;
+			} else {
+				// A stale but complete repository beats a deleted one, so the stored
+				// copy is kept whole rather than mirror-deleted.
+				retainedGitGroups.add(group);
+				console.warn(
+					`captureWorkspace: ${group.slice(0, 256)} (${entry.files.length} files, ${entry.bytes} bytes) does not fit the remaining workspace budget; keeping the stored copy`,
+				);
+			}
 		}
 
 		// Presence comes from the listing: skipped uploads retain the last good copy.
@@ -373,7 +461,10 @@ export async function captureWorkspace(
 	const existingKeys = await listAllKeys(bucket, nb.workspacePrefix);
 	const staleKeys = existingKeys.filter((key) => {
 		const rel = key.slice(nb.workspacePrefix.length);
-		if (!rel || isExcluded(rel)) return false;
+		if (!rel || isMirrorProtected(rel)) return false;
+		if (isGitHooksPath(rel)) return true;
+		const group = gitGroupOf(rel);
+		if (group !== null && retainedGitGroups.has(group)) return false;
 		return !present.has(rel);
 	});
 	if (staleKeys.length > 0) {

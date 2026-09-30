@@ -2,7 +2,9 @@ import { captureThumbnail } from './captureThumbnail';
 import type { Bucket } from '../../ports/bucket';
 import type { SandboxProvider } from '../../ports/sandbox';
 import { sessionOwner } from './sessionOwner';
-import type { Session } from '../../schema';
+import { readStored, VersionSchema } from '../../schema';
+import type { GitSource, Session } from '../../schema';
+import { paths } from '../../paths';
 import { Millis } from '../../duration';
 import { ConflictError } from '../../errors';
 import { logOperationalError } from '../../operationalLog';
@@ -10,10 +12,12 @@ import { captureFilesystemSnapshot } from '../content/filesystemSnapshots';
 import type { NotebookService } from '../content/NotebookService';
 import { SandboxProvisioner } from './SandboxProvisioner';
 import { sessionPersistsEdits } from './sessionState';
+import { pullSourceRootPath, sandboxWorkspaceLayout } from './workspaceLayout';
 import type { SessionService, TakeoverDrainStage } from './SessionService';
 import { stopSurfaceProcessCommand, surfaceCancelFile, surfacePidFile } from './surfaces/state';
 import type { SurfaceId } from './surfaces/types';
 
+const DEFAULT_WORKDIR = '/workspace';
 const TAKEOVER_DRAIN_LEASE_RENEW_INTERVAL_MS = Millis.minutes(1);
 
 class SecondarySurfaceStopError extends Error {
@@ -373,7 +377,7 @@ export class SessionRetirer {
 				session.project_id,
 				session.notebook_id,
 				session.sandbox_id,
-				this.deps.workdir,
+				await this.workspaceDir(session),
 				Math.min(thumbnailDeadlineAt ?? Infinity, this.deps.thumbnailDeadline?.() ?? Infinity),
 			);
 		}
@@ -389,6 +393,40 @@ export class SessionRetirer {
 				owner_user_id: session.user_id,
 			},
 		);
+	}
+
+	/**
+	 * The sandbox was provisioned with the subtree of the session's pinned
+	 * version; a pull sync during the session can move the live `root_path`.
+	 * Versions without `git_source` fall back to the live setting. The thumbnail
+	 * is best-effort: any failure falls back to the workdir rather than blocking
+	 * the sandbox destroy that follows.
+	 */
+	private async workspaceDir(session: Session): Promise<string | undefined> {
+		const workdir = this.deps.workdir;
+		try {
+			const source = await this.deps.notebooks.getNotebookSource(
+				session.project_id,
+				session.notebook_id,
+			);
+			const rootPath = source.type === 'git' ? await this.pinnedRootPath(session, source) : '';
+			return sandboxWorkspaceLayout(workdir ?? DEFAULT_WORKDIR, rootPath).workdir;
+		} catch {
+			return workdir;
+		}
+	}
+
+	private async pinnedRootPath(session: Session, source: GitSource): Promise<string> {
+		const live = pullSourceRootPath(source);
+		if (source.sync_mode !== 'pull' || !session.source_version_id) return live;
+		const meta = paths
+			.project(session.project_id)
+			.notebook(session.notebook_id)
+			.version(session.source_version_id).meta;
+		const object = await this.deps.bucket.get(meta);
+		if (!object) return live;
+		const version = await readStored(VersionSchema, object, meta);
+		return version.git_source?.root_path ?? live;
 	}
 
 	private async stopSecondarySurfaces(
