@@ -65,6 +65,7 @@ export interface CreateSessionInput {
 	compute_from_snapshot?: boolean;
 	/** Discard-only session whose edits are never persisted (see SessionSchema). */
 	ephemeral?: boolean;
+	restricted_viewer_credentials?: boolean;
 	/** `edit` (default) or `app` (a shared pool member; see SessionSchema). */
 	mode?: SessionMode;
 	/** Immutable notebook version used to start this session. */
@@ -199,6 +200,9 @@ export class SessionService {
 			started_at: now,
 			last_heartbeat: now,
 			...(input.ephemeral ? { ephemeral: true } : {}),
+			...(input.restricted_viewer_credentials !== undefined
+				? { restricted_viewer_credentials: input.restricted_viewer_credentials }
+				: {}),
 			...(input.app_pool ? { app_pool: true as const } : {}),
 			...(input.mode && input.mode !== 'edit' ? { mode: input.mode } : {}),
 			...(input.source_version_id ? { source_version_id: input.source_version_id } : {}),

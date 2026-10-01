@@ -2225,6 +2225,8 @@ components:
                 - app
             ephemeral:
               type: boolean
+            restricted_viewer_credentials:
+              type: boolean
             user_id:
               type: string
               minLength: 1

@@ -3050,6 +3050,7 @@ export interface components {
 				/** @enum {string} */
 				mode?: 'edit' | 'app';
 				ephemeral?: boolean;
+				restricted_viewer_credentials?: boolean;
 				user_id: string;
 				/** @enum {string} */
 				editor_sandbox_sharing?: 'shared' | 'exclusive';

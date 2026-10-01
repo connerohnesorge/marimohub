@@ -1502,11 +1502,11 @@ export async function startNotebookSession(input: {
 	if (reusableCandidate) {
 		let reusable = await tightenAuthorizationDeadline(reusableCandidate);
 		const authorizationExpired = isPastAuthorizationDeadline(reusable, Date.now());
-		// A role change flips the session class the caller is entitled to (a demoted
-		// editor must not keep a persisting, WIF-holding kernel; a promoted viewer's
-		// edits must stop being discarded). A stale-class session is retired below
-		// like a dead kernel instead of reused.
-		const classMismatch = !!reusable.ephemeral !== ephemeral;
+		// Role changes must not reuse a kernel with the previous credential policy.
+		const classMismatch =
+			!!reusable.ephemeral !== ephemeral ||
+			(mode === 'edit' &&
+				(reusable.restricted_viewer_credentials === true) !== restrictedViewerCredentials);
 		// Reuse does not grant control: a failed probe must not let a viewer
 		// tear down another caller's app.
 		const reusableGrants = await grants(reusable);
@@ -1694,6 +1694,7 @@ export async function startNotebookSession(input: {
 						compute_resources: appliedComputeProfile.resources,
 						compute_from_snapshot: restoreFilesystemSnapshot !== undefined,
 						ephemeral,
+						restricted_viewer_credentials: restrictedViewerCredentials,
 						idle_timeout_ms: isPreview ? PREVIEW_IDLE_MS : undefined,
 						mode,
 						source_version_id: sourceVersionId,

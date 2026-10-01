@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	AppPoolService,
+	defaultRegistry,
+	ProjectIntegrationsStore,
 	createServices,
 	createSessionId,
 	NotFoundError,
@@ -269,6 +271,122 @@ describe('Notebook previews', () => {
 			}),
 			422,
 		);
+	});
+
+	it.each([false, undefined])(
+		'replaces credential-bearing preview editors after demotion (stored restriction: %s)',
+		async (storedRestriction) => {
+			const record = await create();
+			await userApi('editor');
+			const { instance, calls } = makeFakeSandbox();
+			const integrations = new ProjectIntegrationsStore({
+				bucket: api.bucket,
+				registry: defaultRegistry(),
+			});
+			await integrations.create(
+				pid,
+				{
+					kind: 'custom_env',
+					name: 'flags',
+					config: { vars: { EDITOR_ONLY: 'secret' } },
+				},
+				ACTOR,
+			);
+			const editor = createTestApi({
+				bucket: api.bucket,
+				userId: uid('editor'),
+				compute: fakeComputeFrom(instance),
+				deps: {
+					sourceControl: api.deps.sourceControl,
+					integrations,
+					policy: { viewerMode: 'ephemeral-sandbox' },
+					sandbox: { ...api.deps.sandbox, exposure: new ProxyExposure('preview-role-change') },
+				},
+			});
+			const launch = () =>
+				editor.request('POST', `${base}/${record.id}/sessions`, { mode: 'edit' });
+			const first = await expectOk<Session>(await launch());
+			expect(Object.assign({}, ...calls.setEnvVars).EDITOR_ONLY).toBe('secret');
+			const stored = await editor.deps.services.sessions.getSession(pid, first.session_id);
+			expect(stored.restricted_viewer_credentials).toBe(false);
+			if (storedRestriction === undefined) {
+				delete stored.restricted_viewer_credentials;
+				await api.bucket.put(paths.session(pid, first.session_id), JSON.stringify(stored));
+			}
+			await api.deps.services.projects.updateMemberRole(pid, uid('editor'), 'viewer', ACTOR);
+			const sessionPath = `/projects/${pid}/notebooks/${nid}/sessions/${first.session_id}`;
+			await expectError(await editor.request('POST', `${sessionPath}/heartbeat`), 403);
+			const detail = await expectOk<Session>(await editor.request('GET', sessionPath));
+			expect(detail.sandbox_url).toBeUndefined();
+			expect(
+				await authorizeProxyRequest(new Request(first.sandbox_url!), editor.deps),
+			).toMatchObject({
+				kind: 'reject',
+				status: 403,
+			});
+			calls.setEnvVars.length = 0;
+			const restricted = await expectOk<Session & { reused: boolean }>(await launch());
+			expect(restricted.session_id).not.toBe(first.session_id);
+			expect(restricted.reused).toBe(false);
+			expect(Object.assign({}, ...calls.setEnvVars).EDITOR_ONLY).toBeUndefined();
+			expect(
+				(await editor.deps.services.sessions.getSession(pid, restricted.session_id))
+					.restricted_viewer_credentials,
+			).toBe(true);
+			expect(
+				(await editor.deps.services.sessions.getSession(pid, first.session_id))
+					.sandbox_reclaimed_at,
+			).toBeDefined();
+			expect((await expectOk<Session>(await launch())).session_id).toBe(restricted.session_id);
+			await expectOk(
+				await editor.request(
+					'POST',
+					`/projects/${pid}/notebooks/${nid}/sessions/${restricted.session_id}/heartbeat`,
+				),
+			);
+			await api.deps.services.projects.updateMemberRole(pid, uid('editor'), 'editor', ACTOR);
+			const promoted = await expectOk<Session>(await launch());
+			expect(promoted.session_id).not.toBe(restricted.session_id);
+			expect(Object.assign({}, ...calls.setEnvVars).EDITOR_ONLY).toBe('secret');
+		},
+	);
+
+	it('compares preview app runtimes with the published revision in runtime inspection', async () => {
+		const record = await create();
+		const first = await expectOk<Session>(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+		);
+		head = NEXT;
+		const latest = await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
+		const second = await expectOk<Session>(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+		);
+		const data = await api.deps.services.runtimeInspection.inspect();
+		const old = data.apps.find((app) =>
+			app.sandboxes.some((s) => s.session_id === first.session_id),
+		);
+		const current = data.apps.find((app) =>
+			app.sandboxes.some((s) => s.session_id === second.session_id),
+		);
+		expect(old).toMatchObject({
+			current_version_id: latest.current!.version_id,
+			current_version_members: 0,
+		});
+		expect(old!.sandboxes[0].version_status).toBe('old');
+		expect(current).toMatchObject({
+			current_version_id: latest.current!.version_id,
+			current_version_members: 1,
+		});
+		expect(current!.sandboxes[0].version_status).toBe('current');
+
+		await api.bucket.delete(`_system/previews/${pid}/${nid}/${record.id}.json`);
+		const missing = await createServices(api.bucket).runtimeInspection.inspect();
+		for (const app of missing.apps) {
+			expect(app.current_version_id).toBeNull();
+			expect(app.current_version_members).toBeNull();
+			expect(app.incomplete).toBe(true);
+			expect(app.sandboxes[0].version_status).toBe('unknown');
+		}
 	});
 
 	it('tracks branches including force pushes and leaves pinned previews unchanged', async () => {

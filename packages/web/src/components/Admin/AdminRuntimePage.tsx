@@ -562,7 +562,7 @@ export default function AdminRuntimePage() {
 						<div className="space-y-5">
 							{apps.map((app) => (
 								<AppCard
-									key={`${app.resource_path ?? `${app.project_id}/${app.notebook_id}`}/${app.current_version_id}`}
+									key={`${app.resource_path ?? `${app.project_id}/${app.notebook_id}`}/${app.origin?.revision_id ?? ''}`}
 									app={app}
 									limits={data.limits}
 									now={now}

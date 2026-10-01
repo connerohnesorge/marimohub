@@ -833,6 +833,8 @@ export const SessionSchema = z.looseObject({
 	 * session can persist if its mode and editor claim permit it.
 	 */
 	ephemeral: z.boolean().optional(),
+	/** Only an explicitly restricted editor kernel is safe for viewer attachment. */
+	restricted_viewer_credentials: z.boolean().optional(),
 	editor_sandbox_sharing: z.enum(['shared', 'exclusive']).optional(),
 	ended_reason: z.enum(['takeover']).optional(),
 	ended_by_user_id: UserIdSchema.optional(),

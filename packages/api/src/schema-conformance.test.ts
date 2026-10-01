@@ -149,6 +149,7 @@ describe('schema conformance: api response shapes vs core public shapes', () => 
 		// deadline.
 		const internalSessionFields = [
 			'idle_timeout_ms',
+			'restricted_viewer_credentials',
 			'app_pool',
 			'runtime',
 			'sandbox_id',
