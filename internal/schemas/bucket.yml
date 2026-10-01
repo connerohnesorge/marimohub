@@ -2146,12 +2146,6 @@ components:
           pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
         next_attempt_at:
           type: number
-        artifact_cleanup_after:
-          type: object
-          propertyNames:
-            type: string
-          additionalProperties:
-            type: number
         preparation_failures:
           default: 0
           type: integer
@@ -2183,15 +2177,25 @@ components:
             - notebook_id
             - version_id
             - commit
-        runtime_ids:
+        revisions:
           type: array
           items:
-            type: string
-        ready_runtime_ids:
-          default: []
-          type: array
-          items:
-            type: string
+            type: object
+            properties:
+              notebook_id:
+                type: string
+              state:
+                type: string
+                enum:
+                  - preparing
+                  - ready
+                  - retiring
+              cleanup_after:
+                type: number
+            required:
+              - notebook_id
+              - state
+              - cleanup_after
         admissions:
           default: []
           type: array
@@ -2213,11 +2217,6 @@ components:
               - session_id
               - notebook_id
               - expires_at
-        garbage_ids:
-          default: []
-          type: array
-          items:
-            type: string
         cleanup_after:
           type: number
           description: Earliest ownership removal time in milliseconds since the Unix epoch.
@@ -2237,7 +2236,7 @@ components:
         - request_fingerprint
         - state
         - preparation
-        - runtime_ids
+        - revisions
     PreviewProject:
       type: object
       properties:
@@ -2335,12 +2334,6 @@ components:
                     pattern: ^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$
                   next_attempt_at:
                     type: number
-                  artifact_cleanup_after:
-                    type: object
-                    propertyNames:
-                      type: string
-                    additionalProperties:
-                      type: number
                   preparation_failures:
                     default: 0
                     type: integer
@@ -2372,15 +2365,25 @@ components:
                       - notebook_id
                       - version_id
                       - commit
-                  runtime_ids:
+                  revisions:
                     type: array
                     items:
-                      type: string
-                  ready_runtime_ids:
-                    default: []
-                    type: array
-                    items:
-                      type: string
+                      type: object
+                      properties:
+                        notebook_id:
+                          type: string
+                        state:
+                          type: string
+                          enum:
+                            - preparing
+                            - ready
+                            - retiring
+                        cleanup_after:
+                          type: number
+                      required:
+                        - notebook_id
+                        - state
+                        - cleanup_after
                   admissions:
                     default: []
                     type: array
@@ -2402,11 +2405,6 @@ components:
                         - session_id
                         - notebook_id
                         - expires_at
-                  garbage_ids:
-                    default: []
-                    type: array
-                    items:
-                      type: string
                   cleanup_after:
                     type: number
                     description: Earliest ownership removal time in milliseconds since the Unix
@@ -2427,7 +2425,7 @@ components:
                   - request_fingerprint
                   - state
                   - preparation
-                  - runtime_ids
+                  - revisions
               artifacts:
                 type: array
                 items:

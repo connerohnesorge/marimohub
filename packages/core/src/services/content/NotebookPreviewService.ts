@@ -1,3 +1,4 @@
+import { withAbortSignal } from '../../async';
 import { logOperationalError } from '../../operationalLog';
 import type { Bucket } from '../../ports/bucket';
 import type { SourceControlReader, SourceControlRegistry } from '../../ports/sourceControl';
@@ -166,10 +167,8 @@ export class NotebookPreviewService {
 			state: 'active',
 			preparation: 'pending',
 			preparation_failures: 0,
-			runtime_ids: [],
-			ready_runtime_ids: [],
+			revisions: [],
 			admissions: [],
-			garbage_ids: [],
 		};
 		const intent = await this.store.reserve(record, now + PREVIEW_LIMITS.creationMs);
 		const saved = await this.materialize(intent);
@@ -227,23 +226,9 @@ export class NotebookPreviewService {
 		// Stop waiting on unresponsive I/O; checkpoints fence its eventual completion.
 		const bounded = async <T>(operation: () => Promise<T>): Promise<T> => {
 			checkpoint();
-			let abort!: () => void;
-			const interrupted = new Promise<never>((_, reject) => {
-				abort = () =>
-					reject(
-						signal.reason instanceof Error
-							? signal.reason
-							: new Error('Preview preparation cancelled'),
-					);
-				signal.addEventListener('abort', abort, { once: true });
-			});
-			try {
-				const result = await Promise.race([operation(), interrupted]);
-				checkpoint();
-				return result;
-			} finally {
-				signal.removeEventListener('abort', abort);
-			}
+			const result = await withAbortSignal(operation(), signal);
+			checkpoint();
+			return result;
 		};
 		const claimed = await this.mutate(record, (current) => {
 			if (current.state !== 'active' || (current.lease && current.lease.expires_at > Date.now()))
@@ -307,11 +292,14 @@ export class NotebookPreviewService {
 			const runtimeId = createNotebookId();
 			const reserved = await this.mutateLeased(record, token, (current) => ({
 				...current,
-				runtime_ids: [...current.runtime_ids, runtimeId],
-				artifact_cleanup_after: {
-					...current.artifact_cleanup_after,
-					[runtimeId]: Date.now() + 900_000,
-				},
+				revisions: [
+					...current.revisions,
+					{
+						notebook_id: runtimeId,
+						state: 'preparing',
+						cleanup_after: Date.now() + 900_000,
+					},
+				],
 			}));
 			if (reserved.state !== 'active' || reserved.lease?.token !== token) return reserved;
 			try {
@@ -319,10 +307,7 @@ export class NotebookPreviewService {
 			} catch (error) {
 				await this.mutateLeased(record, token, (current) => ({
 					...current,
-					runtime_ids: current.runtime_ids.filter((id) => id !== runtimeId),
-					artifact_cleanup_after: Object.fromEntries(
-						Object.entries(current.artifact_cleanup_after ?? {}).filter(([id]) => id !== runtimeId),
-					),
+					revisions: current.revisions.filter((revision) => revision.notebook_id !== runtimeId),
 				}));
 				throw error;
 			}
@@ -344,7 +329,6 @@ export class NotebookPreviewService {
 				this.notebooks.getNotebook(record.project_id, record.notebook_id),
 			);
 			const now = new Date().toISOString();
-			checkpoint();
 			await bounded(() =>
 				this.bucket.put(
 					nb.previewMeta,
@@ -360,12 +344,10 @@ export class NotebookPreviewService {
 				),
 			);
 			for (const [path, bytes] of files) {
-				checkpoint();
 				await bounded(() =>
 					this.bucket.put(version.workspaceFile(path), bytes, { onlyIfNotExists: true }),
 				);
 			}
-			checkpoint();
 			await bounded(() =>
 				this.bucket.put(
 					version.meta,
@@ -383,7 +365,6 @@ export class NotebookPreviewService {
 					{ onlyIfNotExists: true },
 				),
 			);
-			checkpoint();
 			await bounded(() =>
 				this.bucket.put(
 					nb.source,
@@ -409,7 +390,9 @@ export class NotebookPreviewService {
 			const published = await this.mutateLeased(record, token, (current) => ({
 				...current,
 				current: { notebook_id: runtimeId, version_id: versionId, commit },
-				ready_runtime_ids: [...current.ready_runtime_ids, runtimeId],
+				revisions: current.revisions.map((revision) =>
+					revision.notebook_id === runtimeId ? { ...revision, state: 'ready' } : revision,
+				),
 				preparation: 'ready',
 				error: undefined,
 				lease: undefined,
@@ -490,8 +473,9 @@ export class NotebookPreviewService {
 			if (
 				current.state !== 'active' ||
 				Date.parse(current.expires_at) <= Date.now() ||
-				!current.runtime_ids.includes(nid) ||
-				(!current.ready_runtime_ids.includes(nid) && current.current?.notebook_id !== nid)
+				!current.revisions.some(
+					(revision) => revision.notebook_id === nid && revision.state === 'ready',
+				)
 			)
 				throw new NotFoundError('Preview not found');
 			if (current.admissions.some((entry) => entry.session_id === sid)) return null;
@@ -561,7 +545,7 @@ export class NotebookPreviewService {
 	async cleanup(record: NotebookPreview, retireRuntime: RetireRuntime): Promise<void> {
 		if (record.state === 'active') return;
 		let complete = true;
-		for (const nid of [...record.runtime_ids, ...record.garbage_ids]) {
+		for (const { notebook_id: nid } of record.revisions) {
 			if (!(await this.cleanupRuntime(record.project_id, nid, retireRuntime))) complete = false;
 			else if ((record.cleanup_after ?? Infinity) <= Date.now())
 				await this.store.releaseArtifact(record, nid);
@@ -582,11 +566,12 @@ export class NotebookPreviewService {
 	): Promise<void> {
 		let record = initial;
 		if (record.state !== 'active' || (record.lease && record.lease.expires_at > Date.now())) return;
-		for (const nid of record.runtime_ids) {
+		for (const revision of record.revisions) {
+			const nid = revision.notebook_id;
 			if (
+				revision.state === 'retiring' ||
 				nid === record.current?.notebook_id ||
-				(!record.ready_runtime_ids.includes(nid) &&
-					Date.now() < (record.artifact_cleanup_after?.[nid] ?? 0)) ||
+				(revision.state === 'preparing' && Date.now() < revision.cleanup_after) ||
 				record.admissions.some((entry) => entry.notebook_id === nid) ||
 				(await hasRuntime(nid))
 			)
@@ -595,26 +580,26 @@ export class NotebookPreviewService {
 				current.state === 'active' &&
 				(!current.lease || current.lease.expires_at <= Date.now()) &&
 				nid !== current.current?.notebook_id &&
-				current.runtime_ids.includes(nid) &&
+				current.revisions.some(
+					(revision) => revision.notebook_id === nid && revision.state !== 'retiring',
+				) &&
 				!current.admissions.some((entry) => entry.notebook_id === nid)
 					? {
 							...current,
-							runtime_ids: current.runtime_ids.filter((id) => id !== nid),
-							ready_runtime_ids: current.ready_runtime_ids.filter((id) => id !== nid),
-							garbage_ids: [...current.garbage_ids, nid],
+							revisions: current.revisions.map((revision) =>
+								revision.notebook_id === nid ? { ...revision, state: 'retiring' } : revision,
+							),
 						}
 					: null,
 			);
 		}
-		for (const nid of record.garbage_ids) {
+		for (const { notebook_id: nid, state } of record.revisions) {
+			if (state !== 'retiring') continue;
 			if (!(await this.cleanupRuntime(record.project_id, nid, retireRuntime))) continue;
 			await this.store.releaseArtifact(record, nid);
 			await this.mutate(record, (current) => ({
 				...current,
-				garbage_ids: current.garbage_ids.filter((id) => id !== nid),
-				artifact_cleanup_after: Object.fromEntries(
-					Object.entries(current.artifact_cleanup_after ?? {}).filter(([id]) => id !== nid),
-				),
+				revisions: current.revisions.filter((revision) => revision.notebook_id !== nid),
 			}));
 		}
 	}

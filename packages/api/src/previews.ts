@@ -1,5 +1,5 @@
 import { AppPoolStore, logOperationalError, NotFoundError, sessionMode } from '@marimo-hub/core';
-import type { NotebookPreview } from '@marimo-hub/core';
+import type { NotebookId, NotebookPreview, ProjectId } from '@marimo-hub/core';
 import type { ApiDeps } from './context';
 import { sessionRetirer } from './shared';
 
@@ -61,6 +61,24 @@ async function retirePreviewRuntime(
 }
 
 export async function sweepPreviews(deps: ApiDeps): Promise<void> {
+	const projectRuntimes = new Map<ProjectId, Promise<Set<NotebookId>>>();
+	const hasRuntime = async (pid: ProjectId, nid: NotebookId): Promise<boolean> => {
+		let runtimes = projectRuntimes.get(pid);
+		if (!runtimes) {
+			runtimes = deps.services.sessions
+				.listByProject(pid)
+				.then(
+					(sessions) =>
+						new Set(
+							sessions
+								.filter((session) => !session.sandbox_reclaimed_at)
+								.map((session) => session.notebook_id),
+						),
+				);
+			projectRuntimes.set(pid, runtimes);
+		}
+		return (await runtimes).has(nid);
+	};
 	for (let record of await deps.services.previews.cleanupCandidates()) {
 		try {
 			if (record.state === 'active') {
@@ -98,10 +116,8 @@ export async function sweepPreviews(deps: ApiDeps): Promise<void> {
 				});
 				await deps.services.previews.prune(
 					record,
-					async (nid) =>
-						(await deps.services.sessions.listByProject(record.project_id, nid)).some(
-							(session) => !session.sandbox_reclaimed_at,
-						),
+					(nid) => hasRuntime(record.project_id, nid),
+					// Recheck sessions after fencing admission; discovery may predate a launch.
 					(pid, nid) => retirePreviewRuntime(deps, pid, nid),
 				);
 			}

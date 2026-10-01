@@ -306,8 +306,9 @@ export class NotebookService {
 		if (
 			record.state !== 'active' ||
 			Date.parse(record.expires_at) <= Date.now() ||
-			!record.runtime_ids.includes(notebookId) ||
-			(!record.ready_runtime_ids.includes(notebookId) && record.current?.notebook_id !== notebookId)
+			!record.revisions.some(
+				(revision) => revision.notebook_id === notebookId && revision.state === 'ready',
+			)
 		)
 			throw new NotFoundError('Preview not found');
 		return {

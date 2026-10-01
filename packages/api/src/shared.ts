@@ -258,7 +258,9 @@ export async function assertSessionPreviewActive(
 	if (
 		preview.state !== 'active' ||
 		Date.parse(preview.expires_at) <= Date.now() ||
-		!preview.ready_runtime_ids.includes(session.notebook_id)
+		!preview.revisions.some(
+			(revision) => revision.notebook_id === session.notebook_id && revision.state === 'ready',
+		)
 	)
 		throw new NotFoundError('Preview not found');
 }

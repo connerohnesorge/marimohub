@@ -1595,7 +1595,7 @@ These notebooks never enter catalog snapshots or share pools, source artifacts, 
 Metadata reads require a published revision, use current parent labels and configuration, and reject inactive owners.
 Normal notebook APIs reject internal IDs. Session APIs allow authorized access to running preview sessions.
 
-Reconciliation retains revisions with unreclaimed sessions. It moves unused revisions into `garbage_ids` before deleting their artifacts.
+Reconciliation retains revisions with unreclaimed sessions. Each entry in `revisions` records its runtime notebook ID, state (`preparing`, `ready`, or `retiring`), and cleanup deadline. Reconciliation marks unused revisions as `retiring` before deleting their artifacts.
 Admission reservations and pruning share the preview CAS record, so admitted revisions cannot be pruned before session creation.
 Committed reservations remain until sandbox reclamation; abandoned reservations without sessions expire after ten minutes.
 Late admissions fail the ownership check. Cleanup defers fresh starting sessions and retries failed destruction without capturing edits.

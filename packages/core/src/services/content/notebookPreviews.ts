@@ -51,7 +51,6 @@ export const PreviewRecordSchema = z.object({
 	preparation: z.enum(['pending', 'preparing', 'ready', 'failed']),
 	checked_at: z.iso.datetime().optional(),
 	next_attempt_at: z.number().optional(),
-	artifact_cleanup_after: z.record(NotebookIdSchema, z.number()).optional(),
 	preparation_failures: z.number().int().nonnegative().default(0),
 	error: z.string().optional(),
 	lease: z
@@ -63,8 +62,13 @@ export const PreviewRecordSchema = z.object({
 	current: z
 		.object({ notebook_id: NotebookIdSchema, version_id: VersionIdSchema, commit: z.string() })
 		.optional(),
-	runtime_ids: z.array(NotebookIdSchema),
-	ready_runtime_ids: z.array(NotebookIdSchema).default([]),
+	revisions: z.array(
+		z.object({
+			notebook_id: NotebookIdSchema,
+			state: z.enum(['preparing', 'ready', 'retiring']),
+			cleanup_after: z.number(),
+		}),
+	),
 	admissions: z
 		.array(
 			z.object({
@@ -77,7 +81,6 @@ export const PreviewRecordSchema = z.object({
 			}),
 		)
 		.default([]),
-	garbage_ids: z.array(NotebookIdSchema).default([]),
 	cleanup_after: z
 		.number()
 		.describe('Earliest ownership removal time in milliseconds since the Unix epoch.')

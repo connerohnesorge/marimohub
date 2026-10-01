@@ -34,7 +34,7 @@ function fixture() {
 			request_fingerprint: 'request',
 			state: 'active',
 			preparation: 'pending',
-			runtime_ids: [],
+			revisions: [],
 		});
 	return { bucket, store, pid, intent };
 }

@@ -1,3 +1,4 @@
+import { leaveAppVisit } from '@/api/sessionVisits';
 import { APP_HEARTBEAT_INTERVAL_MS } from '@marimo-hub/core/constants';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient, apiData, ApiRequestError } from '@/api/client';
@@ -40,17 +41,6 @@ function toSessionError(err: Error): SessionError {
 		code: err instanceof ApiRequestError ? err.code : undefined,
 		kind: 'request',
 	};
-}
-
-function leaveAppVisit(projectId: string, notebookId: string, session: Session | null) {
-	if (!session?.app_assignment) return;
-	void apiClient
-		.POST('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave', {
-			params: { path: { pid: projectId, nid: notebookId, sid: session.session_id } },
-			body: session.app_assignment,
-			keepalive: true,
-		})
-		.catch(() => {});
 }
 
 /** Why a watched session stopped being renderable — see `ended` below. */

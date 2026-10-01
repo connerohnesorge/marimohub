@@ -282,7 +282,7 @@ describe('Notebook previews', () => {
 			);
 			expect(publicRecord).not.toHaveProperty('source');
 			expect(publicRecord).not.toHaveProperty('repository');
-			expect(publicRecord).not.toHaveProperty('runtime_ids');
+			expect(publicRecord).not.toHaveProperty('revisions');
 		},
 	);
 
@@ -527,7 +527,7 @@ describe('Notebook previews', () => {
 		expect((await creating).state).toBe('deleting');
 		await sweepPreviews(api.deps);
 		expect((await api.deps.services.previews.get(pid, nid, record.id)).state).toBe('deleted');
-		for (const child of record.runtime_ids)
+		for (const child of record.revisions.map((revision) => revision.notebook_id))
 			expect(await api.bucket.get(paths.project(pid).notebook(child).previewMeta)).toBeNull();
 		await expectError(
 			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
@@ -704,7 +704,9 @@ describe('Notebook previews', () => {
 		);
 		await sweepPreviews(api.deps);
 		const pruned = await api.deps.services.previews.get(pid, nid, original.id);
-		expect(pruned.runtime_ids).toEqual([updated.current!.notebook_id]);
+		expect(pruned.revisions.map((revision) => revision.notebook_id)).toEqual([
+			updated.current!.notebook_id,
+		]);
 		expect(
 			await api.bucket.get(paths.project(pid).notebook(original.current!.notebook_id).previewMeta),
 		).toBeNull();
@@ -720,6 +722,93 @@ describe('Notebook previews', () => {
 		await expect(api.deps.services.previews.get(pid, nid, original.id)).rejects.toThrow(
 			NotFoundError,
 		);
+	});
+
+	it('shares discovery across previews but rechecks each runtime before reclamation', async () => {
+		const records = [await create(), await create({ ...body, name: 'Second preview' })];
+		head = NEXT;
+		for (const record of records)
+			await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
+		const scan = vi.spyOn(api.deps.services.sessions, 'listByProject');
+		await sweepPreviews(api.deps);
+		expect(scan.mock.calls).toEqual([
+			[pid],
+			...records.map((record) => [pid, record.current!.notebook_id]),
+		]);
+		for (const record of records) {
+			const pruned = await api.deps.services.previews.get(pid, nid, record.id);
+			expect(pruned.revisions).toEqual([
+				expect.objectContaining({ notebook_id: pruned.current!.notebook_id, state: 'ready' }),
+			]);
+		}
+	});
+
+	it('retains revisions when discovery fails and retries discovery on the next sweep', async () => {
+		const records = [await create(), await create({ ...body, name: 'Second preview' })];
+		head = NEXT;
+		for (const record of records)
+			await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
+		const scan = vi
+			.spyOn(api.deps.services.sessions, 'listByProject')
+			.mockRejectedValueOnce(new Error('Unreadable session'));
+		await sweepPreviews(api.deps);
+		expect(scan).toHaveBeenCalledExactlyOnceWith(pid);
+		for (const record of records)
+			expect((await api.deps.services.previews.get(pid, nid, record.id)).revisions).toHaveLength(2);
+		await sweepPreviews(api.deps);
+		for (const record of records)
+			expect((await api.deps.services.previews.get(pid, nid, record.id)).revisions).toHaveLength(1);
+	});
+
+	it('keeps admission authoritative when discovery predates a launch', async () => {
+		const record = await create();
+		head = NEXT;
+		const service = api.deps.services.previews;
+		await service.prepare(record, api.deps.sourceControl, true);
+		const scan = vi
+			.spyOn(api.deps.services.sessions, 'listByProject')
+			.mockImplementationOnce(async () => {
+				await service.reserveAdmission(record, record.current!.notebook_id, createSessionId(), 10);
+				return [];
+			});
+		await sweepPreviews(api.deps);
+		expect(scan).toHaveBeenCalledExactlyOnceWith(pid);
+		expect((await service.get(pid, nid, record.id)).revisions).toHaveLength(2);
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
+		).not.toBeNull();
+	});
+
+	it('retains a retiring revision after failed cleanup and rejects new admission until retry', async () => {
+		const record = await create();
+		head = NEXT;
+		const service = api.deps.services.previews;
+		const updated = await service.prepare(record, api.deps.sourceControl, true);
+		await service.prune(
+			updated,
+			async () => false,
+			async () => false,
+		);
+		const retiring = await service.get(pid, nid, record.id);
+		expect(retiring.revisions).toEqual([
+			{ ...record.revisions[0], state: 'retiring' },
+			updated.revisions[1],
+		]);
+		await expect(
+			service.reserveAdmission(retiring, record.current!.notebook_id, createSessionId(), 10),
+		).rejects.toThrow(NotFoundError);
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
+		).not.toBeNull();
+		await service.prune(
+			retiring,
+			async () => false,
+			async () => true,
+		);
+		expect((await service.get(pid, nid, record.id)).revisions).toEqual([updated.revisions[1]]);
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
+		).toBeNull();
 	});
 });
 
@@ -894,7 +983,11 @@ describe('Preview failure recovery and boundaries', () => {
 		);
 		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
 		await sweepPreviews(api.deps);
-		expect((await api.deps.services.previews.get(pid, nid, record.id)).runtime_ids).toEqual([]);
+		expect(
+			(await api.deps.services.previews.get(pid, nid, record.id)).revisions.map(
+				(revision) => revision.notebook_id,
+			),
+		).toEqual([]);
 	});
 
 	it.each([
@@ -918,7 +1011,7 @@ describe('Preview failure recovery and boundaries', () => {
 		record = await api.deps.services.previews.prepare(record, api.deps.sourceControl);
 		expect(record.preparation).toBe('failed');
 		expect(record.current).toBeUndefined();
-		expect(record.runtime_ids).toEqual([]);
+		expect(record.revisions.map((revision) => revision.notebook_id)).toEqual([]);
 		expect(reader.getBranchHead).not.toHaveBeenCalled();
 		expect(reader.fetchWorkspace).not.toHaveBeenCalled();
 	});
@@ -1005,9 +1098,11 @@ describe('Preview failure recovery and boundaries', () => {
 			expect((await stale).current).toEqual(winner.current);
 			vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
 			await sweepPreviews(api.deps);
-			expect((await api.deps.services.previews.get(pid, nid, record.id)).runtime_ids).toEqual([
-				winner.current!.notebook_id,
-			]);
+			expect(
+				(await api.deps.services.previews.get(pid, nid, record.id)).revisions.map(
+					(revision) => revision.notebook_id,
+				),
+			).toEqual([winner.current!.notebook_id]);
 		} finally {
 			proceed.resolve();
 			await stale;
@@ -1024,7 +1119,7 @@ describe('Preview failure recovery and boundaries', () => {
 		const record = await create();
 		expect(record.preparation).toBe('failed');
 		expect(record.current).toBeUndefined();
-		const failedRuntime = record.runtime_ids[0];
+		const failedRuntime = record.revisions[0].notebook_id;
 		expect(
 			await api.bucket.get(paths.project(pid).notebook(failedRuntime).previewMeta),
 		).not.toBeNull();
@@ -1051,9 +1146,11 @@ describe('Preview failure recovery and boundaries', () => {
 		head = NEXT;
 		const updated = await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
 		await sweepPreviews(api.deps);
-		expect((await api.deps.services.previews.get(pid, nid, record.id)).runtime_ids).toContain(
-			record.current!.notebook_id,
-		);
+		expect(
+			(await api.deps.services.previews.get(pid, nid, record.id)).revisions.map(
+				(revision) => revision.notebook_id,
+			),
+		).toContain(record.current!.notebook_id);
 		const sessionPath = `/projects/${pid}/notebooks/${session.notebook_id}/sessions/${session.session_id}`;
 		const stillRunning = await expectOk<Session>(
 			await api.request('POST', `${sessionPath}/heartbeat`),
@@ -1062,9 +1159,11 @@ describe('Preview failure recovery and boundaries', () => {
 		expect(stillRunning.origin!.revision_id).toBe(record.current!.version_id);
 		await expectOk(await api.request('DELETE', sessionPath));
 		await sweepPreviews(api.deps);
-		expect((await api.deps.services.previews.get(pid, nid, record.id)).runtime_ids).toEqual([
-			updated.current!.notebook_id,
-		]);
+		expect(
+			(await api.deps.services.previews.get(pid, nid, record.id)).revisions.map(
+				(revision) => revision.notebook_id,
+			),
+		).toEqual([updated.current!.notebook_id]);
 		expect(
 			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
 		).toBeNull();
@@ -1125,7 +1224,7 @@ describe('Preview admission fencing', () => {
 	it('rejects a missing ownership ledger instead of deleting an untracked runtime', async () => {
 		const record = await create();
 		const key = `_system/previews/${pid}/${nid}/${record.id}.json`;
-		const { runtime_ids: _runtimeIds, ...corrupt } = record;
+		const { revisions: _revisions, ...corrupt } = record;
 		await api.bucket.put(key, JSON.stringify(corrupt));
 		await expect(api.deps.services.previews.get(pid, nid, record.id)).rejects.toThrow(
 			'Stored data is temporarily unavailable',
@@ -1169,7 +1268,9 @@ describe('Preview admission fencing', () => {
 				throw new Error('Admitted runtime must not be retired');
 			},
 		);
-		expect((await service.get(pid, nid, record.id)).runtime_ids).toContain(old);
+		expect(
+			(await service.get(pid, nid, record.id)).revisions.map((revision) => revision.notebook_id),
+		).toContain(old);
 		expect(await api.bucket.get(paths.project(pid).notebook(old).previewMeta)).not.toBeNull();
 	});
 
@@ -1242,7 +1343,9 @@ describe('Preview admission fencing', () => {
 		await started.promise;
 		try {
 			const record = await api.deps.services.previews.get(pid, nid, original.id);
-			const reserved = record.runtime_ids.find((id) => id !== original.current!.notebook_id)!;
+			const reserved = record.revisions
+				.map((revision) => revision.notebook_id)
+				.find((id) => id !== original.current!.notebook_id)!;
 			await expect(api.deps.services.notebooks.getNotebookMeta(pid, reserved)).rejects.toThrow(
 				NotFoundError,
 			);
@@ -1591,7 +1694,7 @@ describe('asynchronous preview preparation', () => {
 		archive.resolve([{ path: 'notebook.py', bytes: new TextEncoder().encode('late') }]);
 		await vi.advanceTimersByTimeAsync(0);
 		expect((await api.deps.services.previews.get(pid, nid, pending.id)).current).toBeUndefined();
-		for (const runtime of failed.runtime_ids)
+		for (const runtime of failed.revisions.map((revision) => revision.notebook_id))
 			expect(await api.bucket.head(paths.project(pid).notebook(runtime).previewMeta)).toBeNull();
 	});
 
@@ -1721,8 +1824,10 @@ describe('preview preparation quota failures', () => {
 		const failed = await service.prepare(record, api.deps.sourceControl, true);
 		expect(failed.preparation).toBe('failed');
 		expect(failed.current).toEqual(record.current);
-		expect(failed.runtime_ids).toEqual(record.runtime_ids);
-		expect(Object.keys(failed.artifact_cleanup_after ?? {})).toEqual(record.runtime_ids);
+		expect(failed.revisions.map((revision) => revision.notebook_id)).toEqual(
+			record.revisions.map((revision) => revision.notebook_id),
+		);
+		expect(failed.revisions).toEqual(record.revisions);
 		expect(reader.fetchWorkspace).toHaveBeenCalledOnce();
 		reserve.mockRestore();
 		const recovered = await service.prepare(failed, api.deps.sourceControl, true);
