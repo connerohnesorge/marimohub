@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router-dom';
 import { renderWithClient } from '@/test/render';
 import type * as PreviewsApi from '@/api/previews';
@@ -12,6 +12,8 @@ const state = vi.hoisted(() => ({
 	sourceType: 'local',
 	notebook: vi.fn(),
 	create: vi.fn(),
+	remove: vi.fn(),
+	previews: [] as PreviewsApi.NotebookPreview[],
 }));
 vi.mock('@/api/apps', () => ({ useAppQuery: () => ({ data: { your_role: state.role } }) }));
 vi.mock('@/api/hooks', () => ({
@@ -25,8 +27,8 @@ vi.mock('@/api/hooks', () => ({
 }));
 vi.mock('@/api/previews', async (importOriginal) => ({
 	...(await importOriginal<typeof PreviewsApi>()),
-	usePreviewsQuery: () => ({ data: [] }),
-	useDeletePreview: () => ({ mutate: vi.fn() }),
+	usePreviewsQuery: () => ({ data: state.previews }),
+	useDeletePreview: () => ({ mutate: state.remove, reset: vi.fn() }),
 	useCreatePreview: () => ({ mutate: state.create }),
 }));
 
@@ -51,6 +53,8 @@ function setup() {
 
 beforeEach(() => {
 	state.create.mockReset();
+	state.remove.mockReset();
+	state.previews = [];
 	state.role = 'manager';
 	state.previewProviders = ['github'];
 	state.sourceType = 'local';
@@ -107,5 +111,38 @@ describe('preview creation eligibility', () => {
 		await user.type(screen.getByRole('textbox', { name: 'Name' }), ' again');
 		await user.click(submit);
 		expect(state.create.mock.calls[2][0].requestKey).not.toBe(initial);
+	});
+});
+
+describe('preview deletion', () => {
+	it('requires confirmation, allows cancellation, and closes after deletion', async () => {
+		state.previews = [
+			{
+				id: 'preview-1',
+				name: 'Review build',
+				preparation: 'ready',
+				state: 'active',
+				can: { manage: true },
+				source_type: 'branch',
+			} as PreviewsApi.NotebookPreview,
+		];
+		state.remove.mockImplementation((_id, { onSuccess }) => onSuccess());
+		const user = userEvent.setup();
+		setup();
+		await user.click(screen.getByRole('button', { name: 'Delete' }));
+		expect(state.remove).not.toHaveBeenCalled();
+		let dialog = screen.getByRole('dialog');
+		expect(within(dialog).getByText(/Reviewers will lose access immediately/)).toBeInTheDocument();
+		await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+		expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+		expect(state.remove).not.toHaveBeenCalled();
+		await user.click(screen.getByRole('button', { name: 'Delete' }));
+		dialog = screen.getByRole('dialog');
+		await user.click(within(dialog).getByRole('button', { name: 'Delete preview' }));
+		expect(state.remove).toHaveBeenCalledWith(
+			'preview-1',
+			expect.objectContaining({ onSuccess: expect.any(Function) }),
+		);
+		expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 	});
 });

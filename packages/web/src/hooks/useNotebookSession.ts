@@ -11,6 +11,7 @@ import { isNotFoundError } from '@/api/request';
 import { useGeneration } from '@/hooks/useGeneration';
 import { useInterval } from '@/hooks/useInterval';
 import type { Session } from '@/types';
+import { sessionStartupDeadlineMs } from '@/lib/sessions';
 
 /** How often a running notebook pings the heartbeat endpoint, in ms. */
 const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
@@ -21,14 +22,6 @@ const START_POLL_INTERVAL_MS = 2_000;
 
 /** Startup-timeout fallback when capabilities are unavailable (server default). */
 const DEFAULT_STARTUP_TIMEOUT_S = 120;
-
-/**
- * Slack past the server's startup timeout before the client fails a
- * still-`starting` session itself. The server enforces the timeout on the
- * kernel wait and returns a richer error, so this only catches a start nothing
- * else concludes (e.g. the provisioning replica died mid-start).
- */
-const STARTUP_TIMEOUT_GRACE_MS = 30_000;
 
 /** Editor takeovers need status checks more often than editor heartbeats. */
 const RUN_WATCH_INTERVAL_MS = 30_000;
@@ -342,7 +335,7 @@ export function useNotebookSession(
 			// timeout, matching the server's own timeout error; the grace is an
 			// implementation detail.
 			const timeoutSeconds = startupTimeoutSeconds ?? DEFAULT_STARTUP_TIMEOUT_S;
-			const deadlineMs = timeoutSeconds * 1000 + STARTUP_TIMEOUT_GRACE_MS;
+			const deadlineMs = sessionStartupDeadlineMs(timeoutSeconds);
 			if (startingSinceRef.current !== null && Date.now() - startingSinceRef.current > deadlineMs) {
 				failStart({
 					code: 'STARTUP_TIMEOUT',

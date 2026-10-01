@@ -118,6 +118,58 @@ async function userApi(role: 'app-user' | 'viewer' | 'editor' | 'manager', name:
 }
 
 describe('Notebook previews', () => {
+	it.each(['branch', 'commit'] as const)(
+		'reports unsupported %s suggestions while allowing manual resolution',
+		async (type) => {
+			delete reader.listBranches;
+			delete reader.listCommits;
+			const url = `/projects/${pid}/notebooks/${nid}/source/refs?type=${type}`;
+			const error = await expectError(await api.request('GET', url), 422);
+			expect(error.message).toBe(`Source provider does not support ${type} suggestions`);
+			const query = type === 'branch' ? 'prototype' : SHA;
+			expect(
+				await expectOk(await api.request('GET', `${url}&resolve=true&query=${query}`)),
+			).toEqual([{ value: query, label: query, commit: SHA }]);
+		},
+	);
+
+	it.each(['branch', 'commit'] as const)('caps %s suggestions at 30', async (type) => {
+		const suggestions = Array.from({ length: 45 }, (_, index) => ({
+			value: `${index}`,
+			label: `Suggestion ${index}`,
+			commit: SHA,
+		}));
+		if (type === 'branch') reader.listBranches = vi.fn(async () => suggestions);
+		else reader.listCommits = vi.fn(async () => suggestions);
+		expect(
+			await expectOk(
+				await api.request('GET', `/projects/${pid}/notebooks/${nid}/source/refs?type=${type}`),
+			),
+		).toEqual(suggestions.slice(0, 30));
+	});
+
+	it('reads the live parent README for preview details', async () => {
+		const record = await create();
+		const parent = paths.project(pid).notebook(nid);
+		const runtimeId = record.current!.notebook_id;
+		await api.deps.services.notebooks.updateNotebook(pid, nid, { readme: '# Review notes' }, ACTOR);
+		expect(await api.bucket.get(paths.project(pid).notebook(runtimeId).readme)).toBeNull();
+		expect((await api.deps.services.notebooks.getNotebook(pid, runtimeId)).readme).toBe(
+			'# Review notes',
+		);
+		await api.deps.services.notebooks.updateNotebook(
+			pid,
+			nid,
+			{ readme: '# Updated notes' },
+			ACTOR,
+		);
+		expect((await api.deps.services.notebooks.getNotebook(pid, runtimeId)).readme).toBe(
+			'# Updated notes',
+		);
+		await api.bucket.delete(parent.readme);
+		expect((await api.deps.services.notebooks.getNotebook(pid, runtimeId)).readme).toBeNull();
+	});
+
 	it.each(['https://hub.example.com/marimohub', 'https://hub.example.com/marimohub/'])(
 		'preserves the configured public prefix in links and launches: %s',
 		async (appBaseUrl) => {
@@ -1369,6 +1421,39 @@ describe('Preview source and compute boundaries', () => {
 });
 
 describe('asynchronous preview preparation', () => {
+	it('does not consume scheduled work when already cancelled', async () => {
+		const service = api.deps.services.previews;
+		const scan = vi.spyOn(service.store, 'nextProjects');
+		await service.preparePending(api.deps.sourceControl!, AbortSignal.abort());
+		expect(scan).not.toHaveBeenCalled();
+	});
+
+	it.each([false, true])(
+		'does not count shutdown cancellation as a preparation failure: published=%s',
+		async (published) => {
+			const service = api.deps.services.previews;
+			const record = published
+				? await create()
+				: await service.create(pid, nid, body, ACTOR, api.deps.sourceControl);
+			const reached = Promise.withResolvers<void>();
+			vi.mocked(reader.getBranchHead).mockImplementation(() => {
+				reached.resolve();
+				return new Promise(() => {});
+			});
+			const controller = new AbortController();
+			const preparing = service.prepare(record, api.deps.sourceControl, true, controller.signal);
+			await reached.promise;
+			controller.abort(new Error('server shutdown'));
+			const cancelled = await preparing;
+			expect(cancelled.preparation).toBe(published ? 'ready' : 'pending');
+			expect(cancelled.preparation_failures).toBe(record.preparation_failures);
+			expect(cancelled.next_attempt_at).toBe(record.next_attempt_at);
+			expect(cancelled.current).toEqual(record.current);
+			expect(cancelled.error).toBeUndefined();
+			expect(cancelled.lease).toBeUndefined();
+		},
+	);
+
 	it('recovers the same retry key after capacity is released beyond the creation deadline', async () => {
 		const service = api.deps.services.previews;
 		const createPending = (key?: string, input = body) =>

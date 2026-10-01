@@ -3158,6 +3158,7 @@ components:
               type: string
             preview_id:
               type: string
+              pattern: ^[a-f0-9]{32}$
           required:
             - notebook_id
             - preview_id
@@ -3249,6 +3250,7 @@ components:
               type: string
             preview_id:
               type: string
+              pattern: ^[a-f0-9]{32}$
           required:
             - notebook_id
             - preview_id
@@ -4109,7 +4111,7 @@ components:
               type: string
             commit:
               type: string
-              pattern: ^[a-f0-9]{40}$
+              pattern: ^[a-fA-F0-9]{40}$
           required:
             - type
             - notebook_id

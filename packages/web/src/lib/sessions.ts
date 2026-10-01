@@ -1,5 +1,10 @@
 import type { Session } from '@/types';
 
+export function sessionStartupDeadlineMs(timeoutSeconds = 120): number {
+	// Allow the server time to report its own startup failure before giving up locally.
+	return timeoutSeconds * 1000 + 30_000;
+}
+
 // Liveliness ordering for a notebook's runtime: a notebook may have several
 // sessions, and the row should reflect its strongest live state.
 // running > starting > terminating; anything else (terminal/unknown) ranks lowest.
@@ -55,6 +60,7 @@ export function sessionConnectionHint(session: Session | undefined): string {
 }
 
 /**
+ * Preview runtimes have separate controls and are excluded from parent notebook controls.
  * Reduce a flat list of sessions to the "most alive" session per notebook and
  * per mode, keyed by `notebook_id`. A persistent edit sandbox, a caller-owned
  * temporary sandbox, and the shared app can coexist. At the same liveness rank,

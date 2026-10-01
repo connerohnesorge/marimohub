@@ -152,6 +152,8 @@ export const RunIdSchema = z.string().refine(RunId.is);
 // format the identity provider doesn't guarantee.
 export const UserIdSchema = z.string().refine(UserId.is);
 
+export const PreviewIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
+
 // --- Catalog ---
 
 export const CatalogSchema = z.object({
@@ -464,7 +466,7 @@ export const RuntimeSchema = z.object({
 export type Runtime = z.infer<typeof RuntimeSchema>;
 
 export const NotebookMetaSchema = z.object({
-	preview: z.object({ notebook_id: NotebookIdSchema, preview_id: z.string() }).optional(),
+	preview: z.object({ notebook_id: NotebookIdSchema, preview_id: PreviewIdSchema }).optional(),
 	schema_version: SchemaVersionSchema,
 	id: NotebookIdSchema,
 	project_id: ProjectIdSchema,
@@ -776,9 +778,9 @@ export type SurfaceState = z.infer<typeof SurfaceStateSchema>;
 export const PreviewSessionOriginSchema = z.object({
 	type: z.literal('preview'),
 	notebook_id: NotebookIdSchema,
-	preview_id: z.string().regex(/^[a-f0-9]{32}$/),
+	preview_id: PreviewIdSchema,
 	revision_id: VersionIdSchema,
-	commit: z.string().regex(/^[a-f0-9]{40}$/i),
+	commit: z.string().regex(/^[a-fA-F0-9]{40}$/),
 });
 
 // `looseObject` for the same rolling-deploy reason as TokenSchema: every status

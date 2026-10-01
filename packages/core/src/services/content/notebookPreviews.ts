@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
 	NotebookIdSchema,
+	PreviewIdSchema,
 	ProjectIdSchema,
 	SessionIdSchema,
 	UserIdSchema,
@@ -8,7 +9,7 @@ import {
 } from '../../schema';
 import type { NotebookId, ProjectId } from '../../ids';
 
-export const PreviewIdSchema = z.string().regex(/^[a-f0-9]{32}$/);
+export { PreviewIdSchema } from '../../schema';
 export const PreviewSourceSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('branch'),

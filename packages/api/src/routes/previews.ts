@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import {
 	PreviewNotReadyError,
+	ValidationError,
 	NotFoundError,
 	PreviewCreateSchema,
 	PreviewIdSchema,
@@ -143,7 +144,7 @@ const discover = createRoute({
 	tags: ['Previews'],
 	summary: 'Suggest GitHub branches or recent commits',
 	description:
-		'Returns at most 30 matches from the first 100 branches or recent commits. Manual values remain supported.',
+		'Returns at most 30 matches from the first 100 branches or recent commits. Manual values remain supported. Providers without suggestion support return 422; explicit resolution remains available.',
 	request: {
 		params: NotebookIdParam,
 		query: z.object({
@@ -156,7 +157,9 @@ const discover = createRoute({
 		200: jsonContent(
 			z.object({
 				success: z.literal(true),
-				data: z.array(z.object({ value: z.string(), commit: z.string(), label: z.string() })),
+				data: z
+					.array(z.object({ value: z.string(), commit: z.string(), label: z.string() }))
+					.max(30),
 			}),
 			'Source suggestions',
 		),
@@ -362,6 +365,12 @@ app.openapi(discover, async (c) => {
 	await manageable(deps, pid, nid, user);
 	const { source, reader } = await deps.services.previews.source(pid, nid, deps.sourceControl);
 	const query = c.req.valid('query');
+	if (
+		query.resolve !== 'true' &&
+		!(query.type === 'branch' ? reader.listBranches : reader.listCommits)
+	) {
+		throw new ValidationError(`Source provider does not support ${query.type} suggestions`);
+	}
 	const data =
 		query.resolve === 'true'
 			? [
@@ -374,8 +383,8 @@ app.openapi(discover, async (c) => {
 					},
 				]
 			: query.type === 'branch'
-				? ((await reader.listBranches?.(source.repo, query.query)) ?? [])
-				: ((await reader.listCommits?.(source.repo, query.query)) ?? []);
-	return c.json({ success: true as const, data }, 200);
+				? await reader.listBranches!(source.repo, query.query)
+				: await reader.listCommits!(source.repo, query.query);
+	return c.json({ success: true as const, data: data.slice(0, 30) }, 200);
 });
 export default app;

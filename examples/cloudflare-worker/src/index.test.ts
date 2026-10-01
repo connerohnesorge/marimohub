@@ -68,6 +68,19 @@ describe('Cloudflare Worker configuration', () => {
 		SANDBOX: {},
 	};
 
+	it('does not advertise previews without a source-control registry', async () => {
+		const response = await worker.fetch(
+			new Request('https://hub.example.com/api/v1/capabilities'),
+			{ ...baseEnv, NOTEBOOKS_BUCKET: new MemoryBucket() } as unknown as Env,
+			{ waitUntil: vi.fn(), passThroughOnException: vi.fn(), props: {} },
+		);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({
+			success: true,
+			data: { source_control: { preview_providers: [] } },
+		});
+	});
+
 	it('wires public deployment branding', async () => {
 		const response = await worker.fetch(
 			new Request('https://hub.example.com/api/v1/theme'),

@@ -895,7 +895,7 @@ components:
                     type: string
                   commit:
                     type: string
-                    pattern: ^[a-f0-9]{40}$/i
+                    pattern: ^[a-fA-F0-9]{40}$
                 required:
                   - type
                   - notebook_id
@@ -942,7 +942,7 @@ components:
                           type: string
                         commit:
                           type: string
-                          pattern: ^[a-f0-9]{40}$/i
+                          pattern: ^[a-fA-F0-9]{40}$
                       required:
                         - type
                         - notebook_id
@@ -1099,7 +1099,7 @@ components:
                     type: string
                   commit:
                     type: string
-                    pattern: ^[a-f0-9]{40}$/i
+                    pattern: ^[a-fA-F0-9]{40}$
                 required:
                   - type
                   - notebook_id
@@ -3038,7 +3038,7 @@ components:
               type: string
             commit:
               type: string
-              pattern: ^[a-f0-9]{40}$/i
+              pattern: ^[a-fA-F0-9]{40}$
           required:
             - type
             - notebook_id
@@ -13145,7 +13145,8 @@ paths:
         - Previews
       summary: Suggest GitHub branches or recent commits
       description: Returns at most 30 matches from the first 100 branches or recent
-        commits. Manual values remain supported.
+        commits. Manual values remain supported. Providers without suggestion
+        support return 422; explicit resolution remains available.
       parameters:
         - schema:
             type: string
@@ -13211,6 +13212,7 @@ paths:
                         - value
                         - commit
                         - label
+                    maxItems: 30
                 required:
                   - success
                   - data

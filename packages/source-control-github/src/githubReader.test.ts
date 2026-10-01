@@ -2,6 +2,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { gzipSync } from 'fflate';
 import { BadRequestError, UnavailableError, ValidationError } from '@marimo-hub/core/errors';
+import { sourceControlPublishFailure } from '@marimo-hub/core/ports/source-control';
 import { GitHubAppPublisher } from './index';
 import { collectTarballWorkspace, tarballPathMapper } from './githubWorkspace';
 
@@ -406,6 +407,32 @@ describe('GitHub preview source failures', () => {
 		},
 	);
 
+	it.each([404, 422])('returns no suggestions for a missing exact SHA (%i)', async (status) => {
+		const github = reader((url) =>
+			url.pathname.includes('/commits/') ? response({}, status) : null,
+		);
+		await expect(github.listCommits('owner/repo', 'a'.repeat(40))).resolves.toEqual([]);
+	});
+
+	it.each([403, 429, 503])('preserves exact-SHA discovery failures (%i)', async (status) => {
+		const github = reader((url) =>
+			url.pathname.includes('/commits/') ? response({}, status) : null,
+		);
+		await expect(github.listCommits('owner/repo', 'a'.repeat(40))).rejects.toThrow(
+			UnavailableError,
+		);
+	});
+
+	it('returns a matching exact SHA without searching recent commits', async () => {
+		const sha = 'a'.repeat(40);
+		const github = reader((url) =>
+			url.pathname.endsWith(`/commits/${sha}`) ? response({ sha }) : null,
+		);
+		await expect(github.listCommits('owner/repo', sha)).resolves.toEqual([
+			{ value: sha, commit: sha, label: sha.slice(0, 12) },
+		]);
+	});
+
 	it.each([403, 429, 503])(
 		'surfaces discovery HTTP %i instead of treating failure as an empty result',
 		async (status) => {
@@ -489,6 +516,72 @@ describe('GitHub preview source failures', () => {
 });
 
 describe('GitHub preview cancellation', () => {
+	it('preserves a pre-flight cancellation without failure metadata or requests', async () => {
+		const controller = new AbortController();
+		const reason = new DOMException('Worker stopped', 'AbortError');
+		controller.abort(reason);
+		const fetcher = vi.fn();
+		const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+		await expect(
+			github.getBranchHead('owner/repo', 'main', { signal: controller.signal }),
+		).rejects.toBe(reason);
+		expect(sourceControlPublishFailure(reason)).toBeUndefined();
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it.each(['installation', 'access_tokens', 'branches/main'])(
+		'preserves cancellation during %s without publication failure metadata',
+		async (path) => {
+			const controller = new AbortController();
+			const reason = new DOMException('Worker stopped', 'AbortError');
+			const fetcher = vi.fn(async (url: string) => {
+				if (url.endsWith(`/${path}`)) {
+					controller.abort(reason);
+					throw new TypeError('Network request cancelled');
+				}
+				if (url.endsWith('/installation')) return response({ id: 42 });
+				return response({ token: 'token' });
+			});
+			const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+			await expect(
+				github.getBranchHead('owner/repo', 'main', { signal: controller.signal }),
+			).rejects.toBe(reason);
+			expect(sourceControlPublishFailure(reason)).toBeUndefined();
+		},
+	);
+
+	it.each(['installation', 'access_tokens', 'branches/main', 'tarball'])(
+		'preserves cancellation while reading the %s response body',
+		async (path) => {
+			const controller = new AbortController();
+			const reason = new DOMException('Worker stopped', 'AbortError');
+			const fetcher = async (url: string) => {
+				if (url.includes(`/${path}`)) {
+					return new Response(
+						new ReadableStream(
+							{
+								pull(stream) {
+									controller.abort(reason);
+									stream.error(new TypeError('Body cancelled'));
+								},
+							},
+							{ highWaterMark: 0 },
+						),
+					);
+				}
+				if (url.endsWith('/installation')) return response({ id: 42 });
+				return response({ token: 'token' });
+			};
+			const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+			await expect(
+				path === 'tarball'
+					? github.fetchWorkspace('owner/repo', 'a'.repeat(40), '', { signal: controller.signal })
+					: github.getBranchHead('owner/repo', 'main', { signal: controller.signal }),
+			).rejects.toBe(reason);
+			expect(sourceControlPublishFailure(reason)).toBeUndefined();
+		},
+	);
+
 	it('passes the same cancellation signal through authentication and archive fetch', async () => {
 		const controller = new AbortController();
 		const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
@@ -511,7 +604,8 @@ describe('GitHub preview cancellation', () => {
 		const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
 		await expect(
 			github.getBranchHead('owner/repo', 'main', { signal: controller.signal }),
-		).rejects.toThrow();
+		).rejects.toBe(controller.signal.reason);
+		expect(sourceControlPublishFailure(controller.signal.reason)).toBeUndefined();
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
 });

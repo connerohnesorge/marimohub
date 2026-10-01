@@ -29,6 +29,7 @@ export function PreviewsPage() {
 	const parent = useAppQuery(pid, nid);
 	const canManage = parent.data?.your_role === 'manager' || parent.data?.your_role === 'admin';
 	const [creating, setCreating] = useState(false);
+	const [deleting, setDeleting] = useState<NotebookPreview | null>(null);
 	const remove = useDeletePreview(pid, nid);
 	return (
 		<main className="mx-auto max-w-4xl space-y-6 p-6">
@@ -49,7 +50,6 @@ export function PreviewsPage() {
 				<p>Preview creation requires a GitHub App connection.</p>
 			)}
 			{query.isError && <p role="alert">{query.error.message}</p>}
-			{remove.isError && <p role="alert">{remove.error.message}</p>}
 			{query.isPending && <output>Loading previews…</output>}
 			{query.data?.length === 0 && <p>No previews yet.</p>}
 			{query.data?.map((preview) => (
@@ -57,9 +57,7 @@ export function PreviewsPage() {
 					<div className="flex flex-wrap items-center gap-3">
 						<h2 className="font-medium">{preview.name}</h2>
 						<PreviewBadge preview={preview} />
-						<span className="text-xs">
-							{preview.state !== 'active' ? 'Deleting' : preview.preparation}
-						</span>
+						<span className="text-xs">{preview.preparation}</span>
 					</div>
 					<p className="text-sm text-muted-foreground">
 						{preview.source?.type === 'branch' ? `${preview.source.branch} · ` : ''}
@@ -72,14 +70,12 @@ export function PreviewsPage() {
 						</p>
 					)}
 					<div className="flex flex-wrap gap-2">
-						{preview.state === 'active' && (
-							<Link
-								className="rounded border px-3 py-2 text-sm"
-								to={`/projects/${pid}/notebooks/${nid}/previews/${preview.id}`}
-							>
-								Open preview
-							</Link>
-						)}
+						<Link
+							className="rounded border px-3 py-2 text-sm"
+							to={`/projects/${pid}/notebooks/${nid}/previews/${preview.id}`}
+						>
+							Open preview
+						</Link>
 						<Button variant="default" onPress={() => void copyPreviewLink(preview.url)}>
 							Copy link
 						</Button>
@@ -87,7 +83,10 @@ export function PreviewsPage() {
 							<Button
 								variant="default"
 								isDisabled={remove.isPending}
-								onPress={() => remove.mutate(preview.id)}
+								onPress={() => {
+									remove.reset();
+									setDeleting(preview);
+								}}
 							>
 								Delete
 							</Button>
@@ -95,6 +94,41 @@ export function PreviewsPage() {
 					</div>
 				</article>
 			))}
+			{deleting && (
+				<DialogModal
+					isOpen
+					onClose={() => {
+						if (!remove.isPending) setDeleting(null);
+					}}
+					title="Delete preview"
+				>
+					<p className="text-sm">
+						Delete “{deleting.name}”? Reviewers will lose access immediately, and running sessions
+						will be stopped.
+					</p>
+					{remove.isError && (
+						<p role="alert" className="mt-3 text-sm">
+							{remove.error.message}
+						</p>
+					)}
+					<div className="mt-4 flex justify-end gap-2">
+						<Button
+							variant="default"
+							isDisabled={remove.isPending}
+							onPress={() => setDeleting(null)}
+						>
+							Cancel
+						</Button>
+						<Button
+							variant="danger"
+							isDisabled={remove.isPending}
+							onPress={() => remove.mutate(deleting.id, { onSuccess: () => setDeleting(null) })}
+						>
+							{remove.isPending ? 'Deleting…' : 'Delete preview'}
+						</Button>
+					</div>
+				</DialogModal>
+			)}
 			{creating && previewsAvailable && (
 				<DialogModal isOpen onClose={() => setCreating(false)} title="Create preview">
 					<CreatePreviewForm pid={pid} nid={nid} onCreated={() => setCreating(false)} />

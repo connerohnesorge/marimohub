@@ -241,9 +241,14 @@ export class NotebookService {
 
 	async getNotebook(projectId: ProjectId, notebookId: NotebookId): Promise<NotebookDetail> {
 		const nb = paths.project(projectId).notebook(notebookId);
+		const metaPromise = this.readNotebookMeta(projectId, notebookId);
 		const [storedMeta, readmeObj, sourceObj] = await Promise.all([
-			this.readNotebookMeta(projectId, notebookId),
-			this.bucket.get(nb.readme),
+			metaPromise,
+			metaPromise.then((meta) =>
+				this.bucket.get(
+					paths.project(projectId).notebook(meta.preview?.notebook_id ?? notebookId).readme,
+				),
+			),
 			this.bucket.get(nb.source),
 		]);
 

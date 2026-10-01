@@ -1069,7 +1069,7 @@ export interface paths {
 		};
 		/**
 		 * Suggest GitHub branches or recent commits
-		 * @description Returns at most 30 matches from the first 100 branches or recent commits. Manual values remain supported.
+		 * @description Returns at most 30 matches from the first 100 branches or recent commits. Manual values remain supported. Providers without suggestion support return 422; explicit resolution remains available.
 		 */
 		get: operations['notebooks.source.refs'];
 		put?: never;

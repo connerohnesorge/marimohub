@@ -88,8 +88,8 @@ Creation and session launch never wait for GitHub. Failed refreshes leave the la
 Preparation has a two-minute lease and aborts network requests before that deadline.
 Failures retry with exponential backoff and jitter, capped near one hour.
 At most four preparations run per deployment, with one per project.
-The Cloudflare scheduled handler starts preparation independently of cleanup.
-The reference Worker requires a GitHub App registry to create previews.
+The reference Cloudflare Worker does not configure a GitHub App registry or run preparation.
+Previews are unavailable in that example. A custom Worker deployment must configure both before enabling previews.
 Automatic updates, expiry, and cleanup require maintenance.
 
 Previews expire after seven days by default, with an API maximum of 30 days.

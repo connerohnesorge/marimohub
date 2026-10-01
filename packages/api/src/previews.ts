@@ -1,4 +1,4 @@
-import { logOperationalError, NotFoundError } from '@marimo-hub/core';
+import { AppPoolStore, logOperationalError, NotFoundError, sessionMode } from '@marimo-hub/core';
 import type { NotebookPreview } from '@marimo-hub/core';
 import type { ApiDeps } from './context';
 import { sessionRetirer } from './shared';
@@ -13,15 +13,26 @@ async function retirePreviewRuntime(
 	nid: NotebookPreview['notebook_id'],
 ): Promise<boolean> {
 	let complete = true;
-	for (const session of await deps.services.sessions.listByProject(pid, nid)) {
+	const sessions = await deps.services.sessions.listByProject(pid, nid);
+	const pool = sessions.some(
+		(session) =>
+			sessionMode(session) === 'app' &&
+			(session.status === 'starting' || session.status === 'expired'),
+	)
+		? await new AppPoolStore(deps.bucket).read(pid, nid)
+		: null;
+	const members = new Map(pool?.members.map((member) => [member.session_id, member]));
+	for (const session of sessions) {
+		const startupDeadline =
+			members.get(session.session_id)?.operation_expires_at ??
+			Date.parse(session.started_at) + Math.max(deps.sandbox.startupTimeoutMs ?? 900_000, 900_000);
 		// Another maintenance cycle may have expired a session still provisioning.
 		if (
 			(session.status === 'starting' ||
 				(session.status === 'expired' &&
 					(!session.authorization_expires_at ||
 						Date.now() < Date.parse(session.authorization_expires_at)))) &&
-			Date.now() - Date.parse(session.started_at) <
-				Math.max(deps.sandbox.startupTimeoutMs ?? 900_000, 900_000)
+			Date.now() < startupDeadline
 		) {
 			complete = false;
 			continue;

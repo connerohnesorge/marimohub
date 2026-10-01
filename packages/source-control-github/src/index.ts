@@ -105,7 +105,7 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 		if (response.status === 404) {
 			throw new ValidationError(`GitHub branch not found: ${branch}`);
 		}
-		return { commit: nestedString(await responseJson(response), 'commit', 'sha') };
+		return { commit: nestedString(await responseJson(response, options?.signal), 'commit', 'sha') };
 	}
 
 	async resolveCommit(
@@ -113,6 +113,16 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 		commit: string,
 		options?: SourceReadOptions,
 	): Promise<SourceBranchHead> {
+		const head = await this.findCommit(repository, commit, options);
+		if (!head) throw new ValidationError('Commit not found in the configured repository');
+		return head;
+	}
+
+	private async findCommit(
+		repository: string,
+		commit: string,
+		options?: SourceReadOptions,
+	): Promise<SourceBranchHead | undefined> {
 		validateCommit(commit);
 		const { base, token } = await this.readContext(repository, options);
 		const response = await this.client.request(
@@ -121,8 +131,8 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 			{ signal: options?.signal },
 			[404, 422],
 		);
-		if (!response.ok) throw new ValidationError('Commit not found in the configured repository');
-		return { commit: stringField(await responseJson(response), 'sha') };
+		if (!response.ok) return undefined;
+		return { commit: stringField(await responseJson(response, options?.signal), 'sha') };
 	}
 
 	async listBranches(repository: string, query: string) {
@@ -143,8 +153,10 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 
 	async listCommits(repository: string, query: string) {
 		if (/^[a-f0-9]{40}$/i.test(query)) {
-			const { commit } = await this.resolveCommit(repository, query);
-			return [{ value: commit, commit, label: commit.slice(0, 12) }];
+			const head = await this.findCommit(repository, query);
+			return head
+				? [{ value: head.commit, commit: head.commit, label: head.commit.slice(0, 12) }]
+				: [];
 		}
 		const { base, token } = await this.readContext(repository);
 		const data = await responseJson(
@@ -181,6 +193,7 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 				token,
 				{ signal: options?.signal },
 			),
+			options?.signal,
 		);
 		if (!isRecord(data) || !isRecord(data.head))
 			throw new UnavailableError('Invalid GitHub pull request response');
@@ -213,7 +226,14 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 			token,
 			{ signal: options?.signal },
 		);
-		return collectTarballWorkspace(response, rootPath);
+		try {
+			const workspace = await collectTarballWorkspace(response, rootPath);
+			options?.signal?.throwIfAborted();
+			return workspace;
+		} catch (error) {
+			options?.signal?.throwIfAborted();
+			throw error;
+		}
 	}
 
 	async fetchGitDirectory(

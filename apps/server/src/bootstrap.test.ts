@@ -6,7 +6,13 @@ import { ConfigError } from '@marimo-hub/config';
 import { ProxyExposure, SubdomainExposure } from '@marimo-hub/core';
 import { bootstrap } from './bootstrap';
 import type { BootstrapOverrides } from './bootstrap';
-import { startJobScheduler, startMaintenance, startSessionLifecycle, startWarmPools } from './cron';
+import {
+	startJobScheduler,
+	startMaintenance,
+	startPreviewPreparation,
+	startSessionLifecycle,
+	startWarmPools,
+} from './cron';
 import type { OtelHandle } from './otel';
 
 vi.mock('./cron', () => ({
@@ -453,6 +459,7 @@ describe('bootstrap', () => {
 
 		expect(startMaintenance).toHaveBeenCalledTimes(calls);
 		expect(startWarmPools).toHaveBeenCalledTimes(calls);
+		expect(startPreviewPreparation).toHaveBeenCalledTimes(calls);
 		expect(startSessionLifecycle).toHaveBeenCalledTimes(calls);
 	});
 

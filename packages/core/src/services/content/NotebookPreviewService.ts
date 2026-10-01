@@ -205,7 +205,7 @@ export class NotebookPreviewService {
 			Math.max(0, claim.expires_at - Date.now() - 1000),
 		);
 		try {
-			return await this.prepareClaimed(record, registry, claim, signal);
+			return await this.prepareClaimed(record, registry, claim, signal, externalSignal);
 		} finally {
 			clearTimeout(timeout);
 			await this.store.release(token);
@@ -217,6 +217,7 @@ export class NotebookPreviewService {
 		registry: SourceControlRegistry | undefined,
 		claim: { token: string; expires_at: number },
 		signal: AbortSignal,
+		externalSignal?: AbortSignal,
 	): Promise<NotebookPreview> {
 		const token = claim.token;
 		const checkpoint = () => {
@@ -419,6 +420,14 @@ export class NotebookPreviewService {
 			// Unpublished artifacts remain owned until the cleanup pass reclaims them.
 			return published;
 		} catch (error) {
+			if (externalSignal?.aborted) {
+				return this.mutateLeased(record, token, (current) => ({
+					...current,
+					preparation: current.current ? 'ready' : 'pending',
+					error: undefined,
+					lease: undefined,
+				}));
+			}
 			if (error instanceof NotFoundError) {
 				const parent = await this.notebooks
 					.getNotebookMeta(record.project_id, record.notebook_id)
@@ -624,6 +633,7 @@ export class NotebookPreviewService {
 	}
 
 	async preparePending(registry: SourceControlRegistry, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return;
 		const projects = await this.store.nextProjects('prepare');
 		// One candidate per project prevents a busy repository from monopolizing workers.
 		for (let offset = 0; offset < projects.length; offset += PREVIEW_LIMITS.concurrency) {

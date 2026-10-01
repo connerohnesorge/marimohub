@@ -99,8 +99,10 @@ export class GitHubClient {
 				headers,
 			});
 		} catch (error) {
+			init.signal?.throwIfAborted();
 			throw new UnavailableError('GitHub is unavailable', { cause: error });
 		}
+		init.signal?.throwIfAborted();
 		if (!response.ok && !allowedStatuses.includes(response.status)) {
 			throw githubRequestError(response);
 		}
@@ -113,10 +115,12 @@ export class GitHubClient {
 		access: 'read' | 'write' | 'preview',
 		signal?: AbortSignal,
 	): Promise<string> {
+		signal?.throwIfAborted();
 		let jwt: string;
 		try {
 			jwt = this.appJwt();
 		} catch (error) {
+			signal?.throwIfAborted();
 			throw markSourceControlPublishFailure(error, { provider: 'github', stage: 'auth' });
 		}
 		let installationResponse: Response;
@@ -128,6 +132,7 @@ export class GitHubClient {
 				[404],
 			);
 		} catch (error) {
+			signal?.throwIfAborted();
 			throw markSourceControlPublishFailure(error, {
 				provider: 'github',
 				stage: 'installation',
@@ -140,7 +145,7 @@ export class GitHubClient {
 				{ provider: 'github', stage: 'installation', status: 404 },
 			);
 		}
-		const installationId = numberField(await responseJson(installationResponse), 'id');
+		const installationId = numberField(await responseJson(installationResponse, signal), 'id');
 		let tokenResponse: Response;
 		try {
 			tokenResponse = await this.request(
@@ -161,12 +166,13 @@ export class GitHubClient {
 				},
 			);
 		} catch (error) {
+			signal?.throwIfAborted();
 			throw markSourceControlPublishFailure(error, {
 				provider: 'github',
 				stage: 'auth',
 				status: error instanceof GitHubRequestError ? error.providerStatus : undefined,
 			});
 		}
-		return stringField(await responseJson(tokenResponse), 'token');
+		return stringField(await responseJson(tokenResponse, signal), 'token');
 	}
 }

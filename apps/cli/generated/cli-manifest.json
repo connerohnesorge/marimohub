@@ -3636,7 +3636,7 @@
 			"method": "GET",
 			"path": "/api/v1/projects/{pid}/notebooks/{nid}/source/refs",
 			"summary": "Suggest GitHub branches or recent commits",
-			"description": "Returns at most 30 matches from the first 100 branches or recent commits. Manual values remain supported.",
+			"description": "Returns at most 30 matches from the first 100 branches or recent commits. Manual values remain supported. Providers without suggestion support return 422; explicit resolution remains available.",
 			"parameters": [
 				{
 					"name": "nid",

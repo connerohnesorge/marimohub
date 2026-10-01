@@ -41,18 +41,22 @@ describe('Project — Notebook Actions: configuration', () => {
 		]);
 	});
 
-	it.each([false, true])(
-		'offers previews for Git notebooks only with the integration: %s',
-		async (enabled) => {
+	it.each([
+		['git', false],
+		['git', true],
+		['local', true],
+	] as const)(
+		'offers previews for %s notebooks with the integration enabled: %s',
+		async (sourceType, enabled) => {
 			const user = userEvent.setup();
 			makeFetch({
-				notebooks: [{ ...notebook(), source_type: 'git' }],
+				notebooks: [{ ...notebook(), source_type: sourceType }],
 				capabilities: { source_control: { preview_providers: enabled ? ['github'] : [] } },
 			});
 			await renderProject();
 			await user.click(screen.getByRole('button', { name: /Notebook actions for/ }));
 			await screen.findByRole('menu');
-			if (enabled)
+			if (enabled && sourceType === 'git')
 				expect(await screen.findByRole('menuitem', { name: 'Previews' })).toBeInTheDocument();
 			else expect(screen.queryByRole('menuitem', { name: 'Previews' })).not.toBeInTheDocument();
 		},

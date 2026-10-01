@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Route, Routes } from 'react-router-dom';
@@ -21,11 +21,21 @@ const savedEditor = {
 	version: 'first-version',
 };
 
-type HeartbeatResponse = 'running' | 'starting' | 'network' | number;
+type HeartbeatResponse =
+	| 'running'
+	| 'starting'
+	| 'terminated'
+	| 'expired'
+	| 'error'
+	| 'terminating'
+	| 'network'
+	| number;
 function setup({
 	appUser = false,
 	heartbeatIntervalSeconds = 30,
 	heartbeat = 'running' as HeartbeatResponse,
+	deleteStatus = 200,
+	startupTimeoutSeconds = 120,
 } = {}) {
 	let heartbeatResponse = heartbeat;
 	let userId: string | null = 'alice';
@@ -39,7 +49,10 @@ function setup({
 			const method = init?.method ?? 'GET';
 			calls.push({ url, method });
 			if (url === '/api/v1/capabilities')
-				return jsonOk({ app_pool: { heartbeat_interval_seconds: heartbeatIntervalSeconds } });
+				return jsonOk({
+					app_pool: { heartbeat_interval_seconds: heartbeatIntervalSeconds },
+					sandbox_startup_timeout_seconds: startupTimeoutSeconds,
+				});
 			if (url === '/api/v1/me') return jsonOk({ id: userId, email: `${userId}@example.com` });
 			if (url === endpoint) {
 				return jsonOk({
@@ -80,7 +93,11 @@ function setup({
 			if (url.includes('/sessions/')) {
 				if (url.includes('/alice-session') && userId !== 'alice')
 					return jsonError('FORBIDDEN', 'Another user owns this editor', 403);
-				if (method === 'DELETE' || url.endsWith('/leave')) return jsonOk(null);
+				if (method === 'DELETE')
+					return deleteStatus === 200
+						? jsonOk(null)
+						: jsonError('ERROR', 'Could not stop editor', deleteStatus);
+				if (url.endsWith('/leave')) return jsonOk(null);
 				if (url.endsWith('/heartbeat')) {
 					if (heartbeatResponse === 'network') throw new TypeError('Network unavailable');
 					if (typeof heartbeatResponse === 'number')
@@ -179,6 +196,90 @@ describe('PreviewPage', () => {
 		expect(JSON.parse(sessionStorage.getItem(storageKey('alice'))!)).toMatchObject({
 			userId: 'alice',
 		});
+	});
+
+	it.each([403, 404, 409])(
+		'opens another runtime after stale editor cleanup returns %s',
+		async (deleteStatus) => {
+			sessionStorage.setItem(storageKey('alice'), JSON.stringify(savedEditor));
+			const { calls } = setup({ deleteStatus });
+			const user = userEvent.setup();
+			await screen.findByTitle('Review preview');
+			await user.click(screen.getByRole('button', { name: 'Discard edits and open app' }));
+			await waitFor(() =>
+				expect(calls).toContainEqual({ url: `${endpoint}/sessions`, method: 'POST' }),
+			);
+			expect(screen.queryByText('Could not stop editor')).not.toBeInTheDocument();
+		},
+	);
+
+	it('preserves the editor and reports nonterminal cleanup failures', async () => {
+		sessionStorage.setItem(storageKey('alice'), JSON.stringify(savedEditor));
+		const { calls } = setup({ deleteStatus: 503 });
+		const user = userEvent.setup();
+		await screen.findByTitle('Review preview');
+		await user.click(screen.getByRole('button', { name: 'Discard edits and open app' }));
+		expect(await screen.findByText('Could not stop editor')).toBeInTheDocument();
+		expect(calls.some((call) => call.url === `${endpoint}/sessions`)).toBe(false);
+		expect(screen.getByTitle('Review preview')).toBeInTheDocument();
+	});
+
+	it.each(['starting', 503] as const)(
+		'bounds startup when heartbeats return %s and allows a fresh attempt',
+		async (heartbeat) => {
+			vi.useFakeTimers();
+			const { calls, setHeartbeatResponse } = setup({
+				appUser: true,
+				heartbeat,
+				startupTimeoutSeconds: 5,
+			});
+
+			await vi.waitFor(() =>
+				expect(screen.getByRole('button', { name: 'Open app' })).toBeInTheDocument(),
+			);
+			await act(async () => {
+				fireEvent.click(screen.getByRole('button', { name: 'Open app' }));
+				await vi.advanceTimersByTimeAsync(1);
+			});
+			await vi.waitFor(() =>
+				expect(calls.some((call) => call.url.endsWith('/heartbeat'))).toBe(true),
+			);
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(36_000);
+			});
+			expect(screen.getByText(/The preview did not start in time/)).toBeInTheDocument();
+			expect(screen.queryByText('Starting preview…')).not.toBeInTheDocument();
+			const count = calls.filter((call) => call.url.endsWith('/heartbeat')).length;
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(60_000);
+			});
+			expect(calls.filter((call) => call.url.endsWith('/heartbeat'))).toHaveLength(count);
+			setHeartbeatResponse('running');
+			await act(async () => {
+				fireEvent.click(screen.getByRole('button', { name: 'Open latest app' }));
+				await vi.advanceTimersByTimeAsync(1);
+			});
+			await vi.waitFor(() => expect(screen.getByTitle('Review preview')).toBeInTheDocument());
+			expect(screen.queryByText(/The preview did not start in time/)).not.toBeInTheDocument();
+		},
+	);
+
+	it('cancels the startup deadline once the runtime is running', async () => {
+		vi.useFakeTimers();
+		setup({ appUser: true, heartbeat: 'running', startupTimeoutSeconds: 5 });
+		await vi.waitFor(() =>
+			expect(screen.getByRole('button', { name: 'Open app' })).toBeInTheDocument(),
+		);
+		await act(async () => {
+			fireEvent.click(screen.getByRole('button', { name: 'Open app' }));
+			await vi.advanceTimersByTimeAsync(1);
+		});
+		await vi.waitFor(() => expect(screen.getByTitle('Review preview')).toBeInTheDocument());
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(60_000);
+		});
+		expect(screen.getByTitle('Review preview')).toBeInTheDocument();
+		expect(screen.queryByText(/The preview did not start in time/)).not.toBeInTheDocument();
 	});
 
 	it.each([false, true])(
@@ -324,7 +425,7 @@ describe('PreviewPage', () => {
 		},
 	);
 
-	it.each([403, 404, 409])(
+	it.each([403, 404, 409, 'terminated', 'expired', 'error', 'terminating'] as const)(
 		'ends a preview after a confirmed %s heartbeat response',
 		async (status) => {
 			const { refetchHeartbeat, calls } = setup({ appUser: true });

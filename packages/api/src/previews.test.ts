@@ -86,6 +86,65 @@ async function runningSession(notebookId = preview.current!.notebook_id) {
 }
 
 describe('preview maintenance', () => {
+	it('cleans preview execution namespaces without touching the parent app', async () => {
+		const sessions = api.deps.services.sessions;
+		const parent = await runningSession(nid);
+		const child = await sessions.createSession({
+			project_id: pid,
+			notebook_id: preview.current!.notebook_id,
+			user_id: ACTOR,
+			sandbox_id: createSandboxId(),
+			mode: 'app',
+			origin: {
+				type: 'preview',
+				notebook_id: nid,
+				preview_id: preview.id,
+				revision_id: preview.current!.version_id,
+				commit: preview.current!.commit,
+			},
+		});
+		await sessions.setRunning(pid, child.session_id, 'https://sandbox.example');
+		await cleanupPreview(api.deps, await api.deps.services.previews.retire(preview));
+		expect((await sessions.getSession(pid, child.session_id)).sandbox_reclaimed_at).toBeTruthy();
+		expect((await sessions.getSession(pid, parent.session_id)).status).toBe('running');
+		expect(fake.calls.destroy).toBe(1);
+	});
+
+	it.each(['starting', 'retiring'] as const)(
+		'bounds %s app startup protection by its admission lease',
+		async (state) => {
+			const sessions = api.deps.services.sessions;
+			const child = preview.current!.notebook_id;
+			const pool = new AppPoolService(api.bucket, sessions);
+			const admitted = await pool.admit({
+				projectId: pid,
+				notebookId: child,
+				userId: ACTOR,
+				versionId: preview.current!.version_id,
+				startupMs: 60_000,
+			});
+			await sessions.createSession({
+				project_id: pid,
+				notebook_id: child,
+				user_id: ACTOR,
+				mode: 'app',
+				session_id: admitted.member.session_id,
+				sandbox_id: admitted.member.sandbox_id,
+			});
+			if (state === 'retiring') await pool.store.retireForDeletion(pid, child);
+			const retired = await api.deps.services.previews.retire(preview);
+			const clock = vi.spyOn(Date, 'now').mockReturnValue(admitted.member.operation_expires_at - 1);
+			await cleanupPreview(api.deps, retired);
+			expect(fake.calls.destroy).toBe(0);
+			clock.mockReturnValue(admitted.member.operation_expires_at);
+			await cleanupPreview(api.deps, retired);
+			expect(fake.calls.destroy).toBe(1);
+			expect(
+				(await sessions.getSession(pid, admitted.member.session_id)).sandbox_reclaimed_at,
+			).toBeTruthy();
+		},
+	);
+
 	it('reaps committed admissions after session retention without dropping in-flight reservations', async () => {
 		const { sessions, previews } = api.deps.services;
 		const session = await runningSession();
