@@ -1591,3 +1591,11 @@ Admission reservations and pruning share the preview CAS record, so admitted rev
 Committed reservations remain until sandbox reclamation; abandoned reservations without sessions expire after ten minutes.
 Late admissions fail the ownership check. Cleanup defers fresh starting sessions and retries failed destruction without capturing edits.
 App pool tombstones remain under their normal owner.
+
+Preview sessions persist immutable `origin` provenance at creation: parent notebook, preview, prepared version, and commit.
+The stored session's `notebook_id` remains the internal workspace identity used by compute, pools, and cleanup.
+`sessionResourceNotebookId` resolves the public parent identity; API projections never return the hidden workspace ID.
+`sessionResourcePath` provides the notebook or preview navigation target without reading runtime metadata.
+Session controls accept the public parent notebook ID, then resolve their workspace and pool from the stored session.
+History reads authorize against current parent labels; live operations additionally validate preview ownership and expiry.
+Runtime cleanup does not erase provenance from retained sessions or audit events.

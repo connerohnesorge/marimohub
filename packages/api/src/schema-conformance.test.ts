@@ -163,7 +163,7 @@ describe('schema conformance: api response shapes vs core public shapes', () => 
 		];
 		// `can` is response-only: the caller's evaluated grants, computed per
 		// request — never stored on the record.
-		const responseOnlyFields = ['app_assignment', 'app_pool', 'can'];
+		const responseOnlyFields = ['app_assignment', 'app_pool', 'can', 'resource_path'];
 		const coreKeys = shapeKeys(CoreSessionSchema);
 		const apiKeys = shapeKeys(SessionResponseSchema);
 		expect(coreKeys.filter((k) => !internalSessionFields.includes(k))).toEqual(

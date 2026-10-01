@@ -65,6 +65,7 @@ export function sessionsByNotebook(
 ): Map<string, NotebookSessions> {
 	const map = new Map<string, NotebookSessions>();
 	for (const s of sessions ?? []) {
+		if (s.origin?.type === 'preview') continue;
 		const entry = map.get(s.notebook_id) ?? {};
 		const key = s.mode === 'app' ? 'app' : 'edit';
 		if (key === 'app' && rankSession(s.status) > 0) (entry.apps ??= []).push(s);

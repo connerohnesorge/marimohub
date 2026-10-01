@@ -15,7 +15,7 @@ const endpoint = `/api/v1${route}`;
 const storageKey = (userId: string) => `preview-session:${userId}:project:notebook:preview`;
 const savedEditor = {
 	userId: 'alice',
-	nid: 'runtime',
+	nid: 'notebook',
 	sid: 'alice-session',
 	mode: 'edit',
 	version: 'first-version',
@@ -57,9 +57,15 @@ function setup({
 			if (url === `${endpoint}/sessions`) {
 				appStarts++;
 				return jsonOk({
-					notebook_id: appUser ? `runtime-${version}` : 'runtime',
-					session_id: `${userId}-session`,
-					preview_version_id: version,
+					notebook_id: 'notebook',
+					session_id: appUser ? `${userId}-${version}-session` : `${userId}-session`,
+					origin: {
+						type: 'preview',
+						notebook_id: 'notebook',
+						preview_id: 'preview',
+						revision_id: version,
+						commit: 'a'.repeat(40),
+					},
 					...(appUser
 						? {
 								app_assignment: {
@@ -81,7 +87,7 @@ function setup({
 						return jsonError('INTERNAL_ERROR', 'Heartbeat failed', heartbeatResponse);
 					return jsonOk({
 						status: heartbeatResponse,
-						sandbox_url: `https://sandbox.example.com/${userId}/${url.includes('runtime-second-version') ? 'second' : 'first'}`,
+						sandbox_url: `https://sandbox.example.com/${userId}/${url.includes('second-version-session') ? 'second' : 'first'}`,
 					});
 				}
 			}
@@ -237,12 +243,12 @@ describe('PreviewPage', () => {
 		);
 		expect(
 			calls.some(
-				(call) => call.url.includes('runtime-second-version') && call.url.endsWith('/heartbeat'),
+				(call) => call.url.includes('second-version-session') && call.url.endsWith('/heartbeat'),
 			),
 		).toBe(true);
 		expect(
 			calls.some(
-				(call) => call.url.includes('runtime-first-version') && call.url.endsWith('/leave'),
+				(call) => call.url.includes('first-version-session') && call.url.endsWith('/leave'),
 			),
 		).toBe(true);
 	});

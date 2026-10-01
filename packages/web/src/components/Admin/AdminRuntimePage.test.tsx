@@ -134,6 +134,23 @@ describe('AdminRuntimePage', () => {
 		);
 	});
 
+	it('links preview sessions to their preview resource', async () => {
+		const data = structuredClone(fixture);
+		data.apps[0].origin = {
+			type: 'preview',
+			notebook_id: data.apps[0].notebook_id,
+			preview_id: 'preview',
+			revision_id: 'revision',
+			commit: 'a'.repeat(40),
+		};
+		data.apps[0].resource_path = '/projects/analytics/notebooks/sales/previews/preview';
+		setup(data);
+		expect(await screen.findByRole('link', { name: 'Sales dashboard · Preview' })).toHaveAttribute(
+			'href',
+			data.apps[0].resource_path,
+		);
+	});
+
 	it('filters apps and summary counts locally and includes basic editors', async () => {
 		const { user, fetcher } = setup();
 		await screen.findByText('Sales dashboard');

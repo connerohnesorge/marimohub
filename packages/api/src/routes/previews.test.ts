@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+	AppPoolService,
 	createServices,
 	createSessionId,
 	NotFoundError,
@@ -34,6 +35,7 @@ import {
 	stubSourceControl,
 } from '../testing';
 import { sweepPreviews } from '../previews';
+import { authorizeProxyRequest } from '../sandboxProxy';
 
 let api: ReturnType<typeof createTestApi>;
 let pid: ProjectId;
@@ -159,8 +161,8 @@ describe('Notebook previews', () => {
 		const record = await create();
 		const appUser = await userApi('app-user');
 		const launch = () => appUser.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' });
-		const first = await expectOk<Session & { preview_version_id: string }>(await launch());
-		expect(first.preview_version_id).toBe(record.current!.version_id);
+		const first = await expectOk<Session>(await launch());
+		expect(first.origin!.revision_id).toBe(record.current!.version_id);
 		for (const field of ['source_version_id', 'user_id', 'integrations', 'compute_profile'])
 			expect(first).not.toHaveProperty(field);
 
@@ -170,11 +172,11 @@ describe('Notebook previews', () => {
 			await appUser.request('GET', `${base}/${record.id}`),
 		);
 		expect(publicPreview.version_id).toBe(latest.current!.version_id);
-		expect(publicPreview.version_id).not.toBe(first.preview_version_id);
+		expect(publicPreview.version_id).not.toBe(first.origin!.revision_id);
 		const running = await api.deps.services.sessions.getSession(pid, first.session_id);
-		expect(running.source_version_id).toBe(first.preview_version_id);
-		const second = await expectOk<{ preview_version_id: string }>(await launch());
-		expect(second.preview_version_id).toBe(latest.current!.version_id);
+		expect(running.source_version_id).toBe(first.origin!.revision_id);
+		const second = await expectOk<Session>(await launch());
+		expect(second.origin!.revision_id).toBe(latest.current!.version_id);
 	});
 
 	it('isolates prepared source from the parent and never catalogs runtime identities', async () => {
@@ -258,7 +260,8 @@ describe('Notebook previews', () => {
 		const otherApp = await expectOk<Session>(
 			await appUser.request('POST', `${base}/${other.id}/sessions`, { mode: 'app' }),
 		);
-		expect(otherApp.notebook_id).not.toBe(app.notebook_id);
+		expect(otherApp.notebook_id).toBe(app.notebook_id);
+		expect(otherApp.origin!.preview_id).not.toBe(app.origin!.preview_id);
 		await expectError(
 			await appUser.request('POST', `${base}/${record.id}/sessions`, {
 				mode: 'app',
@@ -595,7 +598,7 @@ describe('Preview failure recovery and boundaries', () => {
 			(await api.deps.services.sessions.getSession(pid, session.session_id)).sandbox_reclaimed_at,
 		).toBeDefined();
 		expect(
-			await api.bucket.get(paths.project(pid).notebook(session.notebook_id).source),
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).source),
 		).toBeNull();
 	});
 
@@ -705,7 +708,7 @@ describe('Preview failure recovery and boundaries', () => {
 		const session = await expectOk<Session>(
 			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
 		);
-		expect(session.source_version_id).toBe(record.current!.version_id);
+		expect(session.origin!.revision_id).toBe(record.current!.version_id);
 	});
 
 	it('does not publish an archive missing the configured entry notebook', async () => {
@@ -879,20 +882,22 @@ describe('Preview failure recovery and boundaries', () => {
 		const updated = await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
 		await sweepPreviews(api.deps);
 		expect((await api.deps.services.previews.get(pid, nid, record.id)).runtime_ids).toContain(
-			session.notebook_id,
+			record.current!.notebook_id,
 		);
 		const sessionPath = `/projects/${pid}/notebooks/${session.notebook_id}/sessions/${session.session_id}`;
 		const stillRunning = await expectOk<Session>(
 			await api.request('POST', `${sessionPath}/heartbeat`),
 		);
 		expect(stillRunning.status).toBe('running');
-		expect(stillRunning.source_version_id).toBe(record.current!.version_id);
+		expect(stillRunning.origin!.revision_id).toBe(record.current!.version_id);
 		await expectOk(await api.request('DELETE', sessionPath));
 		await sweepPreviews(api.deps);
 		expect((await api.deps.services.previews.get(pid, nid, record.id)).runtime_ids).toEqual([
 			updated.current!.notebook_id,
 		]);
-		expect(await api.bucket.get(paths.project(pid).notebook(session.notebook_id).meta)).toBeNull();
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
+		).toBeNull();
 	});
 });
 
@@ -1123,7 +1128,7 @@ describe('Preview source and compute boundaries', () => {
 			const session = await expectOk<Session>(
 				await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
 			);
-			expect(session.source_version_id).toBe(record.current!.version_id);
+			expect(session.origin!.revision_id).toBe(record.current!.version_id);
 			const recovered = await api.deps.services.previews.prepare(
 				failed,
 				api.deps.sourceControl,
@@ -1278,10 +1283,10 @@ describe('asynchronous preview preparation', () => {
 		);
 		await started.promise;
 		try {
-			const session = await expectOk<{ preview_version_id: string }>(
+			const session = await expectOk<Session>(
 				await api.request('POST', `${base}/${ready.id}/sessions`, { mode: 'app' }),
 			);
-			expect(session.preview_version_id).toBe(ready.current!.version_id);
+			expect(session.origin!.revision_id).toBe(ready.current!.version_id);
 			await sweepPreviews(api.deps);
 			expect(reader.getBranchHead).toHaveBeenCalledTimes(2);
 		} finally {
@@ -1461,4 +1466,206 @@ describe('preview preparation quota failures', () => {
 		const recovered = await service.prepare(failed, api.deps.sourceControl, true);
 		expect(recovered.current?.commit).toBe(NEXT);
 	});
+});
+
+describe('preview session resource identity', () => {
+	it.each(['app', 'edit'] as const)(
+		'persists immutable %s provenance and exposes only the parent identity',
+		async (mode) => {
+			const record = await create();
+			const started = await expectOk<Session & { resource_path: string }>(
+				await api.request('POST', `${base}/${record.id}/sessions`, { mode }),
+			);
+			const expectedOrigin = {
+				type: 'preview',
+				notebook_id: nid,
+				preview_id: record.id,
+				revision_id: record.current!.version_id,
+				commit: SHA,
+			};
+			expect(started.notebook_id).toBe(nid);
+			expect(started).not.toHaveProperty('source_version_id');
+			expect(started.origin).toEqual(expectedOrigin);
+			expect(started.resource_path).toBe(`${base}/${record.id}`);
+			expect(JSON.stringify(started)).not.toContain(record.current!.notebook_id);
+			const stored = await api.deps.services.sessions.getSession(pid, started.session_id);
+			expect(stored.notebook_id).toBe(record.current!.notebook_id);
+			expect(stored.origin).toEqual(expectedOrigin);
+			head = NEXT;
+			await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
+			const path = `/projects/${pid}/notebooks/${nid}/sessions/${started.session_id}`;
+			expect((await expectOk<Session>(await api.request('GET', path))).origin).toEqual(
+				expectedOrigin,
+			);
+			expect(
+				(await expectOk<Session>(await api.request('POST', `${path}/heartbeat`))).origin,
+			).toEqual(expectedOrigin);
+			await expectError(
+				await api.request(
+					'GET',
+					`/projects/${pid}/notebooks/${record.current!.notebook_id}/sessions/${started.session_id}`,
+				),
+				404,
+			);
+			await expectError(
+				await api.request(
+					'GET',
+					`/projects/${pid}/notebooks/nb-0000000000000000/sessions/${started.session_id}`,
+				),
+				404,
+			);
+			await expectOk(await api.request('DELETE', path));
+		},
+	);
+
+	it('preserves provenance when an app allocation is reused', async () => {
+		const record = await create();
+		const launch = () => api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' });
+		const first = await expectOk<Session>(await launch());
+		const reused = await expectOk<Session & { reused: boolean }>(await launch());
+		expect(reused.reused).toBe(true);
+		expect(reused.session_id).toBe(first.session_id);
+		expect(reused.origin).toEqual(first.origin);
+	});
+
+	it('serves preview surfaces through the parent route and revokes them on deletion', async () => {
+		const record = await create();
+		const session = await expectOk<Session>(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'edit' }),
+		);
+		await api.deps.services.sessions.setSurfaceState(pid, session.session_id, 'vscode', {
+			status: 'ready',
+			port: 8443,
+			started_at: new Date().toISOString(),
+		});
+		const suffix = `/sessions/${session.session_id}/surfaces/vscode`;
+		const path = `/projects/${pid}/notebooks/${nid}${suffix}`;
+		expect(await expectOk(await api.request('GET', path))).toMatchObject({ status: 'ready' });
+		await expectError(
+			await api.request(
+				'GET',
+				`/projects/${pid}/notebooks/${record.current!.notebook_id}${suffix}`,
+			),
+			404,
+		);
+		await api.deps.services.previews.retire(record);
+		await expectError(await api.request('GET', path), 404);
+	});
+
+	it('retains readable history and audit attribution after preview and runtime cleanup', async () => {
+		const record = await create();
+		const started = await expectOk<Session>(
+			await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+		);
+		const path = `/projects/${pid}/notebooks/${nid}/sessions/${started.session_id}`;
+		await expectOk(await api.request('DELETE', `${base}/${record.id}`), 202);
+		const poolView = vi
+			.spyOn(AppPoolService.prototype, 'view')
+			.mockRejectedValue(new Error('Unavailable pool'));
+		const revoked = await expectOk<{
+			origin: Session['origin'];
+			can: { attach: boolean };
+			sandbox_url?: string;
+		}>(await api.request('GET', path));
+		expect(revoked.origin).toEqual(started.origin);
+		expect(revoked.can.attach).toBe(false);
+		expect(revoked.sandbox_url).toBeUndefined();
+		const listed = await expectOk<{ items: Session[] }>(
+			await api.request('GET', `/projects/${pid}/sessions`),
+		);
+		expect(listed.items.find((session) => session.session_id === started.session_id)).toMatchObject(
+			{
+				notebook_id: nid,
+				origin: started.origin,
+				can: { attach: false, stop: false },
+			},
+		);
+		expect(poolView).not.toHaveBeenCalled();
+		poolView.mockRestore();
+		await expectError(await api.request('POST', `${path}/heartbeat`), 404);
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+		await sweepPreviews(api.deps);
+		expect(
+			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).previewMeta),
+		).toBeNull();
+		const history = await expectOk<Session>(await api.request('GET', path));
+		expect(history.origin).toEqual(started.origin);
+		expect(history.notebook_id).toBe(nid);
+		expect(history.status).toBe('terminated');
+		const events = await api.deps.services.events.getEvents(new Date().toISOString().slice(0, 10));
+		expect(events.find((event) => event.event === 'app.start')).toMatchObject({
+			notebook_id: nid,
+			origin: started.origin,
+			session_id: started.session_id,
+		});
+	});
+
+	it('uses current parent permissions for history after runtime cleanup', async () => {
+		const record = await create();
+		const member = await userApi('editor');
+		const started = await expectOk<Session>(
+			await member.request('POST', `${base}/${record.id}/sessions`, { mode: 'edit' }),
+		);
+		await api.deps.services.previews.retire(record);
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+		await sweepPreviews(api.deps);
+		const path = `/projects/${pid}/notebooks/${nid}/sessions/${started.session_id}`;
+		await expectOk(await member.request('GET', path));
+		await api.deps.services.projects.removeMember(pid, uid('editor'), ACTOR);
+		await expectError(await member.request('GET', path), 404);
+	});
+});
+
+it('blocks proxy access immediately after preview revocation without consulting runtime metadata', async () => {
+	api = createTestApi({
+		bucket: api.bucket,
+		compute: api.deps.compute,
+		deps: {
+			...api.deps,
+			sandbox: {
+				...api.deps.sandbox,
+				appBaseUrl: 'https://hub.example.com',
+				exposure: new ProxyExposure('preview-provenance-secret'),
+			},
+		},
+	});
+	const record = await create();
+	const started = await expectOk<Session>(
+		await api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' }),
+	);
+	const request = new Request(started.sandbox_url!);
+	expect((await authorizeProxyRequest(request, api.deps)).kind).toBe('forward');
+	await api.deps.services.previews.retire(record);
+	expect(await authorizeProxyRequest(request, api.deps)).toMatchObject({
+		kind: 'reject',
+		status: 404,
+	});
+});
+
+it('pins session provenance to the loaded runtime when the branch advances during launch', async () => {
+	const record = await create();
+	const started = Promise.withResolvers<void>();
+	const proceed = Promise.withResolvers<void>();
+	const notebooks = api.deps.services.notebooks;
+	const getNotebook = notebooks.getNotebook.bind(notebooks);
+	let blocked = false;
+	vi.spyOn(notebooks, 'getNotebook').mockImplementation(async (projectId, notebookId) => {
+		const result = await getNotebook(projectId, notebookId);
+		if (notebookId === record.current!.notebook_id && !blocked) {
+			blocked = true;
+			started.resolve();
+			await proceed.promise;
+		}
+		return result;
+	});
+	const launching = api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' });
+	await started.promise;
+	try {
+		head = NEXT;
+		await api.deps.services.previews.prepare(record, api.deps.sourceControl, true);
+	} finally {
+		proceed.resolve();
+	}
+	const session = await expectOk<Session>(await launching);
+	expect(session.origin).toMatchObject({ revision_id: record.current!.version_id, commit: SHA });
 });

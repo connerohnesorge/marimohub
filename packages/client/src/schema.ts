@@ -2515,6 +2515,15 @@ export interface components {
 			/** Format: date-time */
 			observed_at: string;
 			apps: {
+				origin?: {
+					/** @enum {string} */
+					type: 'preview';
+					notebook_id: string;
+					preview_id: string;
+					revision_id: string;
+					commit: string;
+				};
+				resource_path?: string;
 				project_id: string;
 				project_name: string;
 				notebook_id: string;
@@ -2522,6 +2531,14 @@ export interface components {
 				current_version_id: string | null;
 				current_version_members: number | null;
 				sandboxes: {
+					origin?: {
+						/** @enum {string} */
+						type: 'preview';
+						notebook_id: string;
+						preview_id: string;
+						revision_id: string;
+						commit: string;
+					};
 					session_id: string;
 					sandbox_id: string | null;
 					user_id: string;
@@ -2565,6 +2582,15 @@ export interface components {
 				incomplete: boolean;
 			}[];
 			editors: {
+				origin?: {
+					/** @enum {string} */
+					type: 'preview';
+					notebook_id: string;
+					preview_id: string;
+					revision_id: string;
+					commit: string;
+				};
+				resource_path?: string;
 				project_id: string;
 				project_name: string;
 				notebook_id: string;
@@ -3351,8 +3377,18 @@ export interface components {
 			items: components['schemas']['NotebookPreview'][];
 			next_cursor: string | null;
 		};
-		PreviewSessionCreateResult: components['schemas']['SessionCreateResult'] & {
-			preview_version_id: string;
+		PreviewSessionCreateResult: components['schemas']['Session'] & {
+			app_assignment?: {
+				visit_id: string;
+				generation: string;
+			};
+			reused: boolean;
+			editor_session?: {
+				/** @enum {string} */
+				sharing: 'shared' | 'exclusive';
+				/** @enum {string} */
+				access: 'shared' | 'owner' | 'temporary';
+			};
 		};
 		Surface: {
 			/** @enum {string} */
@@ -3371,20 +3407,16 @@ export interface components {
 			};
 			last_error?: string;
 		};
-		SessionCreateResult: components['schemas']['Session'] & {
-			app_assignment?: {
-				visit_id: string;
-				generation: string;
-			};
-			reused: boolean;
-			editor_session?: {
-				/** @enum {string} */
-				sharing: 'shared' | 'exclusive';
-				/** @enum {string} */
-				access: 'shared' | 'owner' | 'temporary';
-			};
-		};
 		Session: {
+			origin?: {
+				/** @enum {string} */
+				type: 'preview';
+				notebook_id: string;
+				preview_id: string;
+				revision_id: string;
+				commit: string;
+			};
+			resource_path?: string;
 			app_assignment?: {
 				visit_id: string;
 				generation: string;
@@ -3542,6 +3574,19 @@ export interface components {
 			expected_activity: 'active' | 'idle' | 'unknown' | 'starting';
 			/** @enum {boolean} */
 			acknowledge_disruption: true;
+		};
+		SessionCreateResult: components['schemas']['Session'] & {
+			app_assignment?: {
+				visit_id: string;
+				generation: string;
+			};
+			reused: boolean;
+			editor_session?: {
+				/** @enum {string} */
+				sharing: 'shared' | 'exclusive';
+				/** @enum {string} */
+				access: 'shared' | 'owner' | 'temporary';
+			};
 		};
 		SessionCreateBody: {
 			/** @enum {string} */

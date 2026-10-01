@@ -773,6 +773,14 @@ export const SurfaceStateSchema = z.looseObject({
 
 export type SurfaceState = z.infer<typeof SurfaceStateSchema>;
 
+export const PreviewSessionOriginSchema = z.object({
+	type: z.literal('preview'),
+	notebook_id: NotebookIdSchema,
+	preview_id: z.string().regex(/^[a-f0-9]{32}$/),
+	revision_id: VersionIdSchema,
+	commit: z.string().regex(/^[a-f0-9]{40}$/i),
+});
+
 // `looseObject` for the same rolling-deploy reason as TokenSchema: every status
 // change is a CAS read-modify-write of the whole record, so a strict parse on an
 // older replica would strip fields a newer replica wrote (e.g. the `integrations`
@@ -780,8 +788,11 @@ export type SurfaceState = z.infer<typeof SurfaceStateSchema>;
 // The API projection (`toSessionResponse` in routes/sessions.ts) is an explicit
 // pick, so preserved unknown keys never leak into a response.
 export const SessionSchema = z.looseObject({
+	/** Immutable resource attribution; survives runtime artifact cleanup. */
+	origin: PreviewSessionOriginSchema.optional(),
 	idle_timeout_ms: z.number().int().positive().optional(),
 	session_id: SessionIdSchema,
+	/** Internal workspace identity. Public notebook identity comes from sessionResourceNotebookId. */
 	notebook_id: NotebookIdSchema,
 	project_id: ProjectIdSchema,
 	user_id: UserIdSchema,

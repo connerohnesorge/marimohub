@@ -93,6 +93,30 @@ describe('runtime inspection', () => {
 		return session;
 	}
 
+	it.each(['app', 'edit'] as const)(
+		'attributes %s previews after hidden runtime metadata disappears',
+		async (mode) => {
+			const runtime = createNotebookId();
+			const origin = {
+				type: 'preview' as const,
+				notebook_id: nid,
+				preview_id: 'a'.repeat(32),
+				revision_id: v1,
+				commit: 'b'.repeat(40),
+			};
+			await saveSession(member(), { notebook_id: runtime, mode, origin });
+			const data = await inspection.inspect();
+			const row = mode === 'app' ? data.apps[0] : data.editors[0];
+			expect(row).toMatchObject({
+				notebook_id: nid,
+				notebook_title: 'Sales',
+				origin,
+				resource_path: `/projects/${pid}/notebooks/${nid}/previews/${origin.preview_id}`,
+			});
+			expect(JSON.stringify(data)).not.toContain(runtime);
+		},
+	);
+
 	it('shows packing and rollover without moving existing accounts', async () => {
 		const pool = new AppPoolService(
 			bucket,

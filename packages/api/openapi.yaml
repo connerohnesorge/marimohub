@@ -879,6 +879,31 @@ components:
           items:
             type: object
             properties:
+              origin:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - preview
+                  notebook_id:
+                    type: string
+                  preview_id:
+                    type: string
+                    pattern: ^[a-f0-9]{32}$
+                  revision_id:
+                    type: string
+                  commit:
+                    type: string
+                    pattern: ^[a-f0-9]{40}$/i
+                required:
+                  - type
+                  - notebook_id
+                  - preview_id
+                  - revision_id
+                  - commit
+              resource_path:
+                type: string
               project_id:
                 type: string
               project_name:
@@ -901,6 +926,29 @@ components:
                 items:
                   type: object
                   properties:
+                    origin:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum:
+                            - preview
+                        notebook_id:
+                          type: string
+                        preview_id:
+                          type: string
+                          pattern: ^[a-f0-9]{32}$
+                        revision_id:
+                          type: string
+                        commit:
+                          type: string
+                          pattern: ^[a-f0-9]{40}$/i
+                      required:
+                        - type
+                        - notebook_id
+                        - preview_id
+                        - revision_id
+                        - commit
                     session_id:
                       type: string
                     sandbox_id:
@@ -1035,6 +1083,31 @@ components:
           items:
             type: object
             properties:
+              origin:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                      - preview
+                  notebook_id:
+                    type: string
+                  preview_id:
+                    type: string
+                    pattern: ^[a-f0-9]{32}$
+                  revision_id:
+                    type: string
+                  commit:
+                    type: string
+                    pattern: ^[a-f0-9]{40}$/i
+                required:
+                  - type
+                  - notebook_id
+                  - preview_id
+                  - revision_id
+                  - commit
+              resource_path:
+                type: string
               project_id:
                 type: string
               project_name:
@@ -2870,51 +2943,6 @@ components:
         - next_cursor
     PreviewSessionCreateResult:
       allOf:
-        - $ref: '#/components/schemas/SessionCreateResult'
-        - type: object
-          properties:
-            preview_version_id:
-              type: string
-          required:
-            - preview_version_id
-    Surface:
-      type: object
-      properties:
-        status:
-          type: string
-          enum:
-            - starting
-            - ready
-            - stopping
-            - stopped
-            - failed
-            - unavailable
-        port:
-          type: integer
-          exclusiveMinimum: 0
-        url:
-          type: string
-        started_at:
-          type: string
-          format: date-time
-          example: 2025-03-05T14:00:00Z
-        probe:
-          type: object
-          properties:
-            available:
-              type: boolean
-            reason:
-              type: string
-            version:
-              type: string
-          required:
-            - available
-        last_error:
-          type: string
-      required:
-        - status
-    SessionCreateResult:
-      allOf:
         - $ref: '#/components/schemas/Session'
         - type: object
           properties:
@@ -2953,9 +2981,70 @@ components:
                 - access
           required:
             - reused
+    Surface:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+            - starting
+            - ready
+            - stopping
+            - stopped
+            - failed
+            - unavailable
+        port:
+          type: integer
+          exclusiveMinimum: 0
+        url:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+          example: 2025-03-05T14:00:00Z
+        probe:
+          type: object
+          properties:
+            available:
+              type: boolean
+            reason:
+              type: string
+            version:
+              type: string
+          required:
+            - available
+        last_error:
+          type: string
+      required:
+        - status
     Session:
       type: object
       properties:
+        origin:
+          type: object
+          properties:
+            type:
+              type: string
+              enum:
+                - preview
+            notebook_id:
+              type: string
+            preview_id:
+              type: string
+              pattern: ^[a-f0-9]{32}$
+            revision_id:
+              type: string
+            commit:
+              type: string
+              pattern: ^[a-f0-9]{40}$/i
+          required:
+            - type
+            - notebook_id
+            - preview_id
+            - revision_id
+            - commit
+        resource_path:
+          type: string
         app_assignment:
           type: object
           properties:
@@ -3325,6 +3414,46 @@ components:
         - expected_holder_session_id
         - expected_activity
         - acknowledge_disruption
+    SessionCreateResult:
+      allOf:
+        - $ref: '#/components/schemas/Session'
+        - type: object
+          properties:
+            app_assignment:
+              type: object
+              properties:
+                visit_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                generation:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+              required:
+                - visit_id
+                - generation
+            reused:
+              type: boolean
+            editor_session:
+              type: object
+              properties:
+                sharing:
+                  type: string
+                  enum:
+                    - shared
+                    - exclusive
+                access:
+                  type: string
+                  enum:
+                    - shared
+                    - owner
+                    - temporary
+              required:
+                - sharing
+                - access
+          required:
+            - reused
     SessionCreateBody:
       type: object
       properties:

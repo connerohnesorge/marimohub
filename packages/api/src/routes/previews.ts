@@ -129,9 +129,7 @@ const launch = createRoute({
 		200: jsonContent(
 			z.object({
 				success: z.literal(true),
-				data: SessionCreateResponseSchema.extend({
-					preview_version_id: z.string(),
-				}).openapi('PreviewSessionCreateResult'),
+				data: SessionCreateResponseSchema.openapi('PreviewSessionCreateResult'),
 			}),
 			'Preview session',
 		),
@@ -355,10 +353,7 @@ app.openapi(launch, async (c) => {
 			appBaseUrl: resolvePublicBaseUrl(c, deps.sandbox.appBaseUrl),
 		},
 	});
-	return c.json(
-		{ success: true as const, data: { ...data, preview_version_id: record.current.version_id } },
-		200,
-	);
+	return c.json({ success: true as const, data }, 200);
 });
 app.openapi(discover, async (c) => {
 	const deps = c.get('deps');

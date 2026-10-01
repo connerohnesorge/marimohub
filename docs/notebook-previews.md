@@ -32,6 +32,16 @@ New sessions use the latest successfully prepared revision. Running sessions kee
 The page indicates newer revisions. **Discard edits and open latest** replaces a temporary editor.
 If an update fails, the page displays an error and keeps the previous revision available.
 
+Preview session responses identify the parent notebook in `notebook_id` and include an application-relative `resource_path` to the preview.
+Use the parent notebook ID with the normal session get, heartbeat, stop, surface, and app-visit endpoints.
+The hidden workspace ID stays internal.
+
+The session's immutable `origin` records `type: "preview"`, `notebook_id`, `preview_id`, `revision_id`, and `commit`.
+Use `origin.revision_id` to identify its prepared revision; preview responses omit `source_version_id`.
+Branch updates do not change existing session provenance. Reused app sessions retain their original provenance.
+Authorized session history retains this association after preview and workspace cleanup, for the normal session retention period.
+History reads check current parent permissions. Live operations also require an active preview.
+
 ## API and CLI
 
 Create, list, get, delete, and session creation endpoints use this base path:

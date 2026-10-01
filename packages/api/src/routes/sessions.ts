@@ -22,6 +22,8 @@ import type {
 } from '@marimo-hub/core';
 import {
 	AppPoolService,
+	sessionResourceNotebookId,
+	sessionResourcePath,
 	PREVIEW_IDLE_MS,
 	AppVisitSchema,
 	sleep,
@@ -88,6 +90,7 @@ import {
 	assertSessionAccess,
 	assertSessionControl,
 	assertSessionNotebookVisible,
+	assertSessionPreviewActive,
 	authorizationService,
 	commonErrors,
 	createApp,
@@ -493,7 +496,9 @@ export function toSessionResponse(s: Session, can: Awaited<ReturnType<typeof ses
 	const { appReadOnly } = can;
 	return {
 		session_id: s.session_id,
-		notebook_id: s.notebook_id,
+		notebook_id: sessionResourceNotebookId(s),
+		origin: s.origin,
+		resource_path: sessionResourcePath(s),
 		project_id: s.project_id,
 		user_id: appReadOnly ? undefined : s.user_id,
 		status: s.status,
@@ -513,7 +518,7 @@ export function toSessionResponse(s: Session, can: Awaited<ReturnType<typeof ses
 		// Defaulted in the projection so clients never see `undefined` (stored
 		// records predating the field omit it).
 		mode: sessionMode(s),
-		source_version_id: appReadOnly ? undefined : s.source_version_id,
+		source_version_id: appReadOnly || s.origin ? undefined : s.source_version_id,
 		active_connections: appReadOnly ? undefined : s.active_connections,
 		connections_checked_at: appReadOnly ? undefined : s.connections_checked_at,
 		compute_profile: appReadOnly ? undefined : s.compute_profile,
@@ -810,11 +815,20 @@ async function presentSession(
 	user: AuthUser,
 	session: Session,
 	grants: Awaited<ReturnType<typeof sessionGrantsFor>>,
-	poolView?: Promise<Awaited<ReturnType<AppPoolService['view']>>>,
+	poolView?: () => ReturnType<AppPoolService['view']> | undefined,
 ) {
 	const response = toSessionResponse(session, grants);
+	try {
+		await assertSessionPreviewActive(deps, session.project_id, session);
+	} catch (error) {
+		if (!(error instanceof NotFoundError)) throw error;
+		return {
+			...withoutConnectionUrls(response),
+			can: { attach: false, stop: false, surfaces: surfaceGrants(false) },
+		};
+	}
 	if (sessionMode(session) !== 'app') return response;
-	const view = await (poolView ??
+	const view = await (poolView?.() ??
 		new AppPoolService(deps.bucket, deps.services.sessions, deps.policy.appPool, deps.metrics).view(
 			session.project_id,
 			session.notebook_id,
@@ -844,9 +858,9 @@ app.openapi(listSessions, async (c) => {
 		deps,
 		user,
 		project,
-		active.map((s) => s.notebook_id),
+		active.map(sessionResourceNotebookId),
 	);
-	const visible = active.filter((s) => admitted.has(s.notebook_id));
+	const visible = active.filter((s) => admitted.has(sessionResourceNotebookId(s)));
 	const pools = new AppPoolService(deps.bucket, sessions, deps.policy.appPool, deps.metrics);
 	const poolViews = new Map<NotebookId, ReturnType<AppPoolService['view']>>();
 	const viewFor = (session: Session) => {
@@ -869,9 +883,9 @@ app.openapi(listSessions, async (c) => {
 					user,
 					session,
 					deps,
-					admitted.get(session.notebook_id) ?? null,
+					admitted.get(sessionResourceNotebookId(session)) ?? null,
 				),
-				viewFor(session),
+				() => viewFor(session),
 			),
 		),
 	);
@@ -890,11 +904,13 @@ app.openapi(getSession, async (c) => {
 	// The project-scoped key masks cross-project IDs; also reject other notebooks.
 	const project = await loadSessionProject(projects, pid, user, deps);
 	const session = await sessions.getSession(pid, sid);
-	if (session.notebook_id !== nid) {
+	if (sessionResourceNotebookId(session) !== nid) {
 		throw new NotFoundError(`Session ${sid} not found`);
 	}
 	const appUser = authorizationService(deps).role(user, project) === 'app-user';
-	const labels = await assertSessionNotebookVisible(deps, project, session, user);
+	const labels = await assertSessionNotebookVisible(deps, project, session, user, {
+		requireActivePreview: false,
+	});
 	if (appUser) await assertSessionAccess(project, session, user, deps, labels);
 	return c.json(
 		{
@@ -1369,6 +1385,17 @@ export async function startNotebookSession(input: {
 		(MODE_POLICY[mode].persistsEdits
 			? undefined
 			: (notebook.source.current_version_id ?? undefined));
+	const origin: Session['origin'] =
+		previewRecord && sourceVersionId && notebook.source.type === 'git' && notebook.source.commit
+			? {
+					type: 'preview',
+					notebook_id: previewRecord.notebook_id,
+					preview_id: previewRecord.id,
+					revision_id: sourceVersionId,
+					commit: notebook.source.commit,
+				}
+			: undefined;
+	if (isPreview && !origin) throw new ConflictError('Preview revision provenance is unavailable');
 	const launchSource = resolveNotebookLaunchSource({
 		entryNotebook: workspacePolicy.entryNotebook,
 		workspacePrefix: workspacePrefix ?? notebookPaths.workspacePrefix,
@@ -1574,11 +1601,12 @@ export async function startNotebookSession(input: {
 	let originUrl: string | undefined;
 	const observer = logObserver({
 		event: 'session_provision',
+		origin,
 		sandbox_id: sandboxId,
 		image,
 		compute_profile: requestedComputeProfile.name,
 		project_id: pid,
-		notebook_id: nid,
+		notebook_id: origin?.notebook_id ?? nid,
 		user_id: user.id,
 		mode,
 	});
@@ -1657,6 +1685,7 @@ export async function startNotebookSession(input: {
 						session_id: sessionId,
 						...(admission ? { app_pool: true as const } : {}),
 						notebook_id: nid,
+						origin,
 						project_id: pid,
 						user_id: user.id,
 						sandbox_id: sandboxId,
@@ -2126,7 +2155,8 @@ export async function startNotebookSession(input: {
 				event: 'app.start',
 				actor: user.id,
 				project_id: pid,
-				notebook_id: nid,
+				notebook_id: origin?.notebook_id ?? nid,
+				origin,
 				session_id: session!.session_id,
 			}),
 		);
@@ -2187,7 +2217,7 @@ app.openapi(deleteSession, async (c) => {
 	// Scope-check: the project-scoped key 404s a cross-project id; the notebook
 	// check keeps a same-project/other-notebook id out of scope.
 	const existing = await sessions.getSession(pid, sid);
-	if (existing.notebook_id !== nid) {
+	if (sessionResourceNotebookId(existing) !== nid) {
 		throw new NotFoundError(`Session ${sid} not found`);
 	}
 
@@ -2214,7 +2244,7 @@ app.openapi(heartbeatSession, async (c) => {
 	// Scope-check: the project-scoped key 404s a cross-project id; the notebook
 	// check keeps a same-project/other-notebook id out of scope.
 	const existing = await sessions.getSession(pid, sid);
-	if (existing.notebook_id !== nid) {
+	if (sessionResourceNotebookId(existing) !== nid) {
 		throw new NotFoundError(`Session ${sid} not found`);
 	}
 
@@ -2229,9 +2259,17 @@ app.openapi(heartbeatSession, async (c) => {
 		(existing.status === 'running' || existing.status === 'starting')
 	) {
 		const pool = new AppPoolService(deps.bucket, sessions, deps.policy.appPool, deps.metrics);
-		if (!existing.app_pool) await pool.synchronize(pid, nid, [existing]);
+		if (!existing.app_pool) await pool.synchronize(pid, existing.notebook_id, [existing]);
 		const visit = c.req.valid('json');
-		if (!(await pool.heartbeat(pid, nid, user.id, sid, visit?.visit_id ? visit : undefined))) {
+		if (
+			!(await pool.heartbeat(
+				pid,
+				existing.notebook_id,
+				user.id,
+				sid,
+				visit?.visit_id ? visit : undefined,
+			))
+		) {
 			throw new ConflictError('The app assignment expired. Open the app again.');
 		}
 	}
@@ -2255,7 +2293,7 @@ app.openapi(leaveAppVisit, async (c) => {
 	const user = c.get('user');
 	const project = await loadSessionProject(deps.services.projects, pid, user, deps);
 	const session = await deps.services.sessions.getSession(pid, sid);
-	if (session.notebook_id !== nid || sessionMode(session) !== 'app')
+	if (sessionResourceNotebookId(session) !== nid || sessionMode(session) !== 'app')
 		throw new NotFoundError('App session not found');
 	const labels = await assertSessionNotebookVisible(deps, project, session, user);
 	await assertSessionAccess(project, session, user, deps, labels);
@@ -2264,7 +2302,7 @@ app.openapi(leaveAppVisit, async (c) => {
 		deps.services.sessions,
 		deps.policy.appPool,
 		deps.metrics,
-	).leave(pid, nid, user.id, sid, c.req.valid('json'));
+	).leave(pid, session.notebook_id, user.id, sid, c.req.valid('json'));
 	return c.json({ success: true as const }, 200);
 });
 

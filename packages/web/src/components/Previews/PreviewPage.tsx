@@ -104,7 +104,7 @@ function PreviewRuntime({
 				nid: session.notebook_id,
 				sid: session.session_id,
 				mode,
-				version: session.preview_version_id,
+				version: session.origin?.revision_id,
 				assignment: session.app_assignment,
 			};
 			setRuntime(next);

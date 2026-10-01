@@ -5,6 +5,7 @@ import {
 	AUTHORIZATION_ACTIONS,
 	createProjectId,
 	NotebookId,
+	sessionResourceNotebookId,
 	ProjectId,
 	ProjectSchema,
 	NotFoundError,
@@ -417,13 +418,16 @@ async function storedResource(
 			project.id,
 			SessionId.parse(input.session_id),
 		);
-		if (input.notebook_id && NotebookId.parse(input.notebook_id) !== session.notebook_id) {
+		if (
+			input.notebook_id &&
+			NotebookId.parse(input.notebook_id) !== sessionResourceNotebookId(session)
+		) {
 			throw new Error('stored_notebook_session_mismatch');
 		}
 		const notebook = await loadAuthorizedNotebook(
 			deps,
 			project,
-			session.notebook_id,
+			sessionResourceNotebookId(session),
 			caller,
 			'project.read',
 		);
