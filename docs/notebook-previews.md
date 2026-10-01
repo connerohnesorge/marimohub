@@ -54,7 +54,13 @@ mohub notebooks previews delete --pid "$PROJECT" --nid "$NOTEBOOK" \
   --preview-id "$PREVIEW" --yes
 ```
 
-Retries with the same idempotency key return the same preview. Reusing that key for a different request or deleted preview fails.
+Creation returns `202` with a pending preview and its share URL. Poll the get endpoint until a revision is prepared.
+Launches return `409 PREVIEW_NOT_READY` until then. Delete returns `202` after revoking access; cleanup runs asynchronously.
+List responses use `data.items` and `data.next_cursor`, with `limit` and `cursor` query parameters.
+
+Idempotency keys are retained for seven days from creation, scoped to the caller and notebook.
+During that window, retries return the same preview. Changed requests and deleted previews return a conflict.
+After the window, reusing a key creates a new preview. CI should retain the preview ID for deletion.
 API tokens need the corresponding project grants and actions. Management and source suggestions require `preview.manage`.
 Session creation accepts a mode without a ref override.
 
@@ -63,8 +69,16 @@ Fork PRs and automatic label triggers are unsupported. CI can use the API or CLI
 
 ## Operation and limits
 
-Node maintenance checks sources every five minutes. Session launches also check, at most once per minute per preview.
-Cloudflare maintenance uses its configured schedule. The reference Worker requires a GitHub App registry to create previews.
+The Node preparation worker runs independently every 15 seconds on maintenance replicas.
+It checks moving sources at most once per minute and selects one due preview per project.
+Each tick visits up to four projects, rotating through projects and due previews.
+Creation and session launch never wait for GitHub. Failed refreshes leave the last prepared revision available.
+
+Preparation has a two-minute lease and aborts network requests before that deadline.
+Failures retry with exponential backoff and jitter, capped near one hour.
+At most four preparations run per deployment, with one per project.
+The Cloudflare scheduled handler starts preparation independently of cleanup.
+The reference Worker requires a GitHub App registry to create previews.
 Automatic updates, expiry, and cleanup require maintenance.
 
 Previews expire after seven days by default, with an API maximum of 30 days.
@@ -78,3 +92,10 @@ If deployment configuration permits overrides, managers can select another allow
 Each preview permits ten active sessions across users and revisions, with at most two app replicas per revision.
 Lower deployment limits still apply. Idle retirement uses five minutes, subject to active connections and app visits.
 Cleanup removes unused revisions after reclaiming their sessions.
+
+A project can own up to 25 previews, including previews awaiting cleanup.
+Each preview can retain up to 12 revisions; a project has a 500 MiB workspace budget.
+Preparation reserves the maximum archive size before download, then charges the stored workspace size.
+Reservations remain until cleanup confirms reclamation. Unpublished artifacts have a 15-minute cleanup grace period.
+A project can retain up to 1,000 idempotency receipts within the seven-day window.
+Limits return `429 RESOURCE_EXHAUSTED`; preparation failures retry after backoff.

@@ -1,6 +1,7 @@
 import { ConflictError, UnavailableError, ValidationError } from '@marimo-hub/core/errors';
 import { markSourceControlPublishFailure } from '@marimo-hub/core/ports/source-control';
 import type {
+	SourceReadOptions,
 	OpenChangeRequestInput,
 	OpenChangeRequestResult,
 	SourceBranchHead,
@@ -68,11 +69,14 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 	}
 
 	/** Repo API prefix + short-lived installation token, shared by the reader methods. */
-	private async readContext(repository: string): Promise<{ base: string; token: string }> {
+	private async readContext(
+		repository: string,
+		options?: SourceReadOptions,
+	): Promise<{ base: string; token: string }> {
 		const { owner, repo } = parseRepository(repository);
 		return {
 			base: `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
-			token: await this.client.installationToken(owner, repo, 'read'),
+			token: await this.client.installationToken(owner, repo, 'read', options?.signal),
 		};
 	}
 
@@ -85,13 +89,17 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 		}
 	}
 
-	async getBranchHead(repository: string, branch: string): Promise<SourceBranchHead> {
+	async getBranchHead(
+		repository: string,
+		branch: string,
+		options?: SourceReadOptions,
+	): Promise<SourceBranchHead> {
 		validateBranch(branch);
-		const { base, token } = await this.readContext(repository);
+		const { base, token } = await this.readContext(repository, options);
 		const response = await this.client.request(
 			`${base}/branches/${refPath(branch)}`,
 			token,
-			{},
+			{ signal: options?.signal },
 			[404],
 		);
 		if (response.status === 404) {
@@ -100,13 +108,17 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 		return { commit: nestedString(await responseJson(response), 'commit', 'sha') };
 	}
 
-	async resolveCommit(repository: string, commit: string): Promise<SourceBranchHead> {
+	async resolveCommit(
+		repository: string,
+		commit: string,
+		options?: SourceReadOptions,
+	): Promise<SourceBranchHead> {
 		validateCommit(commit);
-		const { base, token } = await this.readContext(repository);
+		const { base, token } = await this.readContext(repository, options);
 		const response = await this.client.request(
 			`${base}/commits/${encodeURIComponent(commit)}`,
 			token,
-			{},
+			{ signal: options?.signal },
 			[404, 422],
 		);
 		if (!response.ok) throw new ValidationError('Commit not found in the configured repository');
@@ -156,13 +168,18 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 			.slice(0, 30);
 	}
 
-	async getPullRequest(repository: string, number: number): Promise<SourcePullRequest> {
+	async getPullRequest(
+		repository: string,
+		number: number,
+		options?: SourceReadOptions,
+	): Promise<SourcePullRequest> {
 		const { owner, repo } = parseRepository(repository);
-		const token = await this.client.installationToken(owner, repo, 'preview');
+		const token = await this.client.installationToken(owner, repo, 'preview', options?.signal);
 		const data = await responseJson(
 			await this.client.request(
 				`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`,
 				token,
+				{ signal: options?.signal },
 			),
 		);
 		if (!isRecord(data) || !isRecord(data.head))
@@ -186,13 +203,15 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 		repository: string,
 		commit: string,
 		rootPath: string,
+		options?: SourceReadOptions,
 	): Promise<SourceWorkspaceFile[]> {
 		validateCommit(commit);
 		validateRootPath(rootPath);
-		const { base, token } = await this.readContext(repository);
+		const { base, token } = await this.readContext(repository, options);
 		const response = await this.client.request(
 			`${base}/tarball/${encodeURIComponent(commit)}`,
 			token,
+			{ signal: options?.signal },
 		);
 		return collectTarballWorkspace(response, rootPath);
 	}

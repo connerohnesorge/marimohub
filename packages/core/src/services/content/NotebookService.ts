@@ -1,3 +1,4 @@
+import { PreviewStore } from './PreviewStore';
 import { previewKey, PreviewRecordSchema } from './notebookPreviews';
 import { ThumbnailService } from './ThumbnailService';
 import { all } from 'better-all';
@@ -282,6 +283,15 @@ export class NotebookService {
 	): Promise<NotebookMeta> {
 		const notebookId = meta.id;
 		if (!meta.preview) return meta;
+		if (
+			!(await new PreviewStore(this.bucket).project(projectId)).entries.some(
+				(entry) =>
+					entry.intent.state !== 'deleted' &&
+					entry.intent.id === meta.preview!.preview_id &&
+					entry.intent.notebook_id === meta.preview!.notebook_id,
+			)
+		)
+			throw new NotFoundError('Preview not found');
 		const parent = await this.getNotebookMeta(projectId, meta.preview.notebook_id);
 		const recordKey = previewKey(projectId, meta.preview.notebook_id, meta.preview.preview_id);
 		const object = await this.bucket.get(recordKey);

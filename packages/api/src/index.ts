@@ -30,4 +30,4 @@ export { sweepAppPools } from './appPools';
 
 export type { ThemeConfig } from '@marimo-hub/core/theme';
 
-export { sweepPreviews } from './previews';
+export { preparePreviews, sweepPreviews } from './previews';

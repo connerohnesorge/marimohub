@@ -49,6 +49,9 @@ export const PreviewRecordSchema = z.object({
 	state: z.enum(['active', 'deleting', 'deleted']),
 	preparation: z.enum(['pending', 'preparing', 'ready', 'failed']),
 	checked_at: z.iso.datetime().optional(),
+	next_attempt_at: z.number().optional(),
+	artifact_cleanup_after: z.record(NotebookIdSchema, z.number()).optional(),
+	preparation_failures: z.number().int().nonnegative().default(0),
 	error: z.string().optional(),
 	lease: z
 		.object({
@@ -76,14 +79,8 @@ export const PreviewRecordSchema = z.object({
 	garbage_ids: z.array(NotebookIdSchema).default([]),
 	cleanup_after: z
 		.number()
-		.describe('Earliest maintenance-marker removal time in milliseconds since the Unix epoch.')
+		.describe('Earliest ownership removal time in milliseconds since the Unix epoch.')
 		.optional(),
-});
-export const PreviewMaintenanceSchema = PreviewRecordSchema.pick({
-	project_id: true,
-	notebook_id: true,
-	id: true,
-	created_at: true,
 });
 export type NotebookPreview = z.infer<typeof PreviewRecordSchema>;
 export type PreviewCreate = z.infer<typeof PreviewCreateSchema>;
@@ -93,7 +90,3 @@ export const previewKey = (pid: ProjectId, nid: NotebookId, id: string) =>
 export const PREVIEW_POLL_MS = 60_000;
 export const PREVIEW_IDLE_MS = 5 * 60_000;
 export const PREVIEW_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
-
-export const previewMaintenanceKey = (
-	record: Pick<NotebookPreview, 'project_id' | 'notebook_id' | 'id'>,
-) => `_system/preview-maintenance/${record.project_id}/${record.notebook_id}/${record.id}.json`;

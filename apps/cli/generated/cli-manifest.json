@@ -3315,8 +3315,8 @@
 			"command": ["notebooks", "previews", "create"],
 			"method": "POST",
 			"path": "/api/v1/projects/{pid}/notebooks/{nid}/previews",
-			"summary": "Publish a notebook preview",
-			"description": "Branch previews automatically publish future branch commits. Commit previews remain pinned. Previews inherit notebook access, integrations, and secrets. Editors are temporary and never write back.",
+			"summary": "Create a notebook preview",
+			"description": "Creation persists intent and returns immediately; preparation runs asynchronously. Idempotency keys are retained for seven days from creation. Branch previews automatically publish future branch commits. Commit previews remain pinned. Previews inherit notebook access, integrations, and secrets. Editors are temporary and never write back.",
 			"parameters": [
 				{
 					"name": "idempotency-key",
@@ -3433,7 +3433,7 @@
 			"command": ["notebooks", "previews", "get"],
 			"method": "GET",
 			"path": "/api/v1/projects/{pid}/notebooks/{nid}/previews/{preview_id}",
-			"summary": "Get a published preview",
+			"summary": "Get a notebook preview",
 			"parameters": [
 				{
 					"name": "nid",
@@ -3471,7 +3471,7 @@
 			"command": ["notebooks", "previews", "list"],
 			"method": "GET",
 			"path": "/api/v1/projects/{pid}/notebooks/{nid}/previews",
-			"summary": "List published previews",
+			"summary": "List notebook previews",
 			"parameters": [
 				{
 					"name": "nid",
@@ -3488,10 +3488,26 @@
 					"required": true,
 					"value_type": "string",
 					"repeatable": false
+				},
+				{
+					"name": "cursor",
+					"cli_name": "cursor",
+					"in": "query",
+					"required": false,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "limit",
+					"cli_name": "limit",
+					"in": "query",
+					"required": false,
+					"value_type": "integer",
+					"repeatable": false
 				}
 			],
 			"destructive": false,
-			"paginated": false,
+			"paginated": true,
 			"response_kind": "json",
 			"accepts_if_match": false,
 			"accepts_idempotency_key": false

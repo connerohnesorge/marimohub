@@ -4,6 +4,7 @@ import {
 	scheduleProjectAlert,
 	sweepAppPools,
 	sweepPreviews,
+	preparePreviews,
 } from '@marimo-hub/api';
 import type { ApiDeps, JobsConfig } from '@marimo-hub/api';
 import {
@@ -83,7 +84,7 @@ async function scheduleUnavailableAppAlerts(
  * Node-side maintenance loop — the replacement for the Cloudflare Workers
  * `scheduled()` cron. Each run, in order:
  *  1. `sweepAppPools()` — reconcile app assignments and retire idle pool members.
- *  2. `sweepPreviews()` — refresh sources, expire previews, and reclaim revisions.
+ *  2. `sweepPreviews()` — expire previews and reclaim revisions.
  *  3. `expireStale()` — flip sessions with stale heartbeats to `expired`.
  *  4. `reconcile()` — cross-check records against the compute provider:
  *     tear down sandboxes left running by terminal records (the billing leak),
@@ -431,4 +432,31 @@ export function startWarmPools(deps: ApiDeps): JobSchedulerHandle | undefined {
 	const interval = setInterval(run, service.config.enabled ? 5_000 : FIVE_MINUTES_MS);
 	run();
 	return { stop: () => clearInterval(interval), drain: () => current };
+}
+
+export function startPreviewPreparation(deps: ApiDeps): (() => void) | undefined {
+	if (!deps.sourceControl) return;
+	const controller = new AbortController();
+	let running = false;
+	const run = async () => {
+		if (running || controller.signal.aborted) return;
+		running = true;
+		try {
+			await preparePreviews(deps, controller.signal);
+		} catch (error) {
+			logEvent({
+				level: 'error',
+				event: 'preview_preparation_failed',
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			running = false;
+		}
+	};
+	void run();
+	const interval = setInterval(() => void run(), 15_000);
+	return () => {
+		clearInterval(interval);
+		controller.abort();
+	};
 }

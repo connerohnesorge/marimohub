@@ -10,6 +10,7 @@ import { startJobScheduler, startMaintenance, startSessionLifecycle, startWarmPo
 import type { OtelHandle } from './otel';
 
 vi.mock('./cron', () => ({
+	startPreviewPreparation: vi.fn(),
 	startMaintenance: vi.fn(() => vi.fn()),
 	startWarmPools: vi.fn(),
 	startSessionLifecycle: vi.fn(() => vi.fn()),

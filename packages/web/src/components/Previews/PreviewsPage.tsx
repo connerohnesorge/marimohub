@@ -244,7 +244,7 @@ export function CreatePreviewForm({
 				</p>
 			)}
 			<Button type="submit" isDisabled={!valid || create.isPending}>
-				{create.isPending ? 'Preparing preview…' : 'Create preview'}
+				{create.isPending ? 'Creating preview…' : 'Create preview'}
 			</Button>
 		</form>
 	);

@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { gzipSync } from 'fflate';
 import { BadRequestError, UnavailableError, ValidationError } from '@marimo-hub/core/errors';
 import { GitHubAppPublisher } from './index';
@@ -485,5 +485,33 @@ describe('GitHub preview source failures', () => {
 			'preview',
 		);
 		await expect(github.getPullRequest('owner/repo', 42)).rejects.toThrow(UnavailableError);
+	});
+});
+
+describe('GitHub preview cancellation', () => {
+	it('passes the same cancellation signal through authentication and archive fetch', async () => {
+		const controller = new AbortController();
+		const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+			expect(init?.signal).toBe(controller.signal);
+			if (url.endsWith('/installation')) return response({ id: 42 });
+			if (url.endsWith('/access_tokens')) return response({ token: 'token' });
+			return new Response(tarball({ 'app.py': 'import marimo' }));
+		});
+		const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+		await github.fetchWorkspace('owner/repo', 'a'.repeat(40), '', { signal: controller.signal });
+		expect(fetcher).toHaveBeenCalledTimes(3);
+	});
+
+	it('does not continue authentication after cancellation', async () => {
+		const controller = new AbortController();
+		const fetcher = vi.fn(async () => {
+			controller.abort();
+			return response({ id: 42 });
+		});
+		const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+		await expect(
+			github.getBranchHead('owner/repo', 'main', { signal: controller.signal }),
+		).rejects.toThrow();
+		expect(fetcher).toHaveBeenCalledOnce();
 	});
 });

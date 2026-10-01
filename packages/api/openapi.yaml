@@ -61,6 +61,7 @@ components:
                 - PRECONDITION_FAILED
                 - NOT_FOUND
                 - CONFLICT
+                - PREVIEW_NOT_READY
                 - PROPOSAL_RETRY_REQUIRED
                 - EDIT_SESSION_OWNED
                 - EDIT_SESSION_CHANGED
@@ -2853,6 +2854,20 @@ components:
         - created_at
         - url
         - can
+    NotebookPreviewPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotebookPreview'
+        next_cursor:
+          type:
+            - string
+            - 'null'
+      required:
+        - items
+        - next_cursor
     PreviewSessionCreateResult:
       allOf:
         - $ref: '#/components/schemas/SessionCreateResult'
@@ -12310,10 +12325,12 @@ paths:
       operationId: notebooks.previews.create
       tags:
         - Previews
-      summary: Publish a notebook preview
-      description: Branch previews automatically publish future branch commits. Commit
-        previews remain pinned. Previews inherit notebook access, integrations,
-        and secrets. Editors are temporary and never write back.
+      summary: Create a notebook preview
+      description: Creation persists intent and returns immediately; preparation runs
+        asynchronously. Idempotency keys are retained for seven days from
+        creation. Branch previews automatically publish future branch commits.
+        Commit previews remain pinned. Previews inherit notebook access,
+        integrations, and secrets. Editors are temporary and never write back.
       parameters:
         - schema:
             type: string
@@ -12394,8 +12411,8 @@ paths:
                 - source
               additionalProperties: false
       responses:
-        '200':
-          description: Preview
+        '202':
+          description: Preview accepted for preparation
           content:
             application/json:
               schema:
@@ -12490,7 +12507,7 @@ paths:
       operationId: notebooks.previews.list
       tags:
         - Previews
-      summary: List published previews
+      summary: List notebook previews
       parameters:
         - schema:
             type: string
@@ -12506,6 +12523,19 @@ paths:
           required: true
           name: nid
           in: path
+        - schema:
+            type: integer
+            exclusiveMinimum: 0
+            example: 100
+          required: false
+          name: limit
+          in: query
+        - schema:
+            type: string
+            example: WyIyMDI1LTAzLTA1VDE0OjAwOjAwWiIsIm5iLTEiXQ
+          required: false
+          name: cursor
+          in: query
       responses:
         '200':
           description: Previews
@@ -12519,9 +12549,7 @@ paths:
                     enum:
                       - true
                   data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/NotebookPreview'
+                    $ref: '#/components/schemas/NotebookPreviewPage'
                 required:
                   - success
                   - data
@@ -12606,7 +12634,7 @@ paths:
       operationId: notebooks.previews.get
       tags:
         - Previews
-      summary: Get a published preview
+      summary: Get a notebook preview
       parameters:
         - schema:
             type: string
@@ -12748,8 +12776,8 @@ paths:
           name: preview_id
           in: path
       responses:
-        '200':
-          description: Preview deleted
+        '202':
+          description: Preview revoked; cleanup pending
           content:
             application/json:
               schema:

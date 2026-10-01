@@ -67,6 +67,7 @@ beforeEach(async () => {
 		ACTOR,
 		api.deps.sourceControl,
 	);
+	preview = await services.previews.prepare(preview, api.deps.sourceControl);
 	expect(preview.preparation).toBe('ready');
 });
 
@@ -182,8 +183,7 @@ describe('preview maintenance', () => {
 			});
 			const error = new Error('preview storage unavailable');
 			if (failure === 'retire') vi.spyOn(previews, 'retire').mockRejectedValue(error);
-			else if (scope === 'project') vi.spyOn(previews, 'all').mockRejectedValue(error);
-			else vi.spyOn(previews, 'list').mockRejectedValue(error);
+			else vi.spyOn(previews, 'projectRecords').mockRejectedValue(error);
 
 			await expectOk(
 				await api.request(
@@ -247,7 +247,7 @@ describe('preview maintenance', () => {
 			if (state === 'deleted notebook')
 				await api.deps.services.notebooks.deleteNotebook(pid, nid, ACTOR);
 			if (state === 'deleted project') await api.deps.services.projects.deleteProject(pid, ACTOR);
-			const resolve = vi.spyOn(api.deps.services.previews, 'reconcile');
+			const resolve = vi.spyOn(api.deps.services.previews, 'prepare');
 
 			await sweepPreviews({ ...api.deps, sourceControl: undefined });
 

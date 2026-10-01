@@ -1560,12 +1560,25 @@ Pool CAS transitions remain authoritative when maintenance passes overlap.
 ## Notebook preview records
 
 `NotebookPreviewService` owns each CAS record at `_system/previews/{pid}/{nid}/{preview-id}.json`.
-Records hold the source, prepared revision, runtime ownership ledger, and session admission reservations. Deletion is permanent.
-Retained tombstones prevent idempotency keys from recreating deleted previews.
+Records hold the source, prepared revision, runtime ownership ledger, and session admission reservations.
 
-`_system/preview-maintenance/{pid}/{nid}/{preview-id}.json` indexes records for reconciliation.
-Creation writes the marker first. Orphan markers remain for one day to tolerate interrupted creation.
-After confirmed deletion and a 15-minute cleanup grace period, cleanup removes the marker but retains the preview record.
+`PreviewStore` owns four CAS records:
+
+- `_system/preview-projects/{pid}.json`: bounded membership, recovery intents, and artifact reservations.
+- `_system/preview-receipts/{pid}.json`: bounded idempotency receipts, retained for seven days from creation.
+- `_system/preview-work.json`: rotating project cursor and deployment-wide preparation leases.
+- `_system/preview-cleanup-cursor.json`: independent rotating cleanup cursor.
+
+Creation reserves membership before writing the preview record. Workers can materialize interrupted writes from the stored intent.
+Listing reads only this bounded membership; it never scans historical preview records or receipts.
+Deletion closes the receipt immediately. After reclamation and a 15-minute grace period, cleanup marks the membership terminal,
+deletes the preview record, and removes membership. Terminal intents prevent interrupted cleanup from recreating active records.
+Empty project CAS heads remain to fence concurrent writers; individual preview records do not remain permanently.
+Runtime access requires live membership and an active preview record.
+
+Preparation runs independently of launches and maintenance. Leases fence publication; deadlines abort provider reads and stop workspace writes.
+Project reservations bound both revision counts and aggregate workspace bytes before archive download.
+Cleanup retains ownership and reservations until it confirms reclamation. Failed attempts retain their artifacts through a cleanup grace period.
 
 Each revision has a unique internal notebook ID, immutable workspace, and `preview` ownership marker in `preview-runtime.json`.
 Ordinary `meta.json` is absent, preventing older replicas from rewriting metadata without preview protections.

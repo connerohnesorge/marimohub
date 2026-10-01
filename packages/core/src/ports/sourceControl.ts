@@ -187,6 +187,10 @@ export interface SourcePullRequest {
 }
 
 /** The read side of a provider: resolve branch heads and fetch workspace trees. */
+export interface SourceReadOptions {
+	signal?: AbortSignal;
+}
+
 export interface SourceControlReader {
 	/** Same id namespace as `SourceControlPublisher` (`github`, `gitlab`, …). */
 	readonly provider: string;
@@ -201,10 +205,22 @@ export interface SourceControlReader {
 	readonly previews?: boolean;
 	listBranches?(repository: string, query: string): Promise<SourceRefSuggestion[]>;
 	listCommits?(repository: string, query: string): Promise<SourceRefSuggestion[]>;
-	resolveCommit?(repository: string, commit: string): Promise<SourceBranchHead>;
-	getPullRequest?(repository: string, number: number): Promise<SourcePullRequest>;
+	resolveCommit?(
+		repository: string,
+		commit: string,
+		options?: SourceReadOptions,
+	): Promise<SourceBranchHead>;
+	getPullRequest?(
+		repository: string,
+		number: number,
+		options?: SourceReadOptions,
+	): Promise<SourcePullRequest>;
 	/** Resolve the current tip of a branch. */
-	getBranchHead(repository: string, branch: string): Promise<SourceBranchHead>;
+	getBranchHead(
+		repository: string,
+		branch: string,
+		options?: SourceReadOptions,
+	): Promise<SourceBranchHead>;
 	/**
 	 * Fetch the tree under `rootPath` at `commit` as workspace files.
 	 * Implementations MUST enforce the same caps as archive ingest (file count,
@@ -215,6 +231,7 @@ export interface SourceControlReader {
 		repository: string,
 		commit: string,
 		rootPath: string,
+		options?: SourceReadOptions,
 	): Promise<SourceWorkspaceFile[]>;
 	/**
 	 * Materialize a credential-free Git directory for the exact commit. Paths

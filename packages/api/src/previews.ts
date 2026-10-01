@@ -50,7 +50,7 @@ async function retirePreviewRuntime(
 }
 
 export async function sweepPreviews(deps: ApiDeps): Promise<void> {
-	for (let record of await deps.services.previews.all()) {
+	for (let record of await deps.services.previews.cleanupCandidates()) {
 		try {
 			if (record.state === 'active') {
 				const project = await deps.services.projects
@@ -73,8 +73,6 @@ export async function sweepPreviews(deps: ApiDeps): Promise<void> {
 					Date.parse(record.expires_at) <= Date.now()
 				)
 					record = await deps.services.previews.retire(record);
-				else if (deps.sourceControl)
-					record = await deps.services.previews.reconcile(record, deps.sourceControl);
 			}
 			if (record.state !== 'active') await cleanupPreview(deps, record);
 			else {
@@ -119,18 +117,21 @@ export async function retireNotebookPreviews(
 		);
 	let records: NotebookPreview[];
 	try {
-		records = nid
-			? await deps.services.previews.list(pid, nid)
-			: (await deps.services.previews.all()).filter((item) => item.project_id === pid);
+		records = await deps.services.previews.projectRecords(pid, nid);
 	} catch (error) {
 		logFailure(error);
 		return;
 	}
 	for (const record of records) {
 		try {
-			await cleanupPreview(deps, await deps.services.previews.retire(record));
+			await deps.services.previews.retire(record);
 		} catch (error) {
 			logFailure(error, record.id);
 		}
 	}
+}
+
+export async function preparePreviews(deps: ApiDeps, signal?: AbortSignal): Promise<void> {
+	if (!deps.sourceControl) return;
+	await deps.services.previews.preparePending(deps.sourceControl, signal);
 }

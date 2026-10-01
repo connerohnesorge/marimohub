@@ -1011,12 +1011,12 @@ export interface paths {
 			path?: never;
 			cookie?: never;
 		};
-		/** List published previews */
+		/** List notebook previews */
 		get: operations['notebooks.previews.list'];
 		put?: never;
 		/**
-		 * Publish a notebook preview
-		 * @description Branch previews automatically publish future branch commits. Commit previews remain pinned. Previews inherit notebook access, integrations, and secrets. Editors are temporary and never write back.
+		 * Create a notebook preview
+		 * @description Creation persists intent and returns immediately; preparation runs asynchronously. Idempotency keys are retained for seven days from creation. Branch previews automatically publish future branch commits. Commit previews remain pinned. Previews inherit notebook access, integrations, and secrets. Editors are temporary and never write back.
 		 */
 		post: operations['notebooks.previews.create'];
 		delete?: never;
@@ -1032,7 +1032,7 @@ export interface paths {
 			path?: never;
 			cookie?: never;
 		};
-		/** Get a published preview */
+		/** Get a notebook preview */
 		get: operations['notebooks.previews.get'];
 		put?: never;
 		post?: never;
@@ -2154,6 +2154,7 @@ export interface components {
 					| 'PRECONDITION_FAILED'
 					| 'NOT_FOUND'
 					| 'CONFLICT'
+					| 'PREVIEW_NOT_READY'
 					| 'PROPOSAL_RETRY_REQUIRED'
 					| 'EDIT_SESSION_OWNED'
 					| 'EDIT_SESSION_CHANGED'
@@ -3345,6 +3346,10 @@ export interface components {
 				app: boolean;
 				edit: boolean;
 			};
+		};
+		NotebookPreviewPage: {
+			items: components['schemas']['NotebookPreview'][];
+			next_cursor: string | null;
 		};
 		PreviewSessionCreateResult: components['schemas']['SessionCreateResult'] & {
 			preview_version_id: string;
@@ -11410,7 +11415,10 @@ export interface operations {
 	};
 	'notebooks.previews.list': {
 		parameters: {
-			query?: never;
+			query?: {
+				limit?: number;
+				cursor?: string;
+			};
 			header?: never;
 			path: {
 				pid: string;
@@ -11429,7 +11437,7 @@ export interface operations {
 					'application/json': {
 						/** @enum {boolean} */
 						success: true;
-						data: components['schemas']['NotebookPreview'][];
+						data: components['schemas']['NotebookPreviewPage'];
 					};
 				};
 			};
@@ -11565,8 +11573,8 @@ export interface operations {
 			};
 		};
 		responses: {
-			/** @description Preview */
-			200: {
+			/** @description Preview accepted for preparation */
+			202: {
 				headers: {
 					[name: string]: unknown;
 				};
@@ -11809,8 +11817,8 @@ export interface operations {
 		};
 		requestBody?: never;
 		responses: {
-			/** @description Preview deleted */
-			200: {
+			/** @description Preview revoked; cleanup pending */
+			202: {
 				headers: {
 					[name: string]: unknown;
 				};

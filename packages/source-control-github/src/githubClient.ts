@@ -86,6 +86,7 @@ export class GitHubClient {
 		init: RequestInit = {},
 		allowedStatuses: readonly number[] = [],
 	): Promise<Response> {
+		init.signal?.throwIfAborted();
 		let response: Response;
 		try {
 			const headers = new Headers(init.headers);
@@ -110,6 +111,7 @@ export class GitHubClient {
 		owner: string,
 		repo: string,
 		access: 'read' | 'write' | 'preview',
+		signal?: AbortSignal,
 	): Promise<string> {
 		let jwt: string;
 		try {
@@ -122,7 +124,7 @@ export class GitHubClient {
 			installationResponse = await this.request(
 				`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`,
 				jwt,
-				{},
+				{ signal },
 				[404],
 			);
 		} catch (error) {
@@ -146,6 +148,7 @@ export class GitHubClient {
 				jwt,
 				{
 					method: 'POST',
+					signal,
 					body: JSON.stringify({
 						repositories: [repo],
 						permissions:

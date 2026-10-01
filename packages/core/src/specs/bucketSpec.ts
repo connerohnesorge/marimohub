@@ -1,9 +1,14 @@
 import {
-	PreviewRecordSchema,
-	PreviewMaintenanceSchema,
-	previewKey,
-	previewMaintenanceKey,
-} from '../services/content/notebookPreviews';
+	PreviewProjectSchema,
+	PreviewReceiptsSchema,
+	PreviewWorkSchema,
+	PreviewCursorSchema,
+	previewProjectKey,
+	previewReceiptsKey,
+	previewWorkKey,
+	previewCleanupCursorKey,
+} from '../services/content/PreviewStore';
+import { PreviewRecordSchema, previewKey } from '../services/content/notebookPreviews';
 import { WarmPoolRecordSchema } from '../services/runtime/WarmPoolStore';
 import { AppPoolSchema } from '../services/runtime/AppPoolRouter';
 import { ThumbnailRecordSchema } from '../services/content/ThumbnailService';
@@ -118,12 +123,39 @@ const OBJECTS: BucketObject[] = [
 		tag: 'notebook',
 	},
 	{
-		name: 'NotebookPreviewMaintenance',
-		key: previewMaintenanceKey({ project_id: PID, notebook_id: NID, id: '{preview_id}' }),
-		schema: PreviewMaintenanceSchema,
-		summary: 'Preview reconciliation work index, removed after confirmed cleanup and grace.',
-		mutability: 'last-writer-wins',
-		owner: 'NotebookPreviewService',
+		name: 'PreviewProject',
+		key: previewProjectKey(PID),
+		schema: PreviewProjectSchema,
+		summary: 'Bounded active preview membership, recovery intents, and artifact reservations.',
+		mutability: 'cas',
+		owner: 'PreviewStore',
+		tag: 'notebook',
+	},
+	{
+		name: 'PreviewReceipts',
+		key: previewReceiptsKey(PID),
+		schema: PreviewReceiptsSchema,
+		summary: 'Seven-day bounded idempotency receipts, separate from listing membership.',
+		mutability: 'cas',
+		owner: 'PreviewStore',
+		tag: 'notebook',
+	},
+	{
+		name: 'PreviewWork',
+		key: previewWorkKey,
+		schema: PreviewWorkSchema,
+		summary: 'Fair project preparation cursor and bounded deployment-wide leases.',
+		mutability: 'cas',
+		owner: 'PreviewStore',
+		tag: 'notebook',
+	},
+	{
+		name: 'PreviewCleanupCursor',
+		key: previewCleanupCursorKey,
+		schema: PreviewCursorSchema,
+		summary: 'Bounded project cleanup scan position.',
+		mutability: 'cas',
+		owner: 'PreviewStore',
 		tag: 'notebook',
 	},
 	{

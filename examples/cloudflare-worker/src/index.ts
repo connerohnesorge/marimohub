@@ -14,6 +14,7 @@ import {
 	resolveJobSandboxEnv,
 	sweepAppPools,
 	sweepPreviews,
+	preparePreviews,
 } from '@marimo-hub/api';
 import type { ApiDeps } from '@marimo-hub/api';
 import {
@@ -248,6 +249,7 @@ export default {
 		return api.fetch(request, env, ctx);
 	},
 	async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+		ctx.waitUntil(preparePreviews(buildDeps(new Request('https://previews.invalid'), env, ctx)));
 		const bucket = new R2BucketAdapter(env.NOTEBOOKS_BUCKET);
 		const { sessions, maintenance, projects, notebooks, proposals, idempotency, jobRuns } =
 			createServices(bucket);

@@ -18,13 +18,15 @@ export type PreviewInput = {
 export function usePreviewsQuery(pid: string, nid: string) {
 	return useQuery({
 		queryKey: ['previews', pid, nid],
-		queryFn: ({ signal }) =>
-			apiData(
-				apiClient.GET('/api/v1/projects/{pid}/notebooks/{nid}/previews', {
-					params: { path: { pid, nid } },
-					signal,
-				}),
-			),
+		queryFn: async ({ signal }) =>
+			(
+				await apiData(
+					apiClient.GET('/api/v1/projects/{pid}/notebooks/{nid}/previews', {
+						params: { path: { pid, nid } },
+						signal,
+					}),
+				)
+			).items,
 		refetchInterval: 15_000,
 		gcTime: 0,
 	});

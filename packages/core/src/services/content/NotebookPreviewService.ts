@@ -1,6 +1,9 @@
+import { logOperationalError } from '../../operationalLog';
 import type { Bucket } from '../../ports/bucket';
 import type { SourceControlReader, SourceControlRegistry } from '../../ports/sourceControl';
 import type { NotebookId, ProjectId, SessionId, UserId } from '../../ids';
+import { MAX_WORKSPACE_BYTES } from '../../constants';
+import { PreviewStore, PREVIEW_LIMITS } from './PreviewStore';
 import { createNotebookId, createVersionId } from '../../ids';
 import {
 	BadRequestError,
@@ -14,7 +17,7 @@ import { sha256Hex } from '../../internal/sha256';
 import { parseStored, readStored } from '../../schema';
 import type { GitSource } from '../../schema';
 import { mutateObject } from '../catalog/cas';
-import { deleteByPrefix, listAllKeys } from '../catalog/storage';
+import { deleteByPrefix } from '../catalog/storage';
 import { AppPoolStore } from '../runtime/AppPoolStore';
 import type { NotebookService } from './NotebookService';
 import { buildVersion } from './notebookMeta';
@@ -23,38 +26,63 @@ import {
 	PREVIEW_MAX_AGE_MS,
 	PREVIEW_POLL_MS,
 	PreviewRecordSchema,
-	PreviewMaintenanceSchema,
 	previewKey,
-	previewPrefix,
-	previewMaintenanceKey,
 } from './notebookPreviews';
 import type { NotebookPreview, PreviewCreate } from './notebookPreviews';
 
 type RetireRuntime = (pid: ProjectId, nid: NotebookId) => Promise<boolean>;
 
 export class NotebookPreviewService {
+	readonly store: PreviewStore;
 	constructor(
 		private bucket: Bucket,
 		private notebooks: NotebookService,
-	) {}
+	) {
+		this.store = new PreviewStore(bucket);
+	}
 
 	async get(pid: ProjectId, nid: NotebookId, id: string): Promise<NotebookPreview> {
+		if (
+			!(await this.store.project(pid)).entries.some(
+				(entry) =>
+					entry.intent.id === id &&
+					entry.intent.notebook_id === nid &&
+					entry.intent.state !== 'deleted',
+			)
+		)
+			throw new NotFoundError('Preview not found');
 		const key = previewKey(pid, nid, id);
 		const object = await this.bucket.get(key);
 		if (!object) throw new NotFoundError('Preview not found');
 		return readStored(PreviewRecordSchema, object, key);
 	}
 
-	async list(pid: ProjectId, nid: NotebookId): Promise<NotebookPreview[]> {
-		const keys = await listAllKeys(this.bucket, previewPrefix(pid, nid));
-		const records: NotebookPreview[] = [];
-		for (const key of keys) {
-			const object = await this.bucket.get(key);
-			if (object) records.push(await readStored(PreviewRecordSchema, object, key));
+	private async materialize(intent: NotebookPreview): Promise<NotebookPreview> {
+		if (intent.state === 'deleted') return intent;
+		const key = previewKey(intent.project_id, intent.notebook_id, intent.id);
+		if (!(await this.bucket.head(key))) {
+			try {
+				await this.bucket.put(key, JSON.stringify(intent), { onlyIfNotExists: true });
+			} catch (error) {
+				if (!(error instanceof PreconditionFailedError)) throw error;
+			}
 		}
-		return records
-			.filter((record) => record.state !== 'deleted')
-			.sort((a, b) => b.created_at.localeCompare(a.created_at));
+		return this.get(intent.project_id, intent.notebook_id, intent.id);
+	}
+
+	async projectRecords(pid: ProjectId, nid?: NotebookId): Promise<NotebookPreview[]> {
+		const entries = (await this.store.project(pid)).entries.filter(
+			(entry) => !nid || entry.intent.notebook_id === nid,
+		);
+		const records: NotebookPreview[] = [];
+		for (const entry of entries) records.push(await this.materialize(entry.intent));
+		return records;
+	}
+
+	async list(pid: ProjectId, nid: NotebookId): Promise<NotebookPreview[]> {
+		return (await this.projectRecords(pid, nid))
+			.filter((record) => record.state === 'active' && Date.parse(record.expires_at) > Date.now())
+			.sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
 	}
 
 	async source(
@@ -92,7 +120,11 @@ export class NotebookPreviewService {
 		update: (record: NotebookPreview) => NotebookPreview,
 	) {
 		return this.mutate(record, (current) =>
-			current.state === 'active' && current.lease?.token === token ? update(current) : null,
+			current.state === 'active' &&
+			current.lease?.token === token &&
+			current.lease.expires_at > Date.now()
+				? update(current)
+				: null,
 		);
 	}
 
@@ -110,10 +142,15 @@ export class NotebookPreviewService {
 		if (expires <= now || expires > now + PREVIEW_MAX_AGE_MS)
 			throw new BadRequestError('Preview expiry must be within the next 30 days');
 		const fingerprint = JSON.stringify(input);
-		const id = idempotencyKey
-			? (await sha256Hex(JSON.stringify([pid, nid, actor, idempotencyKey]))).slice(0, 32)
-			: crypto.randomUUID().replaceAll('-', '');
-		let record: NotebookPreview = {
+		const receipt = idempotencyKey
+			? await this.store.receipt(
+					pid,
+					await sha256Hex(JSON.stringify([nid, actor, idempotencyKey])),
+					fingerprint,
+				)
+			: undefined;
+		const id = receipt?.id ?? crypto.randomUUID().replaceAll('-', '');
+		const record: NotebookPreview = {
 			schema_version: 1,
 			id,
 			project_id: pid,
@@ -124,55 +161,103 @@ export class NotebookPreviewService {
 			entry_notebook: source.entry_notebook,
 			expires_at: new Date(expires).toISOString(),
 			created_by: actor,
-			created_at: new Date(now).toISOString(),
+			created_at: receipt?.created_at ?? new Date(now).toISOString(),
 			request_fingerprint: fingerprint,
 			state: 'active',
 			preparation: 'pending',
+			preparation_failures: 0,
 			runtime_ids: [],
 			ready_runtime_ids: [],
 			admissions: [],
 			garbage_ids: [],
 		};
-		await this.bucket.put(
-			previewMaintenanceKey(record),
-			JSON.stringify({ project_id: pid, notebook_id: nid, id, created_at: record.created_at }),
-		);
-		try {
-			await this.bucket.put(previewKey(pid, nid, id), JSON.stringify(record), {
-				onlyIfNotExists: true,
-			});
-		} catch (error) {
-			if (!(error instanceof PreconditionFailedError)) throw error;
-			record = await this.get(pid, nid, id);
-			if (record.request_fingerprint !== fingerprint || record.created_by !== actor)
-				throw new ConflictError('Idempotency key already used for another preview request');
-			if (record.state !== 'active') throw new ConflictError('This preview has been deleted');
-		}
-		return this.reconcile(record, registry, true);
+		const intent = await this.store.reserve(record);
+		const saved = await this.materialize(intent);
+		if (saved.state !== 'active') throw new ConflictError('This preview has been deleted');
+		return saved;
 	}
 
-	async reconcile(
+	async prepare(
 		record: NotebookPreview,
 		registry?: SourceControlRegistry,
 		force = false,
+		externalSignal?: AbortSignal,
 	): Promise<NotebookPreview> {
+		externalSignal?.throwIfAborted();
 		if (record.state !== 'active') return record;
 		if (Date.parse(record.expires_at) <= Date.now()) return this.retire(record);
-		if (!force && record.checked_at && Date.now() - Date.parse(record.checked_at) < PREVIEW_POLL_MS)
+		if (
+			!force &&
+			((record.next_attempt_at ?? 0) > Date.now() ||
+				(record.source.type === 'commit' && record.current && !record.pull_request))
+		)
 			return record;
-		const token = crypto.randomUUID();
+		const claim = await this.store.claim(record.project_id, record.id);
+		if (!claim) return record;
+		const token = claim.token;
+		const controller = new AbortController();
+		const signal = AbortSignal.any([
+			controller.signal,
+			...(externalSignal ? [externalSignal] : []),
+		]);
+		const timeout = setTimeout(
+			() => controller.abort(new Error('Preview preparation deadline exceeded')),
+			Math.max(0, claim.expires_at - Date.now() - 1000),
+		);
+		try {
+			return await this.prepareClaimed(record, registry, claim, signal);
+		} finally {
+			clearTimeout(timeout);
+			await this.store.release(token);
+		}
+	}
+
+	private async prepareClaimed(
+		record: NotebookPreview,
+		registry: SourceControlRegistry | undefined,
+		claim: { token: string; expires_at: number },
+		signal: AbortSignal,
+	): Promise<NotebookPreview> {
+		const token = claim.token;
+		const checkpoint = () => {
+			signal.throwIfAborted();
+			if (Date.now() >= claim.expires_at) throw new Error('Preview preparation lease expired');
+		};
+		// Stop waiting on unresponsive I/O; checkpoints fence its eventual completion.
+		const bounded = async <T>(operation: () => Promise<T>): Promise<T> => {
+			checkpoint();
+			let abort!: () => void;
+			const interrupted = new Promise<never>((_, reject) => {
+				abort = () =>
+					reject(
+						signal.reason instanceof Error
+							? signal.reason
+							: new Error('Preview preparation cancelled'),
+					);
+				signal.addEventListener('abort', abort, { once: true });
+			});
+			try {
+				const result = await Promise.race([operation(), interrupted]);
+				checkpoint();
+				return result;
+			} finally {
+				signal.removeEventListener('abort', abort);
+			}
+		};
 		const claimed = await this.mutate(record, (current) => {
 			if (current.state !== 'active' || (current.lease && current.lease.expires_at > Date.now()))
 				return null;
 			return {
 				...current,
 				preparation: 'preparing',
-				lease: { token, expires_at: Date.now() + 600_000 },
+				lease: { token, expires_at: claim.expires_at },
 			};
 		});
 		if (claimed.lease?.token !== token) return claimed;
 		try {
-			const { source, reader } = await this.source(record.project_id, record.notebook_id, registry);
+			const { source, reader } = await bounded(() =>
+				this.source(record.project_id, record.notebook_id, registry),
+			);
 			if (
 				source.repo !== record.repository ||
 				source.root_path !== record.root_path ||
@@ -182,18 +267,31 @@ export class NotebookPreviewService {
 			if (record.pull_request) {
 				if (!reader.getPullRequest)
 					throw new BadRequestError('Pull request tracking is unavailable');
-				const pr = await reader.getPullRequest(record.repository, record.pull_request);
+				const pr = await bounded(() =>
+					reader.getPullRequest!(record.repository, record.pull_request!, { signal }),
+				);
 				if (!pr.sameRepository) throw new BadRequestError('Fork previews are not supported');
 				if (pr.state === 'closed') return await this.retire(record);
 				if (record.source.type === 'branch' && record.source.branch !== pr.branch)
 					throw new ConflictError('Preview branch does not match the pull request');
 			}
+			const ref = record.source;
 			const commit =
-				record.source.type === 'commit' && claimed.current
+				ref.type === 'commit' && claimed.current
 					? claimed.current.commit
-					: record.source.type === 'branch'
-						? (await reader.getBranchHead(record.repository, record.source.branch)).commit
-						: (await reader.resolveCommit!(record.repository, record.source.commit)).commit;
+					: ref.type === 'branch'
+						? (
+								await bounded(() =>
+									reader.getBranchHead(record.repository, ref.branch, {
+										signal,
+									}),
+								)
+							).commit
+						: (
+								await bounded(() =>
+									reader.resolveCommit!(record.repository, ref.commit, { signal }),
+								)
+							).commit;
 			if (claimed.current?.commit === commit)
 				return await this.mutateLeased(record, token, (current) => ({
 					...current,
@@ -201,67 +299,112 @@ export class NotebookPreviewService {
 					lease: undefined,
 					error: undefined,
 					checked_at: new Date().toISOString(),
+					next_attempt_at: Date.now() + PREVIEW_POLL_MS,
+					preparation_failures: 0,
 				}));
+			checkpoint();
 			const runtimeId = createNotebookId();
 			const reserved = await this.mutateLeased(record, token, (current) => ({
 				...current,
 				runtime_ids: [...current.runtime_ids, runtimeId],
+				artifact_cleanup_after: {
+					...current.artifact_cleanup_after,
+					[runtimeId]: Date.now() + 900_000,
+				},
 			}));
 			if (reserved.state !== 'active' || reserved.lease?.token !== token) return reserved;
+			try {
+				await this.store.reserveArtifact(record, runtimeId, MAX_WORKSPACE_BYTES, claim.expires_at);
+			} catch (error) {
+				await this.mutateLeased(record, token, (current) => ({
+					...current,
+					runtime_ids: current.runtime_ids.filter((id) => id !== runtimeId),
+					artifact_cleanup_after: Object.fromEntries(
+						Object.entries(current.artifact_cleanup_after ?? {}).filter(([id]) => id !== runtimeId),
+					),
+				}));
+				throw error;
+			}
+			checkpoint();
 			const files = toSyncedWorkspaceFileMap(
-				await reader.fetchWorkspace(record.repository, commit, record.root_path),
+				await bounded(() =>
+					reader.fetchWorkspace(record.repository, commit, record.root_path, { signal }),
+				),
 			);
 			if (!files.has(record.entry_notebook))
 				throw new BadRequestError('The preview revision does not contain the configured notebook');
+			checkpoint();
 			const beforeWrite = await this.get(record.project_id, record.notebook_id, record.id);
 			if (beforeWrite.state !== 'active' || beforeWrite.lease?.token !== token) return beforeWrite;
 			const versionId = createVersionId();
 			const nb = paths.project(record.project_id).notebook(runtimeId);
 			const version = nb.version(versionId);
-			const parent = await this.notebooks.getNotebook(record.project_id, record.notebook_id);
+			const parent = await bounded(() =>
+				this.notebooks.getNotebook(record.project_id, record.notebook_id),
+			);
 			const now = new Date().toISOString();
-			await this.bucket.put(
-				nb.previewMeta,
-				JSON.stringify({
-					...parent.meta,
-					id: runtimeId,
-					preview: { notebook_id: record.notebook_id, preview_id: record.id },
-					compute_profile: record.compute_profile,
-					created_at: now,
-					updated_at: now,
-				}),
-				{ onlyIfNotExists: true },
-			);
-			for (const [path, bytes] of files)
-				await this.bucket.put(version.workspaceFile(path), bytes, { onlyIfNotExists: true });
-			await this.bucket.put(
-				version.meta,
-				JSON.stringify(
-					buildVersion({
-						versionId,
-						notebookId: runtimeId,
-						now,
-						author: record.created_by,
-						message: `Preview ${commit}`,
-						parentId: null,
-						commit,
+			checkpoint();
+			await bounded(() =>
+				this.bucket.put(
+					nb.previewMeta,
+					JSON.stringify({
+						...parent.meta,
+						id: runtimeId,
+						preview: { notebook_id: record.notebook_id, preview_id: record.id },
+						compute_profile: record.compute_profile,
+						created_at: now,
+						updated_at: now,
 					}),
+					{ onlyIfNotExists: true },
 				),
-				{ onlyIfNotExists: true },
 			);
-			await this.bucket.put(
-				nb.source,
-				JSON.stringify({
-					...source,
-					pending_config: undefined,
-					sync_mode: 'push',
-					branch: record.source.type === 'branch' ? record.source.branch : source.branch,
-					commit,
-					current_version_id: versionId,
-					last_synced_at: now,
-				}),
-				{ onlyIfNotExists: true },
+			for (const [path, bytes] of files) {
+				checkpoint();
+				await bounded(() =>
+					this.bucket.put(version.workspaceFile(path), bytes, { onlyIfNotExists: true }),
+				);
+			}
+			checkpoint();
+			await bounded(() =>
+				this.bucket.put(
+					version.meta,
+					JSON.stringify(
+						buildVersion({
+							versionId,
+							notebookId: runtimeId,
+							now,
+							author: record.created_by,
+							message: `Preview ${commit}`,
+							parentId: null,
+							commit,
+						}),
+					),
+					{ onlyIfNotExists: true },
+				),
 			);
+			checkpoint();
+			await bounded(() =>
+				this.bucket.put(
+					nb.source,
+					JSON.stringify({
+						...source,
+						pending_config: undefined,
+						sync_mode: 'push',
+						branch: record.source.type === 'branch' ? record.source.branch : source.branch,
+						commit,
+						current_version_id: versionId,
+						last_synced_at: now,
+					}),
+					{ onlyIfNotExists: true },
+				),
+			);
+			checkpoint();
+			await this.store.commitArtifactBytes(
+				record,
+				runtimeId,
+				[...files.values()].reduce((sum, bytes) => sum + bytes.byteLength, 0),
+			);
+			checkpoint();
 			const published = await this.mutateLeased(record, token, (current) => ({
 				...current,
 				current: { notebook_id: runtimeId, version_id: versionId, commit },
@@ -270,8 +413,10 @@ export class NotebookPreviewService {
 				error: undefined,
 				lease: undefined,
 				checked_at: now,
+				next_attempt_at: Date.now() + PREVIEW_POLL_MS,
+				preparation_failures: 0,
 			}));
-			if (published.current?.notebook_id !== runtimeId) await deleteByPrefix(this.bucket, nb.base);
+			// Unpublished artifacts remain owned until the cleanup pass reclaims them.
 			return published;
 		} catch (error) {
 			if (error instanceof NotFoundError) {
@@ -289,6 +434,11 @@ export class NotebookPreviewService {
 				error: 'Unable to prepare the preview. Check the source and GitHub App access.',
 				lease: undefined,
 				checked_at: new Date().toISOString(),
+				preparation_failures: current.preparation_failures + 1,
+				next_attempt_at:
+					Date.now() +
+					Math.min(3_600_000, PREVIEW_POLL_MS * 2 ** Math.min(current.preparation_failures, 6)) *
+						(0.75 + Math.random() * 0.5),
 			}));
 		}
 	}
@@ -388,8 +538,7 @@ export class NotebookPreviewService {
 					}
 				: null,
 		);
-		for (const nid of [...retired.runtime_ids, ...retired.garbage_ids])
-			await new AppPoolStore(this.bucket).retireForDeletion(retired.project_id, nid);
+		await this.store.pruneReceipts(record.project_id, record.id);
 		return retired;
 	}
 
@@ -405,11 +554,15 @@ export class NotebookPreviewService {
 		let complete = true;
 		for (const nid of [...record.runtime_ids, ...record.garbage_ids]) {
 			if (!(await this.cleanupRuntime(record.project_id, nid, retireRuntime))) complete = false;
+			else if ((record.cleanup_after ?? Infinity) <= Date.now())
+				await this.store.releaseArtifact(record, nid);
 		}
-		if (complete) {
+		if (complete && record.state !== 'deleted')
 			await this.mutate(record, (current) => ({ ...current, state: 'deleted' }));
-			if ((record.cleanup_after ?? Infinity) <= Date.now())
-				await this.bucket.delete(previewMaintenanceKey(record));
+		if (complete && (record.cleanup_after ?? Infinity) <= Date.now()) {
+			await this.store.markCleaned(record);
+			await this.bucket.delete(previewKey(record.project_id, record.notebook_id, record.id));
+			await this.store.forget(record);
 		}
 	}
 
@@ -419,17 +572,19 @@ export class NotebookPreviewService {
 		retireRuntime: RetireRuntime,
 	): Promise<void> {
 		let record = initial;
-		if (record.state !== 'active' || record.lease) return;
+		if (record.state !== 'active' || (record.lease && record.lease.expires_at > Date.now())) return;
 		for (const nid of record.runtime_ids) {
 			if (
 				nid === record.current?.notebook_id ||
+				(!record.ready_runtime_ids.includes(nid) &&
+					Date.now() < (record.artifact_cleanup_after?.[nid] ?? 0)) ||
 				record.admissions.some((entry) => entry.notebook_id === nid) ||
 				(await hasRuntime(nid))
 			)
 				continue;
 			record = await this.mutate(record, (current) =>
 				current.state === 'active' &&
-				!current.lease &&
+				(!current.lease || current.lease.expires_at <= Date.now()) &&
 				nid !== current.current?.notebook_id &&
 				current.runtime_ids.includes(nid) &&
 				!current.admissions.some((entry) => entry.notebook_id === nid)
@@ -444,29 +599,55 @@ export class NotebookPreviewService {
 		}
 		for (const nid of record.garbage_ids) {
 			if (!(await this.cleanupRuntime(record.project_id, nid, retireRuntime))) continue;
+			await this.store.releaseArtifact(record, nid);
 			await this.mutate(record, (current) => ({
 				...current,
 				garbage_ids: current.garbage_ids.filter((id) => id !== nid),
+				artifact_cleanup_after: Object.fromEntries(
+					Object.entries(current.artifact_cleanup_after ?? {}).filter(([id]) => id !== nid),
+				),
 			}));
 		}
 	}
 
-	async all(): Promise<NotebookPreview[]> {
+	async cleanupCandidates(): Promise<NotebookPreview[]> {
 		const records: NotebookPreview[] = [];
-		for (const key of await listAllKeys(this.bucket, '_system/preview-maintenance/')) {
-			const object = await this.bucket.get(key);
-			if (!object) continue;
-			const marker = await readStored(PreviewMaintenanceSchema, object, key);
-			const record = await this.get(marker.project_id, marker.notebook_id, marker.id).catch(
-				(error) => {
-					if (error instanceof NotFoundError) return null;
-					throw error;
-				},
-			);
-			if (record) records.push(record);
-			else if (Date.now() - Date.parse(marker.created_at) > 86_400_000)
-				await this.bucket.delete(key);
+		for (const pid of await this.store.nextProjects('cleanup')) {
+			try {
+				await this.store.pruneReceipts(pid);
+				records.push(...(await this.projectRecords(pid)));
+			} catch (error) {
+				logOperationalError('preview_cleanup_scan_failed', { project_id: pid }, error);
+			}
 		}
 		return records;
+	}
+
+	async preparePending(registry: SourceControlRegistry, signal?: AbortSignal): Promise<void> {
+		const projects = await this.store.nextProjects('prepare');
+		// One candidate per project prevents a busy repository from monopolizing workers.
+		for (let offset = 0; offset < projects.length; offset += PREVIEW_LIMITS.concurrency) {
+			if (signal?.aborted) return;
+			await Promise.allSettled(
+				projects.slice(offset, offset + PREVIEW_LIMITS.concurrency).map(async (pid) => {
+					try {
+						const records = (await this.projectRecords(pid)).filter(
+							(record) =>
+								record.state === 'active' &&
+								(record.next_attempt_at ?? 0) <= Date.now() &&
+								!(record.source.type === 'commit' && record.current && !record.pull_request),
+						);
+						records.sort(
+							(a, b) =>
+								(a.next_attempt_at ?? 0) - (b.next_attempt_at ?? 0) ||
+								a.created_at.localeCompare(b.created_at),
+						);
+						if (records[0]) await this.prepare(records[0], registry, false, signal);
+					} catch (error) {
+						logOperationalError('preview_preparation_failed', { project_id: pid }, error);
+					}
+				}),
+			);
+		}
 	}
 }

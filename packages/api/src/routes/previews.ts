@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import {
-	ConflictError,
+	PreviewNotReadyError,
 	NotFoundError,
 	PreviewCreateSchema,
 	PreviewIdSchema,
@@ -9,7 +9,7 @@ import {
 import type { NotebookPreview, NotebookId, ProjectId } from '@marimo-hub/core';
 import type { ApiDeps } from '../context';
 import { checkComputeProfile } from '../computeProfile';
-import { cleanupPreview } from '../previews';
+import { PaginationQuery, pageSchema, paginate } from '../pagination';
 import {
 	assertProjectRole,
 	authorizationService,
@@ -58,26 +58,29 @@ const create = createRoute({
 	path: base,
 	operationId: 'notebooks.previews.create',
 	tags: ['Previews'],
-	summary: 'Publish a notebook preview',
+	summary: 'Create a notebook preview',
 	description:
-		'Branch previews automatically publish future branch commits. Commit previews remain pinned. Previews inherit notebook access, integrations, and secrets. Editors are temporary and never write back.',
+		'Creation persists intent and returns immediately; preparation runs asynchronously. Idempotency keys are retained for seven days from creation. Branch previews automatically publish future branch commits. Commit previews remain pinned. Previews inherit notebook access, integrations, and secrets. Editors are temporary and never write back.',
 	request: {
 		params: NotebookIdParam,
 		headers: IdempotencyKeyHeader,
 		body: jsonBody(PreviewCreateSchema),
 	},
-	responses: { 200: jsonContent(Response, 'Preview'), ...errors },
+	responses: { 202: jsonContent(Response, 'Preview accepted for preparation'), ...errors },
 });
 const list = createRoute({
 	method: 'get',
 	path: base,
 	operationId: 'notebooks.previews.list',
 	tags: ['Previews'],
-	summary: 'List published previews',
-	request: { params: NotebookIdParam },
+	summary: 'List notebook previews',
+	request: { params: NotebookIdParam, query: PaginationQuery },
 	responses: {
 		200: jsonContent(
-			z.object({ success: z.literal(true), data: z.array(PublicPreview) }),
+			z.object({
+				success: z.literal(true),
+				data: pageSchema(PublicPreview, 'NotebookPreviewPage'),
+			}),
 			'Previews',
 		),
 		...errors,
@@ -88,7 +91,7 @@ const get = createRoute({
 	path: `${base}/{preview_id}`,
 	operationId: 'notebooks.previews.get',
 	tags: ['Previews'],
-	summary: 'Get a published preview',
+	summary: 'Get a notebook preview',
 	request: { params: Params },
 	responses: { 200: jsonContent(Response, 'Preview'), ...errors },
 });
@@ -100,7 +103,10 @@ const remove = createRoute({
 	summary: 'Delete a preview and retire its compute',
 	request: { params: Params },
 	responses: {
-		200: jsonContent(z.object({ success: z.literal(true), data: z.null() }), 'Preview deleted'),
+		202: jsonContent(
+			z.object({ success: z.literal(true), data: z.null() }),
+			'Preview revoked; cleanup pending',
+		),
 		...errors,
 	},
 });
@@ -273,7 +279,7 @@ app.openapi(create, async (c) => {
 				resolvePublicBaseUrl(c, deps.sandbox.appBaseUrl),
 			),
 		},
-		200,
+		202,
 	);
 });
 app.openapi(list, async (c) => {
@@ -284,9 +290,13 @@ app.openapi(list, async (c) => {
 	return c.json(
 		{
 			success: true as const,
-			data: (await deps.services.previews.list(pid, nid))
-				.filter((record) => Date.parse(record.expires_at) > Date.now())
-				.map((record) => present(record, can, resolvePublicBaseUrl(c, deps.sandbox.appBaseUrl))),
+			data: paginate(
+				(await deps.services.previews.list(pid, nid)).map((record) =>
+					present(record, can, resolvePublicBaseUrl(c, deps.sandbox.appBaseUrl)),
+				),
+				c.req.valid('query'),
+				{ key: (record) => record.created_at, tiebreak: (record) => record.id },
+			),
 		},
 		200,
 	);
@@ -312,11 +322,8 @@ app.openapi(remove, async (c) => {
 	const user = c.get('user');
 	const { pid, nid, preview_id } = c.req.valid('param');
 	await manageable(deps, pid, nid, user);
-	const record = await deps.services.previews.retire(
-		await deps.services.previews.get(pid, nid, preview_id),
-	);
-	await cleanupPreview(deps, record);
-	return c.json({ success: true as const, data: null }, 200);
+	await deps.services.previews.retire(await deps.services.previews.get(pid, nid, preview_id));
+	return c.json({ success: true as const, data: null }, 202);
 });
 app.openapi(launch, async (c) => {
 	const deps = c.get('deps');
@@ -330,11 +337,10 @@ app.openapi(launch, async (c) => {
 		deps,
 		notebook.meta.security_labels ?? null,
 	);
-	let record = await deps.services.previews.get(pid, nid, preview_id);
-	record = await deps.services.previews.reconcile(record, deps.sourceControl);
+	const record = await deps.services.previews.get(pid, nid, preview_id);
 	if (record.state !== 'active' || Date.parse(record.expires_at) <= Date.now())
 		throw new NotFoundError('Preview not found');
-	if (!record.current) throw new ConflictError('Preview is not ready');
+	if (!record.current) throw new PreviewNotReadyError();
 	const data = await startNotebookSession({
 		deps,
 		user,
