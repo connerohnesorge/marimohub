@@ -8,6 +8,8 @@ import {
 	PREVIEW_LIMITS,
 	previewProjectKey,
 	previewReceiptsKey,
+	previewActiveProjectPrefix,
+	previewActiveProjectKey,
 } from './PreviewStore';
 import { PreviewRecordSchema } from './notebookPreviews';
 
@@ -68,11 +70,12 @@ describe('PreviewStore membership and receipts', () => {
 	it('fences a delayed create after its membership has been reclaimed', async () => {
 		const { store, intent } = fixture();
 		const record = intent();
+		const deadline = Date.now() + PREVIEW_LIMITS.creationMs;
 		await store.reserve(record);
-		vi.spyOn(Date, 'now').mockReturnValue(Date.parse(record.created_at) + 60000);
-		expect(await store.reserve(record)).toEqual(record);
+		vi.spyOn(Date, 'now').mockReturnValue(deadline);
+		expect(await store.reserve(record, deadline)).toEqual(record);
 		await store.forget(record);
-		await expect(store.reserve(record)).rejects.toThrow(ConflictError);
+		await expect(store.reserve(record, deadline)).rejects.toThrow(ConflictError);
 	});
 
 	it('replays receipts, rejects changed requests and retains deletion until expiry', async () => {
@@ -157,6 +160,171 @@ describe('PreviewStore artifact quotas', () => {
 });
 
 describe('PreviewStore scheduling', () => {
+	it('schedules active projects without reading a hundred retained empty heads', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		for (let i = 0; i < 100; i++)
+			await bucket.put(previewProjectKey(createProjectId()), JSON.stringify({ entries: [] }));
+		const record = await store.reserve(intent());
+		const reads = vi.spyOn(bucket, 'get');
+		const lists = vi.spyOn(bucket, 'list');
+		expect(await store.nextProjects('cleanup')).toEqual([pid]);
+		expect(await store.nextProjects('prepare')).toEqual([pid]);
+		expect(reads.mock.calls.filter(([key]) => key.startsWith('_system/preview-projects/'))).toEqual(
+			[[previewProjectKey(pid)], [previewProjectKey(pid)]],
+		);
+		expect(
+			lists.mock.calls.every(([options]) => options?.prefix === previewActiveProjectPrefix),
+		).toBe(true);
+		await store.forget(record);
+		expect(await bucket.head(previewProjectKey(pid))).not.toBeNull();
+		expect(await store.nextProjects('cleanup')).toEqual([]);
+		expect((await bucket.list({ prefix: previewActiveProjectPrefix })).objects).toEqual([]);
+		await store.reserve(intent());
+		expect(await store.nextProjects('cleanup')).toEqual([pid]);
+	});
+
+	it('reclaims a marker left by an interrupted reservation', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		const put = bucket.put.bind(bucket);
+		const writes = vi
+			.spyOn(bucket, 'put')
+			.mockImplementation((key, value, options) =>
+				key === previewProjectKey(pid)
+					? Promise.reject(new Error('storage unavailable'))
+					: put(key, value, options),
+			);
+		await expect(store.reserve(intent())).rejects.toThrow('storage unavailable');
+		writes.mockRestore();
+		expect((await bucket.list({ prefix: previewActiveProjectPrefix })).objects).toHaveLength(1);
+		expect(await store.nextProjects('cleanup')).toEqual([]);
+		expect((await bucket.list({ prefix: previewActiveProjectPrefix })).objects).toEqual([]);
+	});
+
+	it('retries failed marker removal without delaying other active projects', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		const record = await store.reserve(intent());
+		const key = previewActiveProjectKey(pid, (await store.project(pid)).work_id!);
+		const remove = bucket.delete.bind(bucket);
+		const failing = vi
+			.spyOn(bucket, 'delete')
+			.mockImplementation((target) =>
+				target === key ? Promise.reject(new Error('delete unavailable')) : remove(target),
+			);
+		await expect(store.forget(record)).rejects.toThrow('delete unavailable');
+		const active = { ...intent(), project_id: createProjectId() };
+		await store.reserve(active);
+		expect(await store.nextProjects('cleanup')).toEqual([active.project_id]);
+		expect(await bucket.head(key)).not.toBeNull();
+		failing.mockRestore();
+		expect(await store.nextProjects('cleanup')).toEqual([active.project_id]);
+		expect(await bucket.head(key)).toBeNull();
+	});
+
+	it('retains unreadable project work and continues scheduling healthy projects', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		await store.reserve(intent());
+		const key = previewActiveProjectKey(pid, (await store.project(pid)).work_id!);
+		const head = await (await bucket.get(previewProjectKey(pid)))!.text();
+		await bucket.put(previewProjectKey(pid), 'corrupt');
+		const active = { ...intent(), project_id: createProjectId() };
+		await store.reserve(active);
+		expect(await store.nextProjects('cleanup')).toEqual([active.project_id]);
+		expect(await bucket.head(key)).not.toBeNull();
+		await bucket.put(previewProjectKey(pid), head);
+		expect((await store.nextProjects('cleanup')).sort()).toEqual([pid, active.project_id].sort());
+	});
+
+	it('fences a pending publication before removing its marker', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		const put = bucket.put.bind(bucket);
+		const arrived = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		let blocked = false;
+		vi.spyOn(bucket, 'put').mockImplementation(async (key, value, options) => {
+			if (key === previewProjectKey(pid) && !blocked) {
+				blocked = true;
+				arrived.resolve();
+				await resume.promise;
+			}
+			return put(key, value, options);
+		});
+		const reserving = store.reserve(intent());
+		await arrived.promise;
+		try {
+			expect(await store.nextProjects('cleanup')).toEqual([]);
+		} finally {
+			resume.resolve();
+		}
+		await reserving;
+		expect(await store.nextProjects('cleanup')).toEqual([pid]);
+		const project = await store.project(pid);
+		expect(await bucket.head(previewActiveProjectKey(pid, project.work_id!))).not.toBeNull();
+	});
+
+	it('does not remove a new activation when final cleanup overlaps creation', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		const first = await store.reserve(intent());
+		const old = (await store.project(pid)).work_id!;
+		const remove = bucket.delete.bind(bucket);
+		const arrived = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		vi.spyOn(bucket, 'delete').mockImplementation(async (key) => {
+			if (key === previewActiveProjectKey(pid, old)) {
+				arrived.resolve();
+				await resume.promise;
+			}
+			return remove(key);
+		});
+		const forgetting = store.forget(first);
+		await arrived.promise;
+		try {
+			await store.reserve(intent());
+		} finally {
+			resume.resolve();
+		}
+		await forgetting;
+		expect((await store.project(pid)).work_id).not.toBe(old);
+		expect(await store.nextProjects('cleanup')).toEqual([pid]);
+	});
+
+	it('keeps a marker whose publication completes during orphan inspection', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		const put = bucket.put.bind(bucket);
+		const arrived = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		vi.spyOn(bucket, 'put').mockImplementation(async (key, value, options) => {
+			if (key === previewProjectKey(pid)) {
+				arrived.resolve();
+				await resume.promise;
+			}
+			return put(key, value, options);
+		});
+		const reserving = store.reserve(intent());
+		await arrived.promise;
+		const project = store.project.bind(store);
+		vi.spyOn(store, 'project').mockImplementationOnce(async (id) => {
+			const stale = await project(id);
+			resume.resolve();
+			await reserving;
+			return stale;
+		});
+		expect(await store.nextProjects('cleanup')).toEqual([]);
+		expect(await store.nextProjects('cleanup')).toEqual([pid]);
+		expect((await bucket.list({ prefix: previewActiveProjectPrefix })).objects).toHaveLength(1);
+	});
+
+	it('bounds orphan scanning and resumes to reach active work', async () => {
+		const { store, bucket, pid, intent } = fixture();
+		for (let i = 0; i < PREVIEW_LIMITS.projectsPerTick * PREVIEW_LIMITS.workPagesPerTick; i++)
+			await bucket.put(previewActiveProjectKey(pid, `!orphan-${i}`), '{}');
+		const record = intent();
+		await store.reserve(record);
+		const lists = vi.spyOn(bucket, 'list');
+		expect(await store.nextProjects('cleanup')).toEqual([]);
+		expect(lists).toHaveBeenCalledTimes(PREVIEW_LIMITS.workPagesPerTick);
+		expect(await store.nextProjects('cleanup')).toEqual([record.project_id]);
+	});
+
 	it('enforces global and per-project concurrency, recovers leases, and fences stale releases', async () => {
 		const { store, pid } = fixture();
 		const id = 'a'.repeat(32);

@@ -1251,6 +1251,65 @@ describe('Preview source and compute boundaries', () => {
 });
 
 describe('asynchronous preview preparation', () => {
+	it('recovers the same retry key after capacity is released beyond the creation deadline', async () => {
+		const service = api.deps.services.previews;
+		const createPending = (key?: string, input = body) =>
+			service.create(pid, nid, input, ACTOR, api.deps.sourceControl, key);
+		const first = await createPending();
+		for (let i = 1; i < 25; i++) await createPending();
+		await expect(createPending('retry-capacity')).rejects.toThrow(ResourceExhaustedError);
+		const receipt = await (await api.bucket.get(`_system/preview-receipts/${pid}.json`))!.json<{
+			entries: { id: string; created_at: string; expires_at: number }[];
+		}>();
+		await expect(createPending('retry-capacity', { ...body, name: 'Different' })).rejects.toThrow(
+			'Idempotency',
+		);
+		const retired = await service.retire(first);
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+		await service.cleanup(retired, async () => true);
+		const recovered = await createPending('retry-capacity');
+		expect(recovered.id).toBe(receipt.entries[0].id);
+		expect(recovered.created_at).toBe(receipt.entries[0].created_at);
+		expect((await createPending('retry-capacity')).id).toBe(recovered.id);
+		expect(await service.list(pid, nid)).toHaveLength(25);
+		const deleted = await service.retire(recovered);
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+		await service.cleanup(deleted, async () => true);
+		await expect(createPending('retry-capacity')).rejects.toThrow('deleted');
+	});
+
+	it('fences an in-flight retry after the original preview is deleted and reclaimed', async () => {
+		const service = api.deps.services.previews;
+		const record = await service.create(
+			pid,
+			nid,
+			body,
+			ACTOR,
+			api.deps.sourceControl,
+			'stale-retry',
+		);
+		const arrived = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const reserve = service.store.reserve.bind(service.store);
+		vi.spyOn(service.store, 'reserve').mockImplementationOnce(async (...args) => {
+			arrived.resolve();
+			await resume.promise;
+			return reserve(...args);
+		});
+		const retry = service.create(pid, nid, body, ACTOR, api.deps.sourceControl, 'stale-retry');
+		const rejected = expect(retry).rejects.toThrow('creation attempt expired');
+		await arrived.promise;
+		try {
+			const retired = await service.retire(record);
+			vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+			await service.cleanup(retired, async () => true);
+		} finally {
+			resume.resolve();
+		}
+		await rejected;
+		expect(await service.list(pid, nid)).toEqual([]);
+	});
+
 	it('creates pending intent without GitHub and returns a stable share URL', async () => {
 		vi.mocked(reader.getBranchHead).mockImplementation(() => new Promise(() => {}));
 		const pending = await expectOk<{ id: string; preparation: string; url: string }>(

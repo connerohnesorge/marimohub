@@ -1562,18 +1562,27 @@ Pool CAS transitions remain authoritative when maintenance passes overlap.
 `NotebookPreviewService` owns each CAS record at `_system/previews/{pid}/{nid}/{preview-id}.json`.
 Records hold the source, prepared revision, runtime ownership ledger, and session admission reservations.
 
-`PreviewStore` owns four CAS records:
+`PreviewStore` owns these CAS records:
 
 - `_system/preview-projects/{pid}.json`: bounded membership, recovery intents, and artifact reservations.
-- `_system/preview-receipts/{pid}.json`: bounded idempotency receipts, retained for seven days from creation.
+- `_system/preview-receipts/{pid}.json`: bounded idempotency receipts, valid for seven days from creation.
 - `_system/preview-work.json`: rotating project cursor and deployment-wide preparation leases.
 - `_system/preview-cleanup-cursor.json`: independent rotating cleanup cursor.
+
+A one-minute deadline fences each creation attempt, independently of the receipt’s seven-day deduplication window.
+A rejected capacity reservation can retry with the same key and a fresh attempt deadline. Deleted receipts still reject retries.
+Expired receipts are pruned on project activity; idle receipt heads hold at most 1,000 entries and do not participate in scheduling.
 
 Creation reserves membership before writing the preview record. Workers can materialize interrupted writes from the stored intent.
 Listing reads only this bounded membership; it never scans historical preview records or receipts.
 Deletion closes the receipt immediately. After reclamation and a 15-minute grace period, cleanup marks the membership terminal,
 deletes the preview record, and removes membership. Terminal intents prevent interrupted cleanup from recreating active records.
 Empty project CAS heads remain to fence concurrent writers; individual preview records do not remain permanently.
+Workers page through removable `_system/preview-active-projects/{pid}/{work_id}.json` markers instead of retained heads.
+Each activation uses a new work ID. Its marker is written before membership, and project mutations write a fresh revision.
+Removing a stale marker first CAS-updates the project head to fence pending publications. Interrupted writes leave discoverable orphan markers.
+Each pass selects up to four active projects and scans at most sixteen marker pages, reclaiming orphans as it goes.
+Empty historical heads do not add scheduling latency; rotation time depends on projects with outstanding preview work.
 Runtime access requires live membership and an active preview record.
 
 Preparation runs independently of launches and maintenance. Leases fence publication; deadlines abort provider reads and stop workspace writes.

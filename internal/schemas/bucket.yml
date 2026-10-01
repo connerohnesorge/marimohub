@@ -123,6 +123,48 @@ paths:
       responses:
         '204':
           description: Stored.
+  /_system/preview-active-projects/{pid}/{work_id}.json:
+    summary: Active project discovery marker, removed after its project CAS fences
+      publication.
+    parameters:
+      - name: pid
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: work_id
+        in: path
+        required: true
+        schema:
+          type: string
+    x-mutability: immutable
+    x-owner: PreviewStore
+    get:
+      operationId: read_system_preview_active_projects_json
+      summary: Read PreviewActiveProject
+      tags:
+        - notebook
+      responses:
+        '200':
+          description: The stored object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewActiveProject'
+    put:
+      operationId: write_system_preview_active_projects_json
+      summary: Write PreviewActiveProject
+      tags:
+        - notebook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreviewActiveProject'
+      responses:
+        '204':
+          description: Stored.
   /_system/preview-receipts/{pid}.json:
     summary: Seven-day bounded idempotency receipts, separate from listing membership.
     parameters:
@@ -2199,6 +2241,10 @@ components:
     PreviewProject:
       type: object
       properties:
+        revision:
+          type: string
+        work_id:
+          type: string
         entries:
           type: array
           items:
@@ -2400,6 +2446,16 @@ components:
               - artifacts
       required:
         - entries
+    PreviewActiveProject:
+      type: object
+      properties:
+        project_id:
+          type: string
+        work_id:
+          type: string
+      required:
+        - project_id
+        - work_id
     PreviewReceipts:
       type: object
       properties:

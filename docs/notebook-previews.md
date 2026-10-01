@@ -81,7 +81,8 @@ Fork PRs and automatic label triggers are unsupported. CI can use the API or CLI
 
 The Node preparation worker runs independently every 15 seconds on maintenance replicas.
 It checks moving sources at most once per minute and selects one due preview per project.
-Each tick visits up to four projects, rotating through projects and due previews.
+Each tick visits up to four projects with outstanding preview work, rotating through projects and due previews.
+Empty retained project records do not participate in scheduling.
 Creation and session launch never wait for GitHub. Failed refreshes leave the last prepared revision available.
 
 Preparation has a two-minute lease and aborts network requests before that deadline.
@@ -108,4 +109,6 @@ Each preview can retain up to 12 revisions; a project has a 500 MiB workspace bu
 Preparation reserves the maximum archive size before download, then charges the stored workspace size.
 Reservations remain until cleanup confirms reclamation. Unpublished artifacts have a 15-minute cleanup grace period.
 A project can retain up to 1,000 idempotency receipts within the seven-day window.
+After a capacity rejection, retry with the same key once capacity becomes available.
+Each retry gets a fresh creation deadline; deleted previews cannot be recreated with their retained key.
 Limits return `429 RESOURCE_EXHAUSTED`; preparation failures retry after backoff.

@@ -171,7 +171,7 @@ export class NotebookPreviewService {
 			admissions: [],
 			garbage_ids: [],
 		};
-		const intent = await this.store.reserve(record);
+		const intent = await this.store.reserve(record, now + PREVIEW_LIMITS.creationMs);
 		const saved = await this.materialize(intent);
 		if (saved.state !== 'active') throw new ConflictError('This preview has been deleted');
 		return saved;
