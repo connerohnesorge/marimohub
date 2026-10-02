@@ -1587,7 +1587,7 @@ Runtime access requires live membership and an active preview record.
 
 Preparation runs independently of launches and maintenance. Leases fence publication; deadlines abort provider reads and stop workspace writes.
 Project reservations bound both revision counts and aggregate workspace bytes before archive download.
-Cleanup retains ownership and reservations until it confirms reclamation. Failed attempts retain their artifacts through a cleanup grace period.
+Cleanup retires compute immediately and retains artifacts, ownership, and reservations through the cleanup grace period. This lets in-flight preparation uploads settle before artifact deletion.
 
 Each revision has a unique internal notebook ID, immutable workspace, and `preview` ownership marker in `preview-runtime.json`.
 Ordinary `meta.json` is absent, preventing older replicas from rewriting metadata without preview protections.

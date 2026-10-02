@@ -53,7 +53,9 @@ function PreviewRuntime({
 				</Link>
 				<h1 className="font-medium">{record.name}</h1>
 				<PreviewBadge preview={record} />
-				<span className="text-xs text-muted-foreground">Latest: {record.commit?.slice(0, 12)}</span>
+				<span className="text-xs text-muted-foreground">
+					{record.commit ? `Latest: ${record.commit.slice(0, 12)}` : 'Awaiting first revision'}
+				</span>
 				<Button variant="default" onPress={() => void copyPreviewLink(record.url)}>
 					Copy link
 				</Button>

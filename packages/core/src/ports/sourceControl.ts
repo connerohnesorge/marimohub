@@ -203,8 +203,16 @@ export interface SourceControlReader {
 	supportsRepository(repository: string): boolean;
 	/** GitHub App readers expose this capability; other Git readers cannot publish previews. */
 	readonly previews?: boolean;
-	listBranches?(repository: string, query: string): Promise<SourceRefSuggestion[]>;
-	listCommits?(repository: string, query: string): Promise<SourceRefSuggestion[]>;
+	listBranches?(
+		repository: string,
+		query: string,
+		options?: SourceReadOptions,
+	): Promise<SourceRefSuggestion[]>;
+	listCommits?(
+		repository: string,
+		query: string,
+		options?: SourceReadOptions,
+	): Promise<SourceRefSuggestion[]>;
 	resolveCommit?(
 		repository: string,
 		commit: string,

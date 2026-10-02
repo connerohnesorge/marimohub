@@ -47,6 +47,7 @@ import {
 	JobRunMarkerSchema,
 	JobRunSchema,
 	NotebookMetaSchema,
+	PreviewRuntimeMetaSchema,
 	NotebookProposalSchema,
 	ProposalPayloadMarkerSchema,
 	ProjectSchema,
@@ -238,7 +239,7 @@ const OBJECTS: BucketObject[] = [
 	{
 		name: 'PreviewRuntimeMeta',
 		key: notebook.previewMeta,
-		schema: NotebookMetaSchema,
+		schema: PreviewRuntimeMetaSchema,
 		summary: 'Immutable runtime metadata isolated from older notebook writers.',
 		mutability: 'immutable',
 		tag: 'notebook',

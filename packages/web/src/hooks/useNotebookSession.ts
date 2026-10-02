@@ -12,20 +12,17 @@ import { isNotFoundError } from '@/api/request';
 import { useGeneration } from '@/hooks/useGeneration';
 import { useInterval } from '@/hooks/useInterval';
 import type { Session } from '@/types';
-import { sessionStartupDeadlineMs } from '@/lib/sessions';
+import {
+	EDITOR_HEARTBEAT_INTERVAL_MS,
+	SESSION_STATUS_INTERVAL_MS,
+	SESSION_START_POLL_INTERVAL_MS,
+	sessionStartupDeadlineMs,
+} from '@/lib/sessions';
 
-/** How often a running notebook pings the heartbeat endpoint, in ms. */
-const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const DEFAULT_APP_HEARTBEAT_INTERVAL_SECONDS = APP_HEARTBEAT_INTERVAL_MS / 1000;
-
-/** How often to poll a still-`starting` session until it is running, in ms. */
-const START_POLL_INTERVAL_MS = 2_000;
 
 /** Startup-timeout fallback when capabilities are unavailable (server default). */
 const DEFAULT_STARTUP_TIMEOUT_S = 120;
-
-/** Editor takeovers need status checks more often than editor heartbeats. */
-const RUN_WATCH_INTERVAL_MS = 30_000;
 
 export interface SessionError {
 	message: string;
@@ -348,7 +345,7 @@ export function useNotebookSession(
 				() => failStart(undefined, 'NOT_FOUND'),
 			);
 		},
-		session?.status === 'starting' ? START_POLL_INTERVAL_MS : null,
+		session?.status === 'starting' ? SESSION_START_POLL_INTERVAL_MS : null,
 	);
 
 	const concludeSession = useCallback(
@@ -382,7 +379,7 @@ export function useNotebookSession(
 			if (!sid) return;
 			pollSession(sid, updateRunningSession, () => concludeSession('gone'));
 		},
-		mode !== 'app' && session?.status === 'running' ? RUN_WATCH_INTERVAL_MS : null,
+		mode !== 'app' && session?.status === 'running' ? SESSION_STATUS_INTERVAL_MS : null,
 	);
 
 	const heartbeatActive =
@@ -421,7 +418,7 @@ export function useNotebookSession(
 		heartbeatActive
 			? mode === 'app'
 				? appHeartbeatIntervalSeconds * 1000
-				: HEARTBEAT_INTERVAL_MS
+				: EDITOR_HEARTBEAT_INTERVAL_MS
 			: null,
 	);
 

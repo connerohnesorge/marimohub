@@ -77,6 +77,7 @@ describe('createFromEnv auth backend selection', () => {
 					MARIMOHUB_AUTH_BACKEND: 'dev',
 					MARIMOHUB_COMPUTE_BACKEND: backend,
 					MARIMOHUB_PREVIEW_COMPUTE_PROFILE: 'unknown',
+					MARIMOHUB_COMPUTE_PROFILES: 'small:cpu=1',
 				}),
 			).toThrow(
 				expect.objectContaining({

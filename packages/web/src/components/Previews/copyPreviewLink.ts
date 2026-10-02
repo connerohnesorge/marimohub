@@ -1,11 +1,6 @@
 import { toast } from 'sonner';
+import { copyText } from '@/lib/clipboard';
 
 export async function copyPreviewLink(url: string): Promise<void> {
-	try {
-		if (!navigator.clipboard) throw new Error('Clipboard unavailable');
-		await navigator.clipboard.writeText(url);
-		toast.success('Preview link copied');
-	} catch {
-		toast.error('Unable to copy the link');
-	}
+	if (await copyText(url)) toast.success('Preview link copied');
 }

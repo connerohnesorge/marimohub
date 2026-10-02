@@ -13,7 +13,7 @@ describe('copyPreviewLink', () => {
 	it('reports unavailable clipboard access without throwing', async () => {
 		vi.stubGlobal('navigator', {});
 		await expect(copyPreviewLink('https://hub.example/preview')).resolves.toBeUndefined();
-		expect(toast.error).toHaveBeenCalledWith('Unable to copy the link');
+		expect(toast.error).toHaveBeenCalledWith('Could not copy to clipboard');
 		expect(toast.success).not.toHaveBeenCalled();
 	});
 
@@ -22,7 +22,7 @@ describe('copyPreviewLink', () => {
 			clipboard: { writeText: vi.fn().mockRejectedValue(new Error('Denied')) },
 		});
 		await copyPreviewLink('https://hub.example/preview');
-		expect(toast.error).toHaveBeenCalledWith('Unable to copy the link');
+		expect(toast.error).toHaveBeenCalledWith('Could not copy to clipboard');
 		expect(toast.success).not.toHaveBeenCalled();
 	});
 

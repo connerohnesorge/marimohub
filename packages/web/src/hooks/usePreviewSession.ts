@@ -1,11 +1,16 @@
 import { APP_HEARTBEAT_INTERVAL_MS } from '@marimo-hub/core/constants';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { apiClient, apiData, ApiRequestError } from '@/api/client';
 import { usePreviewQuery } from '@/api/previews';
 import { SESSION_LIFECYCLE_TIMEOUT_MS, useCapabilitiesQuery } from '@/api/hooks';
 import { leaveAppVisit } from '@/api/sessionVisits';
-import { sessionStartupDeadlineMs } from '@/lib/sessions';
+import {
+	EDITOR_HEARTBEAT_INTERVAL_MS,
+	SESSION_STATUS_INTERVAL_MS,
+	SESSION_START_POLL_INTERVAL_MS,
+	sessionStartupDeadlineMs,
+} from '@/lib/sessions';
 
 type Runtime = {
 	userId: string;
@@ -24,8 +29,11 @@ function isTerminalSessionError(error: unknown): boolean {
 	);
 }
 
-function isEndedStatus(status: string | undefined): boolean {
-	return !!status && status !== 'running' && status !== 'starting';
+function isEndedSession(session: { status: string; sandbox_url?: string } | undefined): boolean {
+	return (
+		!!session &&
+		(session.status === 'running' ? !session.sandbox_url : session.status !== 'starting')
+	);
 }
 
 function readRuntime(key: string, userId: string): Runtime | null {
@@ -47,6 +55,7 @@ export function usePreviewSession(pid: string, nid: string, previewId: string, u
 	const storageKey = `preview-session:${userId}:${pid}:${nid}:${previewId}`;
 	const [runtime, setRuntime] = useState<Runtime | null>(() => readRuntime(storageKey, userId));
 	const [timedOutRuntime, setTimedOutRuntime] = useState<Runtime | null>(null);
+	const lastHeartbeat = useRef<{ runtime: Runtime | null; at: number } | null>(null);
 	const startupTimedOut = !!runtime && timedOutRuntime === runtime;
 	const preview = usePreviewQuery(pid, nid, previewId);
 	const capabilities = useCapabilitiesQuery();
@@ -54,7 +63,7 @@ export function usePreviewSession(pid: string, nid: string, previewId: string, u
 		runtime?.mode === 'app'
 			? (capabilities.data?.app_pool?.heartbeat_interval_seconds ??
 					APP_HEARTBEAT_INTERVAL_MS / 1000) * 1000
-			: 15_000;
+			: EDITOR_HEARTBEAT_INTERVAL_MS;
 	const start = useMutation({
 		mutationFn: async (mode: 'app' | 'edit') => {
 			if (runtime?.mode === 'edit')
@@ -100,23 +109,40 @@ export function usePreviewSession(pid: string, nid: string, previewId: string, u
 			runtime?.sid,
 			runtime?.assignment?.visit_id,
 		],
-		queryFn: () =>
-			apiData(
+		queryFn: async () => {
+			const params = { path: { pid, nid: runtime!.nid, sid: runtime!.sid } };
+			if (
+				runtime?.mode === 'edit' &&
+				lastHeartbeat.current?.runtime === runtime &&
+				Date.now() - lastHeartbeat.current.at < heartbeatInterval
+			) {
+				return apiData(
+					apiClient.GET('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}', { params }),
+				);
+			}
+			const response = await apiData(
 				apiClient.POST('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/heartbeat', {
-					params: { path: { pid, nid: runtime!.nid, sid: runtime!.sid } },
+					params,
 					...(runtime?.assignment ? { body: runtime.assignment } : {}),
 				}),
-			),
+			);
+			lastHeartbeat.current = { runtime, at: Date.now() };
+			return response;
+		},
 		enabled: !!runtime && !!preview.data && !preview.isError && !startupTimedOut,
 		refetchInterval: (query) =>
-			isTerminalSessionError(query.state.error) || isEndedStatus(query.state.data?.status)
+			isTerminalSessionError(query.state.error) || isEndedSession(query.state.data)
 				? false
-				: heartbeatInterval,
+				: runtime?.mode === 'app'
+					? heartbeatInterval
+					: query.state.data?.status === 'running'
+						? SESSION_STATUS_INTERVAL_MS
+						: SESSION_START_POLL_INTERVAL_MS,
 		refetchIntervalInBackground: true,
 		retry: false,
 		gcTime: 0,
 	});
-	const sessionEnded = isTerminalSessionError(session.error) || isEndedStatus(session.data?.status);
+	const sessionEnded = isTerminalSessionError(session.error) || isEndedSession(session.data);
 	const startupTimeoutMs = sessionStartupDeadlineMs(
 		capabilities.data?.sandbox_startup_timeout_seconds,
 	);

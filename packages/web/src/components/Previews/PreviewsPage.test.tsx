@@ -76,7 +76,7 @@ describe('preview creation eligibility', () => {
 		expect(screen.getByRole('button', { name: 'Create preview' })).toBeInTheDocument();
 	});
 
-	it.each([[], undefined])(
+	it.each([[[]], [undefined]])(
 		'hides creation without confirmed preview capability: %s',
 		(providers) => {
 			state.previewProviders = providers;

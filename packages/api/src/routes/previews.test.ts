@@ -17,6 +17,7 @@ import {
 } from '@marimo-hub/core';
 import type {
 	SourceControlReader,
+	SourceReadOptions,
 	NotebookId,
 	ProjectId,
 	Session,
@@ -504,6 +505,43 @@ describe('Notebook previews', () => {
 		).rejects.toThrow('deleted');
 	});
 
+	it('waits for the preparation grace period before deleting artifacts during an upload', async () => {
+		const service = api.deps.services.previews;
+		const record = await service.create(pid, nid, body, ACTOR, api.deps.sourceControl);
+		const uploading = Promise.withResolvers<void>();
+		const finishUpload = Promise.withResolvers<void>();
+		const put = api.bucket.put.bind(api.bucket);
+		vi.spyOn(api.bucket, 'put').mockImplementation(async (key, value, options) => {
+			if (key.endsWith('/workspace/notebook.py')) {
+				uploading.resolve();
+				await finishUpload.promise;
+			}
+			return put(key, value, options);
+		});
+		const preparation = service.prepare(record, api.deps.sourceControl);
+		await uploading.promise;
+		try {
+			const retired = await service.retire(record);
+			const runtime = retired.revisions[0].notebook_id;
+			const prefix = paths.project(pid).notebook(runtime).base;
+			await service.cleanup(retired, async () => true);
+			expect(
+				await api.bucket.head(paths.project(pid).notebook(runtime).previewMeta),
+			).not.toBeNull();
+			expect((await service.store.project(pid)).entries).toHaveLength(1);
+			finishUpload.resolve();
+			expect((await preparation).current).toBeUndefined();
+			expect((await api.bucket.list({ prefix })).objects.length).toBeGreaterThan(0);
+			vi.spyOn(Date, 'now').mockReturnValue(retired.cleanup_after! + 1);
+			await service.cleanup(await service.get(pid, nid, record.id), async () => true);
+			expect((await api.bucket.list({ prefix })).objects).toEqual([]);
+			expect((await service.store.project(pid)).entries).toEqual([]);
+		} finally {
+			finishUpload.resolve();
+			await preparation;
+		}
+	});
+
 	it('fences deletion during preparation and cleans late artifacts', async () => {
 		const started = Promise.withResolvers<void>();
 		const proceed = Promise.withResolvers<void>();
@@ -856,6 +894,8 @@ describe('Preview failure recovery and boundaries', () => {
 		expect(
 			(await api.deps.services.sessions.getSession(pid, session.session_id)).sandbox_reclaimed_at,
 		).toBeDefined();
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+		await sweepPreviews(api.deps);
 		expect(
 			await api.bucket.get(paths.project(pid).notebook(record.current!.notebook_id).source),
 		).toBeNull();
@@ -1895,6 +1935,27 @@ describe('preview session resource identity', () => {
 		expect(reused.origin).toEqual(first.origin);
 	});
 
+	it.each(['deleting', 'expired'] as const)(
+		'rejects app reuse when a preview becomes %s after loading the runtime',
+		async (state) => {
+			const record = await create();
+			const launch = () => api.request('POST', `${base}/${record.id}/sessions`, { mode: 'app' });
+			await expectOk<Session>(await launch());
+			const notebooks = api.deps.services.notebooks;
+			const getNotebook = notebooks.getNotebook.bind(notebooks);
+			vi.spyOn(notebooks, 'getNotebook').mockImplementation(async (projectId, notebookId) => {
+				const result = await getNotebook(projectId, notebookId);
+				if (notebookId === record.current!.notebook_id) {
+					if (state === 'deleting') await api.deps.services.previews.retire(record);
+					else vi.spyOn(Date, 'now').mockReturnValue(Date.parse(record.expires_at));
+				}
+				return result;
+			});
+
+			await expectError(await launch(), 404);
+		},
+	);
+
 	it('serves preview surfaces through the parent route and revokes them on deletion', async () => {
 		const record = await create();
 		const session = await expectOk<Session>(
@@ -2035,4 +2096,63 @@ it('pins session provenance to the loaded runtime when the branch advances durin
 	}
 	const session = await expectOk<Session>(await launching);
 	expect(session.origin).toMatchObject({ revision_id: record.current!.version_id, commit: SHA });
+});
+
+describe('source discovery validation and cancellation', () => {
+	it.each(['branch', 'commit'] as const)(
+		'rejects blank %s resolution queries before provider calls',
+		async (type) => {
+			for (const query of ['', '&query=', '&query=%20%09']) {
+				await expectError(
+					await api.request(
+						'GET',
+						`/projects/${pid}/notebooks/${nid}/source/refs?type=${type}&resolve=true${query}`,
+					),
+					422,
+				);
+			}
+			expect(reader.getBranchHead).not.toHaveBeenCalled();
+			expect(reader.resolveCommit).not.toHaveBeenCalled();
+			expect(reader.listBranches).not.toHaveBeenCalled();
+			expect(reader.listCommits).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		{ type: 'branch', resolve: false, method: 'listBranches' },
+		{ type: 'commit', resolve: false, method: 'listCommits' },
+		{ type: 'branch', resolve: true, method: 'getBranchHead' },
+		{ type: 'commit', resolve: true, method: 'resolveCommit' },
+	] as const)('forwards cancellation to $method', async ({ type, resolve, method }) => {
+		const controller = new AbortController();
+		const reason = new Error('Discovery request disconnected');
+		const called = Promise.withResolvers<AbortSignal>();
+		const proceed = Promise.withResolvers<void>();
+		const waitForCancellation = async (options?: SourceReadOptions) => {
+			expect(options?.signal).toBeInstanceOf(AbortSignal);
+			called.resolve(options!.signal!);
+			await proceed.promise;
+		};
+		if (method === 'listBranches' || method === 'listCommits') {
+			vi.mocked(reader[method]!).mockImplementation(async (_repo, _query, options) => {
+				await waitForCancellation(options);
+				return [];
+			});
+		} else {
+			vi.mocked(reader[method]!).mockImplementation(async (_repo, _query, options) => {
+				await waitForCancellation(options);
+				return { commit: SHA };
+			});
+		}
+		const request = api.app.request(
+			`/api/v1/projects/${pid}/notebooks/${nid}/source/refs?type=${type}&resolve=${resolve}&query=${SHA}`,
+			{ signal: controller.signal },
+		);
+		const signal = await called.promise;
+		controller.abort(reason);
+		expect(signal.aborted).toBe(true);
+		expect(signal.reason).toBe(reason);
+		proceed.resolve();
+		await expectOk(await request);
+	});
 });

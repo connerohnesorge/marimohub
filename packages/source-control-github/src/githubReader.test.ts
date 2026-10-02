@@ -609,3 +609,73 @@ describe('GitHub preview cancellation', () => {
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
 });
+
+describe('GitHub source suggestion cancellation', () => {
+	const cases = [
+		{ method: 'listBranches', query: '', path: '/branches?per_page=100', payload: [] },
+		{ method: 'listCommits', query: '', path: '/commits?per_page=100', payload: [] },
+		{
+			method: 'listCommits',
+			query: 'a'.repeat(40),
+			path: `/commits/${'a'.repeat(40)}`,
+			payload: { sha: 'a'.repeat(40) },
+		},
+	] as const;
+
+	it.each(cases)(
+		'passes cancellation through authentication and $path',
+		async ({ method, query, payload }) => {
+			const controller = new AbortController();
+			const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+				expect(init?.signal).toBe(controller.signal);
+				if (url.endsWith('/installation')) return response({ id: 42 });
+				if (url.endsWith('/access_tokens')) return response({ token: 'token' });
+				return response(payload);
+			});
+			const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+			await github[method]('owner/repo', query, { signal: controller.signal });
+			expect(fetcher).toHaveBeenCalledTimes(3);
+		},
+	);
+
+	it.each(cases)(
+		'preserves cancellation during the $path response body',
+		async ({ method, query }) => {
+			const controller = new AbortController();
+			const reason = new DOMException('Discovery cancelled', 'AbortError');
+			const fetcher = async (url: string) => {
+				if (url.endsWith('/installation')) return response({ id: 42 });
+				if (url.endsWith('/access_tokens')) return response({ token: 'token' });
+				return new Response(
+					new ReadableStream(
+						{
+							pull(stream) {
+								controller.abort(reason);
+								stream.error(new TypeError('Body cancelled'));
+							},
+						},
+						{ highWaterMark: 0 },
+					),
+				);
+			};
+			const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+			await expect(github[method]('owner/repo', query, { signal: controller.signal })).rejects.toBe(
+				reason,
+			);
+		},
+	);
+
+	it.each(cases)(
+		'stops pre-aborted $path discovery before authentication',
+		async ({ method, query }) => {
+			const controller = new AbortController();
+			controller.abort();
+			const fetcher = vi.fn();
+			const github = new GitHubAppPublisher({ appId: '123', privateKey: PRIVATE_KEY }, { fetcher });
+			await expect(github[method]('owner/repo', query, { signal: controller.signal })).rejects.toBe(
+				controller.signal.reason,
+			);
+			expect(fetcher).not.toHaveBeenCalled();
+		},
+	);
+});

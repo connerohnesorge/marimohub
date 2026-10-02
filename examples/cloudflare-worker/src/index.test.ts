@@ -20,11 +20,11 @@ vi.mock('@marimo-hub/storage-r2', () => ({
 	},
 }));
 
-import { MaintenanceLock } from '@marimo-hub/core';
+import { createServices, MaintenanceLock, SessionService } from '@marimo-hub/core';
 import { ASSIGNABLE_ROLES } from '@marimo-hub/core/constants';
 import type { AssignableRole } from '@marimo-hub/core/constants';
 import { JobScheduler } from '@marimo-hub/core/jobs';
-import { MemoryBucket } from '@marimo-hub/core/testing';
+import { ACTOR, MemoryBucket } from '@marimo-hub/core/testing';
 import worker, { buildDeps } from './index';
 
 afterEach(() => {
@@ -288,6 +288,28 @@ describe('Cloudflare Worker scheduled handler', () => {
 		NOTEBOOKS_BUCKET: new MemoryBucket() as never,
 		SANDBOX: {} as never,
 		MARIMOHUB_JOBS: 'on',
+	});
+
+	it.each([
+		{ AUTH_MODE: 'invalid' },
+		{ SECRETS_KEK: 'invalid' },
+		{ MARIMOHUB_COMPUTE_PROFILES: 'invalid' },
+	])('runs maintenance without validating unrelated request configuration: %j', async (invalid) => {
+		const env = scheduledEnv();
+		await createServices(env.NOTEBOOKS_BUCKET as unknown as MemoryBucket).catalog.initialize(ACTOR);
+		const expire = vi.spyOn(SessionService.prototype, 'expireStale');
+		const release = vi.spyOn(MaintenanceLock.prototype, 'release');
+		await worker.scheduled(
+			controller,
+			{
+				...env,
+				...invalid,
+				MARIMOHUB_JOBS: 'off',
+			} as Env,
+			executionContext(),
+		);
+		expect(expire).toHaveBeenCalledOnce();
+		expect(release).toHaveBeenCalledWith('cloudflare-scheduled');
 	});
 
 	it('runs the job scheduler when the maintenance lease is unavailable', async () => {

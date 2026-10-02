@@ -20,6 +20,7 @@ import {
 	JobRunSchema,
 	NotebookIdSchema,
 	NotebookMetaSchema,
+	PreviewRuntimeMetaSchema,
 	PreviewSessionOriginSchema,
 	parseStored,
 	parseStoredJobDefinition,
@@ -51,6 +52,18 @@ import {
 } from './testing';
 
 describe('preview metadata schemas', () => {
+	it('requires ownership for runtime metadata while allowing ordinary notebook metadata', () => {
+		const meta = makeNotebookMeta();
+		expect(NotebookMetaSchema.safeParse(meta).success).toBe(true);
+		expect(PreviewRuntimeMetaSchema.safeParse(meta).success).toBe(false);
+		expect(
+			PreviewRuntimeMetaSchema.safeParse({
+				...meta,
+				preview: { notebook_id: createNotebookId(), preview_id: 'a'.repeat(32) },
+			}).success,
+		).toBe(true);
+	});
+
 	it.each(['', 'arbitrary-preview', 'a'.repeat(31), 'g'.repeat(32)])(
 		'rejects malformed preview IDs: %s',
 		(preview_id) => {

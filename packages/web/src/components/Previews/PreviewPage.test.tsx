@@ -22,6 +22,7 @@ const savedEditor = {
 };
 
 type HeartbeatResponse =
+	| 'running-without-url'
 	| 'running'
 	| 'starting'
 	| 'terminated'
@@ -36,6 +37,7 @@ function setup({
 	heartbeat = 'running' as HeartbeatResponse,
 	deleteStatus = 200,
 	startupTimeoutSeconds = 120,
+	pending = false,
 } = {}) {
 	let heartbeatResponse = heartbeat;
 	let userId: string | null = 'alice';
@@ -59,9 +61,9 @@ function setup({
 					id: 'preview',
 					name: 'Review preview',
 					state: 'active',
-					preparation: 'ready',
+					preparation: pending ? 'pending' : 'ready',
 					source_type: 'branch',
-					commit: version === 'first-version' ? 'a'.repeat(40) : 'b'.repeat(40),
+					commit: pending ? null : version === 'first-version' ? 'a'.repeat(40) : 'b'.repeat(40),
 					version_id: version,
 					url: `https://hub.example.com${route}`,
 					can: { app: true, edit: !appUser, manage: false },
@@ -98,13 +100,16 @@ function setup({
 						? jsonOk(null)
 						: jsonError('ERROR', 'Could not stop editor', deleteStatus);
 				if (url.endsWith('/leave')) return jsonOk(null);
-				if (url.endsWith('/heartbeat')) {
+				if (url.endsWith('/heartbeat') || method === 'GET') {
 					if (heartbeatResponse === 'network') throw new TypeError('Network unavailable');
 					if (typeof heartbeatResponse === 'number')
 						return jsonError('INTERNAL_ERROR', 'Heartbeat failed', heartbeatResponse);
 					return jsonOk({
-						status: heartbeatResponse,
-						sandbox_url: `https://sandbox.example.com/${userId}/${url.includes('second-version-session') ? 'second' : 'first'}`,
+						status: heartbeatResponse === 'running-without-url' ? 'running' : heartbeatResponse,
+						sandbox_url:
+							heartbeatResponse === 'running-without-url'
+								? undefined
+								: `https://sandbox.example.com/${userId}/${url.includes('second-version-session') ? 'second' : 'first'}`,
 					});
 				}
 			}
@@ -377,6 +382,59 @@ describe('PreviewPage', () => {
 		window.dispatchEvent(new PageTransitionEvent('pagehide'));
 		expect(calls.filter((call) => call.url.endsWith('/leave'))).toHaveLength(2);
 	});
+	it('shows a first-revision fallback while preparation is pending', async () => {
+		setup({ pending: true });
+		expect(await screen.findByText('Awaiting first revision')).toBeVisible();
+		expect(screen.queryByText(/Latest:/)).not.toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Open app' })).toBeDisabled();
+	});
+
+	it('watches editor status every 30 seconds and renews it every two minutes', async () => {
+		const { calls, refetchHeartbeat } = setup();
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open temporary editor' }));
+		await screen.findByTitle('Review preview');
+		vi.useFakeTimers();
+		const heartbeatCount = () => calls.filter((call) => call.url.endsWith('/heartbeat')).length;
+		const statusCount = () =>
+			calls.filter((call) => call.method === 'GET' && call.url.endsWith('/sessions/alice-session'))
+				.length;
+		await refetchHeartbeat('running');
+		const initialStatuses = statusCount();
+		const initialHeartbeats = heartbeatCount();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(90_000);
+		});
+		expect(heartbeatCount()).toBe(initialHeartbeats);
+		expect(statusCount()).toBe(initialStatuses + 3);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(30_000);
+		});
+		expect(heartbeatCount()).toBe(initialHeartbeats + 1);
+		expect(statusCount()).toBe(initialStatuses + 3);
+	});
+
+	it('stops editor status checks after a running session loses its URL', async () => {
+		const { calls, refetchHeartbeat, setHeartbeatResponse } = setup();
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open temporary editor' }));
+		await screen.findByTitle('Review preview');
+		vi.useFakeTimers();
+		await refetchHeartbeat('running');
+		setHeartbeatResponse('running-without-url');
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(30_001);
+		});
+		expect(screen.getByText(/This session has ended/)).toBeVisible();
+		expect(screen.queryByTitle('Review preview')).not.toBeInTheDocument();
+		const sessionCalls = () => calls.filter((call) => call.url.includes('/sessions/')).length;
+		const count = sessionCalls();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(120_000);
+		});
+		expect(sessionCalls()).toBe(count);
+	});
+
 	it('renews app visits at the advertised interval', async () => {
 		const { calls, refetchHeartbeat } = setup({ appUser: true, heartbeatIntervalSeconds: 2 });
 		const user = userEvent.setup();
@@ -425,24 +483,30 @@ describe('PreviewPage', () => {
 		},
 	);
 
-	it.each([403, 404, 409, 'terminated', 'expired', 'error', 'terminating'] as const)(
-		'ends a preview after a confirmed %s heartbeat response',
-		async (status) => {
-			const { refetchHeartbeat, calls } = setup({ appUser: true });
-			const user = userEvent.setup();
-			await user.click(await screen.findByRole('button', { name: 'Open app' }));
-			await screen.findByTitle('Review preview');
-			await refetchHeartbeat(status);
-			expect(await screen.findByText(/This session has ended/)).toBeInTheDocument();
-			expect(screen.queryByTitle('Review preview')).not.toBeInTheDocument();
-			vi.useFakeTimers();
-			const count = calls.filter((call) => call.url.endsWith('/heartbeat')).length;
-			await act(async () => {
-				await vi.advanceTimersByTimeAsync(60_000);
-			});
-			expect(calls.filter((call) => call.url.endsWith('/heartbeat'))).toHaveLength(count);
-		},
-	);
+	it.each([
+		403,
+		404,
+		409,
+		'terminated',
+		'expired',
+		'error',
+		'terminating',
+		'running-without-url',
+	] as const)('ends a preview after a confirmed %s heartbeat response', async (status) => {
+		const { refetchHeartbeat, calls } = setup({ appUser: true });
+		const user = userEvent.setup();
+		await user.click(await screen.findByRole('button', { name: 'Open app' }));
+		await screen.findByTitle('Review preview');
+		await refetchHeartbeat(status);
+		expect(await screen.findByText(/This session has ended/)).toBeInTheDocument();
+		expect(screen.queryByTitle('Review preview')).not.toBeInTheDocument();
+		vi.useFakeTimers();
+		const count = calls.filter((call) => call.url.endsWith('/heartbeat')).length;
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(60_000);
+		});
+		expect(calls.filter((call) => call.url.endsWith('/heartbeat'))).toHaveLength(count);
+	});
 
 	it('starts a fresh heartbeat after readmission to the same sandbox with a new visit', async () => {
 		const { refetchHeartbeat, setHeartbeatResponse } = setup({ appUser: true });

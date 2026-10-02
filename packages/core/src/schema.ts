@@ -497,6 +497,10 @@ export const NotebookMetaSchema = z.object({
 
 export type NotebookMeta = z.infer<typeof NotebookMetaSchema>;
 
+export const PreviewRuntimeMetaSchema = NotebookMetaSchema.extend({
+	preview: NotebookMetaSchema.shape.preview.unwrap(),
+});
+
 export type PublicNotebookMeta = Omit<NotebookMeta, 'schema_version' | 'preview'>;
 export function toPublicNotebookMeta(meta: NotebookMeta): PublicNotebookMeta {
 	const { schema_version: _schema_version, preview: _preview, ...rest } = meta;

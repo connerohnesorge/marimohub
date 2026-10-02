@@ -27,6 +27,7 @@ import {
 	FsSnapshotSchema,
 	JobRunMarkerSchema,
 	NotebookMetaSchema,
+	PreviewRuntimeMetaSchema,
 	parseStored,
 	readStored,
 	SourceSchema,
@@ -273,9 +274,7 @@ export class NotebookService {
 		// Old replicas cannot strip the preview marker by rewriting ordinary meta.json.
 		const object = await this.bucket.get(nb.previewMeta);
 		if (!object) throw new NotFoundError(`Notebook ${notebookId} not found`);
-		const meta = await readStored(NotebookMetaSchema, object, nb.previewMeta);
-		if (!meta.preview) throw new NotFoundError('Preview not found');
-		return meta;
+		return readStored(PreviewRuntimeMetaSchema, object, nb.previewMeta);
 	}
 
 	async getNotebookMeta(projectId: ProjectId, notebookId: NotebookId): Promise<NotebookMeta> {

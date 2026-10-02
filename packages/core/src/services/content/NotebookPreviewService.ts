@@ -535,10 +535,17 @@ export class NotebookPreviewService {
 		return retired;
 	}
 
-	private async cleanupRuntime(pid: ProjectId, nid: NotebookId, retireRuntime: RetireRuntime) {
+	private async cleanupRuntime(
+		pid: ProjectId,
+		nid: NotebookId,
+		retireRuntime: RetireRuntime,
+		cleanupAfter = 0,
+	) {
 		await new AppPoolStore(this.bucket).retireForDeletion(pid, nid);
 		if (!(await retireRuntime(pid, nid))) return false;
-		await deleteByPrefix(this.bucket, paths.project(pid).notebook(nid).base);
+		// Revocation stops new admissions immediately; in-flight uploads need time to settle.
+		if (Date.now() >= cleanupAfter)
+			await deleteByPrefix(this.bucket, paths.project(pid).notebook(nid).base);
 		return true;
 	}
 
@@ -546,7 +553,15 @@ export class NotebookPreviewService {
 		if (record.state === 'active') return;
 		let complete = true;
 		for (const { notebook_id: nid } of record.revisions) {
-			if (!(await this.cleanupRuntime(record.project_id, nid, retireRuntime))) complete = false;
+			if (
+				!(await this.cleanupRuntime(
+					record.project_id,
+					nid,
+					retireRuntime,
+					record.cleanup_after ?? Infinity,
+				))
+			)
+				complete = false;
 			else if ((record.cleanup_after ?? Infinity) <= Date.now())
 				await this.store.releaseArtifact(record, nid);
 		}

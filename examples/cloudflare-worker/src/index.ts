@@ -13,7 +13,6 @@ import {
 	DEFAULT_JOBS_CONFIG,
 	resolveJobSandboxEnv,
 	sweepAppPools,
-	sweepPreviews,
 } from '@marimo-hub/api';
 import type { ApiDeps } from '@marimo-hub/api';
 import {
@@ -270,7 +269,6 @@ export default {
 						persistWorkspace: env.PERSIST_WORKSPACE === 'workspace' ? 'workspace' : 'source',
 					},
 				});
-				await sweepPreviews(buildDeps(new Request('https://maintenance.invalid'), env, ctx));
 				await sessions.expireStale();
 				// Reconcile records against the provider. The Cloudflare adapter omits
 				// listActive(), so this cleanly no-ops until that backend can enumerate.

@@ -16,6 +16,7 @@ describe('Notebook header', () => {
 		makeFetch({
 			role: 'viewer',
 			previewProviders: ['github'],
+			sourceType: 'git',
 			session: runningSession({ mode: 'app' }),
 		});
 		renderPage('app');
@@ -26,6 +27,20 @@ describe('Notebook header', () => {
 			'href',
 			'/projects/proj-x/notebooks/nb-1/previews',
 		);
+	});
+
+	it('hides previews for local notebooks even when GitHub previews are available', async () => {
+		makeFetch({
+			role: 'viewer',
+			sourceType: 'local',
+			previewProviders: ['github'],
+			session: runningSession({ mode: 'app' }),
+		});
+		renderPage('app');
+		await screen.findByRole('button', { name: /Session Running/ });
+		expect(
+			screen.queryByRole('button', { name: 'Forecast — notebook menu' }),
+		).not.toBeInTheDocument();
 	});
 
 	it('shows a plain app title when previews are unavailable', async () => {

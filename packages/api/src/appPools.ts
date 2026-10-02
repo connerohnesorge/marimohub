@@ -5,6 +5,8 @@ import {
 	kernelBasePathFromUrl,
 	NotebookId,
 	NotebookMetaSchema,
+	PreviewRuntimeMetaSchema,
+	StoredObjectError,
 	readStored,
 	paths,
 	NotFoundError,
@@ -44,10 +46,25 @@ export async function sweepAppPools(
 					metaKey = notebook.previewMeta;
 					metaObject = await deps.bucket.get(metaKey);
 				}
-				const meta = metaObject ? await readStored(NotebookMetaSchema, metaObject, metaKey) : null;
-				const policy = meta?.preview
-					? previewAppPoolPolicy(deps.policy.appPool)
-					: deps.policy.appPool;
+				const isRuntime = metaKey === notebook.previewMeta && !!metaObject;
+				const meta = metaObject
+					? await readStored(
+							isRuntime ? PreviewRuntimeMetaSchema : NotebookMetaSchema,
+							metaObject,
+							metaKey,
+						).catch((error) => {
+							if (!(error instanceof StoredObjectError)) throw error;
+							logOperationalError(
+								'app_pool_metadata_unreadable',
+								{ operation: 'app_pool.sweep', project_id: pid, notebook_id: nid },
+								error,
+							);
+							return null;
+						})
+					: null;
+				// A corrupt runtime must retain preview bounds and startup protection.
+				const isPreview = isRuntime || !!meta?.preview;
+				const policy = isPreview ? previewAppPoolPolicy(deps.policy.appPool) : deps.policy.appPool;
 				const pool = new AppPoolService(deps.bucket, sessions, policy, deps.metrics);
 				await pool.reconcile(pid, nid, {
 					probe: async (member) => {
@@ -73,7 +90,7 @@ export async function sweepAppPools(
 					},
 					retire: async (member, session) => {
 						if (
-							meta?.preview &&
+							isPreview &&
 							session?.status === 'starting' &&
 							member.operation_expires_at > Date.now()
 						)

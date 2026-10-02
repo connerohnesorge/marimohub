@@ -135,10 +135,13 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 		return { commit: stringField(await responseJson(response, options?.signal), 'sha') };
 	}
 
-	async listBranches(repository: string, query: string) {
-		const { base, token } = await this.readContext(repository);
+	async listBranches(repository: string, query: string, options?: SourceReadOptions) {
+		const { base, token } = await this.readContext(repository, options);
 		const data = await responseJson(
-			await this.client.request(`${base}/branches?per_page=100`, token),
+			await this.client.request(`${base}/branches?per_page=100`, token, {
+				signal: options?.signal,
+			}),
+			options?.signal,
 		);
 		if (!Array.isArray(data)) throw new UnavailableError('Invalid GitHub branch response');
 		return data
@@ -151,16 +154,17 @@ export class GitHubAppPublisher implements SourceControlPublisher, SourceControl
 			.slice(0, 30);
 	}
 
-	async listCommits(repository: string, query: string) {
+	async listCommits(repository: string, query: string, options?: SourceReadOptions) {
 		if (/^[a-f0-9]{40}$/i.test(query)) {
-			const head = await this.findCommit(repository, query);
+			const head = await this.findCommit(repository, query, options);
 			return head
 				? [{ value: head.commit, commit: head.commit, label: head.commit.slice(0, 12) }]
 				: [];
 		}
-		const { base, token } = await this.readContext(repository);
+		const { base, token } = await this.readContext(repository, options);
 		const data = await responseJson(
-			await this.client.request(`${base}/commits?per_page=100`, token),
+			await this.client.request(`${base}/commits?per_page=100`, token, { signal: options?.signal }),
+			options?.signal,
 		);
 		if (!Array.isArray(data)) throw new UnavailableError('Invalid GitHub commit response');
 		return data

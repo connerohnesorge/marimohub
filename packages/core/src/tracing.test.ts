@@ -18,6 +18,7 @@ import { createServices } from './services';
 import { NotFoundError } from './errors';
 import { MemoryBucket } from './testing/MemoryBucket';
 import { traceContext, traced } from './tracing';
+import { PreviewRecordSchema, previewKey } from './services/content/notebookPreviews';
 
 const exporter = new InMemorySpanExporter();
 const provider = new BasicTracerProvider({
@@ -139,16 +140,55 @@ describe('createServices tracing option', () => {
 
 	it('traces preview failures and their storage calls when enabled', async () => {
 		const services = createServices(new MemoryBucket(), undefined, { tracing: true });
-		await expect(
-			services.previews.get(createProjectId(), createNotebookId(), 'a'.repeat(32)),
-		).rejects.toThrow(NotFoundError);
+		const pid = createProjectId();
+		const nid = createNotebookId();
+		const id = 'a'.repeat(32);
+		await expect(services.previews.get(pid, nid, id)).rejects.toThrow(NotFoundError);
 		const spans = exporter.getFinishedSpans();
 		const preview = spans.find((span) => span.name === 'NotebookPreviewService.get');
 		expect(preview?.status.code).toBe(2);
+		expect(preview?.attributes).toEqual({
+			'marimohub.project_id': pid,
+			'marimohub.notebook_id': nid,
+			'marimohub.preview_id': id,
+			'bucket.key': previewKey(pid, nid, id),
+		});
 		expect(preview?.events.some((event) => event.name === 'exception')).toBe(true);
 		expect(spans.find((span) => span.name === 'Bucket.get')?.parentSpanContext?.spanId).toBe(
 			preview?.spanContext().spanId,
 		);
+	});
+
+	it('identifies preview worker records without tracing source names or request fingerprints', async () => {
+		const services = createServices(new MemoryBucket(), undefined, { tracing: true });
+		const record = PreviewRecordSchema.parse({
+			schema_version: 1,
+			id: 'a'.repeat(32),
+			project_id: createProjectId(),
+			notebook_id: createNotebookId(),
+			name: 'private title',
+			source: { type: 'branch', branch: 'private-branch' },
+			repository: 'private/repo',
+			root_path: '',
+			entry_notebook: 'notebook.py',
+			expires_at: new Date().toISOString(),
+			created_by: 'user',
+			created_at: new Date().toISOString(),
+			request_fingerprint: 'secret fingerprint',
+			state: 'deleted',
+			preparation: 'pending',
+			revisions: [],
+		});
+		await services.previews.prepare(record);
+		const span = exporter
+			.getFinishedSpans()
+			.find((span) => span.name === 'NotebookPreviewService.prepare');
+		expect(span?.attributes).toEqual({
+			'marimohub.project_id': record.project_id,
+			'marimohub.notebook_id': record.notebook_id,
+			'marimohub.preview_id': record.id,
+			'bucket.key': previewKey(record.project_id, record.notebook_id, record.id),
+		});
 	});
 
 	it('leaves everything unwrapped by default', async () => {

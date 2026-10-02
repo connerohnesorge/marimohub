@@ -1288,6 +1288,11 @@ export async function startNotebookSession(input: {
 				notebook.meta.preview!.preview_id,
 			)
 		: undefined;
+	if (
+		previewRecord &&
+		(previewRecord.state !== 'active' || Date.parse(previewRecord.expires_at) <= Date.now())
+	)
+		throw new NotFoundError('Preview not found');
 	const authorizationExpiresAt = earliestDeadline(
 		entitlementAuthorizationDeadline(user),
 		earliestDeadline(authorization.subjectContextExpiresAt, previewRecord?.expires_at),

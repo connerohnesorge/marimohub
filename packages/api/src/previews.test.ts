@@ -306,11 +306,9 @@ describe('preview maintenance', () => {
 			if (state === 'deleted notebook')
 				await api.deps.services.notebooks.deleteNotebook(pid, nid, ACTOR);
 			if (state === 'deleted project') await api.deps.services.projects.deleteProject(pid, ACTOR);
-			const resolve = vi.spyOn(api.deps.services.previews, 'prepare');
 
 			await sweepPreviews({ ...api.deps, sourceControl: undefined });
 
-			expect(resolve).not.toHaveBeenCalled();
 			const current = await api.deps.services.previews.get(pid, nid, preview.id);
 			expect(current.state).toBe(state === 'healthy' ? 'active' : 'deleted');
 			if (state === 'healthy') {
@@ -321,9 +319,16 @@ describe('preview maintenance', () => {
 		},
 	);
 
-	it.each([false, true])(
-		'reclaims starting app allocations only after their lease expires: expired=%s',
-		async (expired) => {
+	it.each([
+		{ expired: false, corrupt: undefined },
+		{ expired: true, corrupt: undefined },
+		{ expired: false, corrupt: 'json' },
+		{ expired: true, corrupt: 'json' },
+		{ expired: false, corrupt: 'ownership' },
+		{ expired: true, corrupt: 'ownership' },
+	])(
+		'reclaims starting app allocations only after their lease expires: $expired, corrupt metadata: $corrupt',
+		async ({ expired, corrupt }) => {
 			const sessions = api.deps.services.sessions;
 			const child = preview.current!.notebook_id;
 			const pool = new AppPoolService(api.bucket, sessions);
@@ -347,6 +352,7 @@ describe('preview maintenance', () => {
 				vi.spyOn(Date, 'now').mockReturnValue(admitted.member.operation_expires_at + 6 * 60_000);
 			else await pool.store.retireForDeletion(pid, child);
 
+			if (corrupt) await api.bucket.put(paths.project(pid).notebook(child).previewMeta, '{broken');
 			expect(await sessions.expireStale()).toBe(0);
 			await sweepAppPools(api.deps);
 
@@ -355,6 +361,53 @@ describe('preview maintenance', () => {
 			expect(current.status).toBe(expired ? 'terminated' : 'starting');
 			expect(!!current.sandbox_reclaimed_at).toBe(expired);
 			expect((await pool.store.read(pid, child))!.members).toHaveLength(expired ? 0 : 1);
+		},
+	);
+
+	it.each(['normal', 'preview'] as const)(
+		'reclaims retired pools despite corrupt %s metadata',
+		async (kind) => {
+			const notebookId = kind === 'preview' ? preview.current!.notebook_id : nid;
+			if (kind === 'normal') {
+				const source = await api.deps.services.notebooks.getNotebookSource(pid, nid);
+				await api.bucket.put(
+					paths.project(pid).notebook(nid).source,
+					JSON.stringify({ ...source, current_version_id: preview.current!.version_id }),
+				);
+			}
+			const pool = new AppPoolService(api.bucket, api.deps.services.sessions);
+			const admitted = await pool.admit({
+				projectId: pid,
+				notebookId,
+				userId: ACTOR,
+				versionId: preview.current!.version_id,
+				startupMs: 60_000,
+			});
+			const session = await api.deps.services.sessions.createSession({
+				project_id: pid,
+				notebook_id: notebookId,
+				user_id: ACTOR,
+				mode: 'app',
+				session_id: admitted.member.session_id,
+				sandbox_id: admitted.member.sandbox_id,
+				source_version_id: preview.current!.version_id,
+			});
+			await api.deps.services.sessions.setRunning(
+				pid,
+				session.session_id,
+				'https://sandbox.example',
+			);
+			await pool.store.retireForDeletion(pid, notebookId);
+			const notebook = paths.project(pid).notebook(notebookId);
+			await api.bucket.put(kind === 'preview' ? notebook.previewMeta : notebook.meta, '{broken');
+
+			await sweepAppPools(api.deps);
+
+			expect(fake.calls.destroy).toBe(1);
+			expect((await pool.store.read(pid, notebookId))!.members).toHaveLength(0);
+			expect(
+				(await api.deps.services.sessions.getSession(pid, session.session_id)).sandbox_reclaimed_at,
+			).toBeTruthy();
 		},
 	);
 
@@ -374,6 +427,9 @@ describe('preview maintenance', () => {
 		await cleanupPreview(api.deps, retiring);
 		expect(fake.calls.destroy).toBe(1);
 		expect((await api.deps.services.previews.get(pid, nid, preview.id)).state).toBe('deleted');
+		expect(await api.bucket.get(runtimeMeta)).not.toBeNull();
+		vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 901_000);
+		await sweepPreviews(api.deps);
 		expect(await api.bucket.get(runtimeMeta)).toBeNull();
 	});
 });

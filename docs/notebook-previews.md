@@ -50,6 +50,25 @@ Create, list, get, delete, and session creation endpoints use this base path:
 /api/v1/projects/{pid}/notebooks/{nid}/previews
 ```
 
+Source suggestions use `GET /api/v1/projects/{pid}/notebooks/{nid}/source/refs`.
+The `type` parameter accepts `branch` or `commit`. The optional `query` parameter filters suggestions and defaults to an empty string.
+For example, `?type=branch&query=feature` returns matching branches:
+
+```json
+{
+	"success": true,
+	"data": [
+		{
+			"value": "feature/chart",
+			"commit": "0123456789abcdef0123456789abcdef01234567",
+			"label": "feature/chart"
+		}
+	]
+}
+```
+
+With `resolve=true`, the endpoint resolves one reference instead of searching for suggestions. This requires a nonblank `query` and returns the same response shape.
+
 The generated CLI exposes the same operations:
 
 ```sh

@@ -363,8 +363,12 @@ app.openapi(discover, async (c) => {
 	const user = c.get('user');
 	const { pid, nid } = c.req.valid('param');
 	await manageable(deps, pid, nid, user);
-	const { source, reader } = await deps.services.previews.source(pid, nid, deps.sourceControl);
 	const query = c.req.valid('query');
+	if (query.resolve === 'true' && !query.query.trim()) {
+		throw new ValidationError('A nonblank query is required to resolve a source reference');
+	}
+	const { source, reader } = await deps.services.previews.source(pid, nid, deps.sourceControl);
+	const options = { signal: c.req.raw.signal };
 	if (
 		query.resolve !== 'true' &&
 		!(query.type === 'branch' ? reader.listBranches : reader.listCommits)
@@ -378,13 +382,13 @@ app.openapi(discover, async (c) => {
 						value: query.query,
 						label: query.query,
 						...(query.type === 'branch'
-							? await reader.getBranchHead(source.repo, query.query)
-							: await reader.resolveCommit!(source.repo, query.query)),
+							? await reader.getBranchHead(source.repo, query.query, options)
+							: await reader.resolveCommit!(source.repo, query.query, options)),
 					},
 				]
 			: query.type === 'branch'
-				? await reader.listBranches!(source.repo, query.query)
-				: await reader.listCommits!(source.repo, query.query);
+				? await reader.listBranches!(source.repo, query.query, options)
+				: await reader.listCommits!(source.repo, query.query, options);
 	return c.json({ success: true as const, data: data.slice(0, 30) }, 200);
 });
 export default app;
