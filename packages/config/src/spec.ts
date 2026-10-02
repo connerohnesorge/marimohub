@@ -378,7 +378,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_COMPUTE_IMAGE',
 						name: 'Sandbox image',
 						description:
-							'Image containing marimo, uv, and Python, or a comma-separated list (first is the default). Remaining images are selectable per notebook. Required for `modal`, which also accepts `modal://<name>:<tag>` for named images. Recommended for `coreweave`.',
+							'Image containing marimo, uv, and Python, or a comma-separated list (first is the default). Remaining images are selectable per notebook. Required for `modal`, which also accepts `modal://<name>[:<tag>]` for named images (tag defaults to `latest`). Recommended for `coreweave`.',
 						example: 'ghcr.io/orgname/marimo-sandbox:latest',
 					},
 					{
