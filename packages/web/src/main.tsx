@@ -23,6 +23,10 @@ async function bootstrap() {
 	let branding = DEFAULT_THEME_CONFIG;
 	try {
 		branding = await loadThemeConfig();
+	} catch (error) {
+		console.warn('Could not load the deployment theme. Using defaults.', error);
+	}
+	try {
 		applyThemeMode(branding.force_mode ?? getInitialTheme());
 		applyThemeConfig(branding);
 	} catch (error) {

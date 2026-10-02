@@ -33,7 +33,7 @@ export function parseTheme(env: ThemeEnv): ThemeConfig {
 			variable,
 			remediation:
 				variable === 'MARIMOHUB_THEME_FORCE_MODE'
-					? 'Use light or dark, or leave unset to allow user preferences.'
+					? 'Use light or dark, or unset or blank the variable to allow user preferences.'
 					: 'Use an HTTPS URL, a root-relative asset path, or an opaque hex color as appropriate.',
 			docs: 'docs/theming.md',
 		});

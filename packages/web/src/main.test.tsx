@@ -28,7 +28,8 @@ beforeEach(() => {
 		}
 		return { default: App };
 	});
-	vi.clearAllMocks();
+	vi.resetAllMocks();
+	theme.getInitialTheme.mockReturnValue('dark');
 	theme.loadThemeConfig.mockResolvedValue(DEFAULT_THEME_CONFIG);
 	document.body.innerHTML = '<div id="root"></div>';
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -79,23 +80,35 @@ describe('app bootstrap', () => {
 		expect(theme.applyThemeMode).toHaveBeenCalledExactlyOnceWith('light');
 	});
 
-	it.each(['getInitialTheme', 'applyThemeMode', 'loadThemeConfig', 'applyThemeConfig'] as const)(
+	it.each(['light', 'dark'] as const)(
+		'applies the preferred %s mode before rendering when configuration loading throws',
+		async (mode) => {
+			const error = new Error('Theme configuration unavailable');
+			theme.loadThemeConfig.mockRejectedValueOnce(error);
+			theme.getInitialTheme.mockReturnValueOnce(mode);
+			await import('./main');
+			await vi.waitFor(() => expect(render).toHaveBeenCalledOnce());
+			expect(theme.applyThemeMode).toHaveBeenCalledExactlyOnceWith(mode);
+			expect(theme.applyThemeMode).toHaveBeenCalledBefore(render);
+			expect(renderToStaticMarkup(render.mock.calls[0][0])).toContain('marimohub:unlocked');
+			expect(console.warn).toHaveBeenCalledWith(
+				'Could not load the deployment theme. Using defaults.',
+				error,
+			);
+		},
+	);
+
+	it.each(['getInitialTheme', 'applyThemeMode', 'applyThemeConfig'] as const)(
 		'renders with the available configuration when %s fails unexpectedly',
 		async (operation) => {
 			const error = new Error('Theme initialization failed');
 			theme.loadThemeConfig.mockResolvedValue({ ...DEFAULT_THEME_CONFIG, name: 'Research Hub' });
-			if (operation === 'loadThemeConfig') {
-				theme.loadThemeConfig.mockRejectedValueOnce(error);
-			} else {
-				theme[operation].mockImplementationOnce(() => {
-					throw error;
-				});
-			}
+			theme[operation].mockImplementationOnce(() => {
+				throw error;
+			});
 			await import('./main');
 			await vi.waitFor(() => expect(render).toHaveBeenCalledOnce());
-			expect(renderToStaticMarkup(render.mock.calls[0][0])).toContain(
-				operation === 'loadThemeConfig' ? 'marimohub:unlocked' : 'Research Hub:unlocked',
-			);
+			expect(renderToStaticMarkup(render.mock.calls[0][0])).toContain('Research Hub:unlocked');
 			expect(console.warn).toHaveBeenCalledWith(
 				'Could not fully initialize the deployment theme.',
 				error,
