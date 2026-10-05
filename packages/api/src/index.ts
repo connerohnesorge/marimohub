@@ -21,6 +21,7 @@ export {
 	CREDENTIAL_HEADERS,
 	isCredentialHeader,
 	forwardHttp,
+	resolveKernelUpstream,
 	sandboxProxyMiddleware,
 	UNSAFE_RESPONSE_HEADERS,
 } from './sandboxProxy';

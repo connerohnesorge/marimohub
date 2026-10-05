@@ -12,8 +12,10 @@ import type { Duplex } from 'node:stream';
 import {
 	authorizeProxyRequest,
 	isCredentialHeader,
+	resolveKernelUpstream,
 	UNSAFE_RESPONSE_HEADERS,
 } from '@marimo-hub/api';
+import { DomainError } from '@marimo-hub/core';
 import type { ApiDeps } from '@marimo-hub/api';
 import { logEvent } from './log';
 
@@ -24,6 +26,16 @@ type UpgradeListener = (req: http.IncomingMessage, socket: Duplex, head: Buffer)
 function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
 	socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
 	socket.destroy();
+}
+
+function toFetchHeaders(headers: http.OutgoingHttpHeaders): Headers {
+	const out = new Headers();
+	for (const [key, value] of Object.entries(headers)) {
+		if (value === undefined) continue;
+		if (Array.isArray(value)) for (const v of value) out.append(key, v);
+		else out.set(key, String(value));
+	}
+	return out;
 }
 
 /** Build a web `Request` from a Node upgrade request so it can be authorized. */
@@ -57,7 +69,7 @@ export function attachSandboxProxyUpgrade(server: UpgradeServer, deps: ApiDeps):
 			return;
 		}
 		authorizeProxyRequest(request, deps)
-			.then((decision) => {
+			.then(async (decision) => {
 				// `pass` means this isn't a kernel route — leave it for any other handler.
 				if (decision.kind === 'pass') return;
 				if (decision.kind === 'reject') {
@@ -73,8 +85,7 @@ export function attachSandboxProxyUpgrade(server: UpgradeServer, deps: ApiDeps):
 					return;
 				}
 
-				const target = new URL(decision.targetUrl);
-				const lib = target.protocol === 'https:' ? https : http;
+				const defaultTarget = new URL(decision.targetUrl);
 				// Rewrite Host + Origin to the kernel so marimo's origin/host check
 				// (which would otherwise see the app host) reads the upgrade as
 				// same-origin. Hub credentials are stripped via the shared
@@ -86,14 +97,25 @@ export function attachSandboxProxyUpgrade(server: UpgradeServer, deps: ApiDeps):
 					if (isCredentialHeader(key, deps.sandbox.credentialHeaders)) continue;
 					forwarded[key] = value;
 				}
-				const headers = {
+				let headers: http.OutgoingHttpHeaders = {
 					...forwarded,
-					host: target.host,
-					origin: target.origin,
+					host: defaultTarget.host,
+					origin: defaultTarget.origin,
 					...(decision.kernelAuthToken
 						? { authorization: `Bearer ${decision.kernelAuthToken}` }
 						: {}),
 				};
+				let target = defaultTarget;
+				if (decision.kernel && deps.compute.resolveKernelProxyTarget) {
+					const resolved = await resolveKernelUpstream(deps, request, decision, {
+						url: decision.targetUrl,
+						headers: toFetchHeaders(headers),
+					});
+					target = new URL(resolved.url);
+					headers = Object.fromEntries(resolved.headers);
+					headers.host = target.host;
+				}
+				const lib = target.protocol === 'https:' ? https : http;
 				const proxyReq = lib.request({
 					protocol: target.protocol,
 					hostname: target.hostname,
@@ -175,6 +197,10 @@ export function attachSandboxProxyUpgrade(server: UpgradeServer, deps: ApiDeps):
 				proxyReq.end();
 			})
 			.catch((err) => {
+				if (err instanceof DomainError) {
+					rejectUpgrade(clientSocket, err.status, err.code);
+					return;
+				}
 				logEvent({
 					level: 'error',
 					event: 'sandbox_proxy_ws_error',

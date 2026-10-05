@@ -122,6 +122,57 @@ describe('authorizeProxyRequest', () => {
 		}
 	});
 
+	it('lets a provider that routes kernels itself shape the upstream request', async () => {
+		const services = createServices(bucket);
+		const current = await services.sessions.getSession(pid, sessionId as never);
+		const routed = await services.sessions.createSession({
+			notebook_id: current.notebook_id,
+			project_id: pid,
+			user_id: ACTOR,
+			sandbox_id: 'sb-0123456789abcdef' as never,
+		});
+		await services.sessions.setRunning(pid, routed.session_id, '/proxy/x/', false, ORIGIN);
+		const routedToken = await signProxyToken(pid, routed.session_id, SECRET);
+		const resolveKernelProxyTarget = vi.fn(async ({ headers }: { headers: Headers }) => {
+			const out = new Headers(headers);
+			out.set('authorization', 'Bearer end-user');
+			return { url: 'http://per-user.internal/root?file=nb.py', headers: out };
+		});
+		const routedDeps = {
+			...deps(ACTOR),
+			compute: { ...makeFakeCompute(), resolveKernelProxyTarget },
+		};
+		const app = new Hono();
+		app.use('*', sandboxProxyMiddleware(routedDeps));
+		const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('kernel'));
+		try {
+			const response = await app.request(
+				`https://hub.example.com/proxy/${routedToken}/ws_sync?x=1`,
+				{ headers: { cookie: 'hub=secret', 'x-custom': 'kept' } },
+			);
+
+			expect(response.status).toBe(200);
+			expect(resolveKernelProxyTarget).toHaveBeenCalledWith(
+				expect.objectContaining({
+					principal: { userId: ACTOR, email: `${ACTOR}@example.com` },
+					ownerUserId: ACTOR,
+					sandboxId: 'sb-0123456789abcdef',
+					originUrl: ORIGIN,
+					kernelPath: '/ws_sync?x=1',
+				}),
+			);
+			const forwardedHeaders = resolveKernelProxyTarget.mock.calls[0][0].headers;
+			expect(forwardedHeaders.has('cookie')).toBe(false);
+			expect(forwardedHeaders.get('x-custom')).toBe('kept');
+			expect(upstream.mock.calls[0][0]).toBe('http://per-user.internal/root?file=nb.py');
+			expect(new Headers(upstream.mock.calls[0][1]?.headers).get('authorization')).toBe(
+				'Bearer end-user',
+			);
+		} finally {
+			upstream.mockRestore();
+		}
+	});
+
 	it('passes through non-proxy paths', async () => {
 		const d = await authorizeProxyRequest(req('/api/me'), deps(ACTOR));
 		expect(d.kind).toBe('pass');

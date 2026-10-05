@@ -1,4 +1,5 @@
-import type { ProjectId, SandboxId, UserId } from '../ids';
+import type { NotebookId, ProjectId, SandboxId, UserId } from '../ids';
+import type { SessionMode } from '../constants';
 import type { Millis } from '../duration';
 import type { Timings } from '../timing';
 
@@ -182,6 +183,27 @@ export interface SetEnvVarsOptions {
 	onlyIfUnset?: boolean;
 }
 
+/** The marimo server a `launchMarimo` provider starts, as data instead of a shell command. */
+export interface MarimoLaunchSpec {
+	/** Absolute sandbox directory that holds the restored workspace. */
+	workdir: string;
+	/** Notebook path relative to `workdir`. */
+	notebookFile: string;
+	mode: SessionMode;
+	port: number;
+	projectId: ProjectId;
+	notebookId: NotebookId;
+	/**
+	 * Proxy-exposure path prefix (`--base-url`). A provider whose server cannot
+	 * serve under it strips the prefix in `resolveKernelProxyTarget` instead.
+	 */
+	baseUrl?: string;
+	assetUrl?: string;
+	watch?: boolean;
+	/** Remaining startup budget; 0 means no deadline. */
+	timeoutMs: number;
+}
+
 export interface SandboxInstance {
 	/** Whether `mountBucket` is a real backend capability rather than a copy fallback signal. */
 	readonly supportsBucketMount?: boolean;
@@ -230,6 +252,16 @@ export interface SandboxInstance {
 	 * adapter-owned operation. Optional for compatibility with external adapters.
 	 */
 	launchProcess?(cmd: string, options: LaunchProcessOptions): Promise<SandboxLaunchResult>;
+	/**
+	 * Start marimo from a structured spec. Required when the provider declares
+	 * `capabilities.managedEnvironment`, whose kernels cannot run hub commands.
+	 */
+	launchMarimo?(spec: MarimoLaunchSpec): Promise<void>;
+	/**
+	 * Create directories without a shell command; callers otherwise run `mkdir -p`
+	 * through `exec`. A backend without directory entries may treat it as a no-op.
+	 */
+	ensureDirectories?(paths: readonly string[]): Promise<void>;
 	exposePort(port: number, options: ExposePortOptions): Promise<ExposePortResult>;
 	destroy(): Promise<void>;
 	/**
@@ -316,6 +348,33 @@ export interface WarmPoolSupport {
 	configuration?: unknown;
 }
 
+/** The authenticated hub user an inbound request acts for. */
+export interface EndUserPrincipal {
+	userId: UserId;
+	email: string;
+}
+
+/** An authorized `proxy`-exposure kernel request, before the hub forwards it. */
+export interface KernelProxyRequest {
+	/** The browser request with every original header. */
+	request: Request;
+	principal: EndUserPrincipal;
+	/** The session owner, which differs from `principal` on a shared session. */
+	ownerUserId: UserId;
+	sandboxId: SandboxId;
+	/** The persisted `exposePort` URL for this sandbox. */
+	originUrl: string;
+	/** Path and query below the hub's `/proxy/<token>` prefix, starting with `/`. */
+	kernelPath: string;
+	/** What the hub would send: hop-by-hop and hub credential headers are already removed. */
+	headers: Headers;
+}
+
+export interface KernelProxyTarget {
+	url: string;
+	headers: Headers;
+}
+
 export interface SandboxProvider {
 	/** Opt-in requires strict reconnect and idempotent destruction by the original sandbox ID. */
 	readonly warmPool?: WarmPoolSupport;
@@ -325,6 +384,13 @@ export interface SandboxProvider {
 		computeProfiles?: boolean;
 		/** Applies resources.gpu from compute profiles; implies computeProfiles. */
 		gpuProfiles?: boolean;
+		/**
+		 * The kernel image is the whole environment and accepts nothing the hub would
+		 * inject. Sessions then get no Python setup, no env vars or credential files
+		 * (AI, workload identity, integrations, kernel auth token), no notebook
+		 * bridge, and no Git commands; marimo starts through `launchMarimo`.
+		 */
+		managedEnvironment?: boolean;
 	};
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance;
 	/** Attach without creating; a missing or stopped sandbox must fail on first use. */
@@ -334,6 +400,22 @@ export interface SandboxProvider {
 	 * Returns a Response if the request matched a sandbox URL, null otherwise.
 	 */
 	proxy(request: Request): Promise<Response | null>;
+	/**
+	 * Run `next` with request-scoped provider state for an authenticated request.
+	 * For a provider that acts with the end user's own credential, never a service
+	 * credential, this is where it reads that credential from `request`.
+	 */
+	withEndUserRequest?<T>(
+		request: Request,
+		principal: EndUserPrincipal,
+		next: () => Promise<T>,
+	): Promise<T>;
+	/**
+	 * Shape the upstream of an authorized `proxy`-exposure kernel request, HTTP or
+	 * WebSocket. Without it the hub forwards to the origin plus the full inbound
+	 * path, authenticated by the session's kernel token.
+	 */
+	resolveKernelProxyTarget?(input: KernelProxyRequest): Promise<KernelProxyTarget>;
 	/**
 	 * List the sandboxes the provider currently considers live, scoped to those
 	 * THIS deployment owns (never co-tenant sandboxes in a shared account).

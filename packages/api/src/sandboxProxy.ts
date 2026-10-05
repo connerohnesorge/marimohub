@@ -19,7 +19,11 @@ import {
 	UnavailableError,
 	verifyProxyToken,
 } from '@marimo-hub/core';
-import type { ResourceSecurityLabels } from '@marimo-hub/core';
+import type {
+	KernelProxyRequest,
+	KernelProxyTarget,
+	ResourceSecurityLabels,
+} from '@marimo-hub/core';
 import type { ApiDeps, HonoEnv } from './context';
 import { errorMetadataChain, logEvent } from './log';
 import { authorizationService, fail } from './shared';
@@ -45,6 +49,8 @@ export type ProxyDecision =
 			sessionId: string;
 			kernelAuthToken?: string;
 			authorizationDeadline?: number;
+			/** Kernel (not surface) traffic: what a provider needs to shape the upstream. */
+			kernel?: Omit<KernelProxyRequest, 'request' | 'headers'>;
 	  };
 
 const PROXY_PREFIX = /^\/proxy\/([^/]+)/;
@@ -275,6 +281,17 @@ export async function authorizeProxyRequest(
 		kind: 'forward',
 		targetUrl,
 		sessionId,
+		...(kernelMatch && session.sandbox_id
+			? {
+					kernel: {
+						principal: { userId: user.id, email: user.email },
+						ownerUserId: session.user_id,
+						sandboxId: session.sandbox_id,
+						originUrl,
+						kernelPath: `${url.pathname.slice(kernelMatch[0].length) || '/'}${url.search}`,
+					},
+				}
+			: {}),
 		...(kernelMatch && session.kernel_auth_token
 			? { kernelAuthToken: session.kernel_auth_token }
 			: {}),
@@ -363,6 +380,22 @@ function responseHeaders(headers: Headers): Headers {
 	return out;
 }
 
+/**
+ * Let the compute provider shape a kernel request's upstream when it routes
+ * kernels itself; otherwise keep the hub's default target. Shared by the HTTP
+ * and WebSocket forwarders.
+ */
+export async function resolveKernelUpstream(
+	deps: Pick<ApiDeps, 'compute'>,
+	request: Request,
+	decision: Extract<ProxyDecision, { kind: 'forward' }>,
+	target: KernelProxyTarget,
+): Promise<KernelProxyTarget> {
+	const resolve = deps.compute.resolveKernelProxyTarget?.bind(deps.compute);
+	if (!resolve || !decision.kernel) return target;
+	return resolve({ ...decision.kernel, request, headers: target.headers });
+}
+
 /** Upstream statuses that mean "a gateway between hub and kernel failed", not the kernel itself. */
 const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
@@ -379,14 +412,21 @@ const GATEWAY_STATUSES = new Set([502, 503, 504]);
  */
 export async function forwardHttp(
 	request: Request,
-	targetUrl: string,
+	defaultTargetUrl: string,
 	sessionId?: string,
 	kernelAuthToken?: string,
 	credentialHeaders?: readonly string[],
+	resolveTarget?: (target: KernelProxyTarget) => Promise<KernelProxyTarget>,
 ): Promise<Response> {
+	let resolved: KernelProxyTarget = {
+		url: defaultTargetUrl,
+		headers: requestHeaders(request, defaultTargetUrl, kernelAuthToken, credentialHeaders),
+	};
+	if (resolveTarget) resolved = await resolveTarget(resolved);
+	const targetUrl = resolved.url;
 	const init: RequestInit = {
 		method: request.method,
-		headers: requestHeaders(request, targetUrl, kernelAuthToken, credentialHeaders),
+		headers: resolved.headers,
 		redirect: 'manual',
 	};
 	const retryable = request.method === 'GET' || request.method === 'HEAD';
@@ -467,6 +507,7 @@ export function sandboxProxyMiddleware(deps: ApiDeps): MiddlewareHandler<HonoEnv
 			decision.sessionId,
 			decision.kernelAuthToken,
 			deps.sandbox.credentialHeaders,
+			(target) => resolveKernelUpstream(deps, c.req.raw, decision, target),
 		);
 	};
 }

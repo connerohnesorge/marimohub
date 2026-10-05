@@ -105,6 +105,12 @@ async function createSandboxDirectories(
 	sandbox: SandboxInstance,
 	directories: readonly string[],
 ): Promise<void> {
+	const ensureDirectories = sandbox.ensureDirectories?.bind(sandbox);
+	if (ensureDirectories) {
+		const unique = [...new Set(directories)];
+		await withRetry(() => ensureDirectories(unique));
+		return;
+	}
 	const execute = (command: string) =>
 		withRetry(async () => {
 			const result = await sandbox.exec(command);

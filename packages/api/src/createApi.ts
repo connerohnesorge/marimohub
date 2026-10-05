@@ -487,7 +487,12 @@ export function createApi(rawDeps: ApiDeps) {
 
 		await refreshIdentity(c, deps, user);
 
-		await next();
+		const withEndUser = deps.compute.withEndUserRequest?.bind(deps.compute);
+		if (withEndUser) {
+			await withEndUser(c.req.raw, { userId: user.id, email: user.email }, () => next());
+		} else {
+			await next();
+		}
 	});
 
 	// Org provisioning needs no catalog. Leave bootstrap to a human so the
