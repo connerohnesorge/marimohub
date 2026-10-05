@@ -186,3 +186,15 @@ the same bounded, immutable change model and define how they identify generated 
 Publication creates Git trees and commits locally and pushes only the proposal ref. `isomorphic-git` exposes the server's advertised old OID through `onPrePush`; the adapter requires the expected OID (zero for creation) before uploading. The receive-pack command carries that same old OID, so GitLab rejects changes between advertisement and push even for replacement commits. Never replace this with a REST `force` commit or a branch check followed by an unconditional force push.
 
 Provider policy dispatch includes the provider id, keeping GitHub and GitLab authorizers independent when repository paths coincide. GitLab tokens are redacted in the configuration summary and passed only as request headers to the configured HTTPS origin; saved remotes contain no credentials.
+
+### Live GitLab verification
+
+Create a private disposable project named `marimohub-gitlab-integration-test-*` with a `main` branch. Set `MARIMOHUB_TEST_GITLAB_TOKEN` and `MARIMOHUB_TEST_GITLAB_REPOSITORY` (the full group/subgroup/project path), then run:
+
+```sh
+pnpm --filter @marimo-hub/config test sourceControlGitLab.live --pool=threads --maxWorkers=1
+```
+
+For a self-managed instance, also set `MARIMOHUB_TEST_GITLAB_BASE_URL` to its HTTPS origin. The suite skips unless live-test credentials are configured and refuses to mutate projects without the disposable name prefix and private visibility.
+
+The suite uses the production configuration and Hub API with local memory storage, plus real GitLab REST and Git smart HTTP. It checks pull creation, pinned archives, credential-free Git restoration, drift, Sync now, project policies, draft MR creation, retry reuse, append and replacement updates, ready-state preservation, and rejection of external edits and closed MRs. It writes unique fixture paths and a proposal branch, closes its MR, and retains the repository and branch for inspection. Archive or remove the disposable project after review.

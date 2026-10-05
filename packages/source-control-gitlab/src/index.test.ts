@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import {
 	MAX_GIT_FETCH_BYTES,
 	MAX_GIT_EXPANDED_FILES,
@@ -87,6 +88,36 @@ describe('GitLab repository and credentials', { timeout: 30_000 }, () => {
 });
 
 describe('GitLab reader', { timeout: 30_000 }, () => {
+	it('downloads archives through Node fetch with GitLab hotlink protection', async () => {
+		const fixture = await world();
+		const archive = await fixture.fetcher(
+			`${fixture.origin}/api/v4/projects/${encodeURIComponent(fixture.path)}/repository/archive.tar.gz?sha=${fixture.baseCommit}`,
+		);
+		const bytes = Buffer.from(await archive.arrayBuffer());
+		const server = createServer((request, response) => {
+			if (request.headers['sec-fetch-mode'] !== 'same-origin') {
+				response.writeHead(406).end();
+				return;
+			}
+			response.writeHead(200, { 'content-type': 'application/octet-stream' }).end(bytes);
+		});
+		await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === 'string') throw new Error('Missing test server address');
+			const publisher = new GitLabPublisher(
+				{ token: fixture.token, baseUrl: fixture.origin },
+				{ fetcher: (_url, init) => fetch(`http://127.0.0.1:${address.port}/archive`, init) },
+			);
+			const files = await publisher.fetchWorkspace(fixture.path, fixture.baseCommit, 'apps');
+			expect(files.map((file) => file.path)).toEqual(['app.py']);
+			expect(new TextDecoder().decode(files[0].bytes)).toBe('print(1)\n');
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				server.close((error) => (error ? reject(error) : resolve())),
+			);
+		}
+	});
 	it('resolves exact commits, scopes archives, and excludes symlinks', async () => {
 		const fixture = await world();
 		const input = fixture.input();

@@ -236,12 +236,11 @@ export function isGitHubRepoInput(input: string): boolean {
 export function isGitLabRepoInput(input: string): boolean {
 	const parsed = parseRepoInput(input);
 	if (
-		!parsed ||
-		(parsed.url &&
-			(parsed.url.protocol !== 'https:' ||
-				parsed.url.hostname.includes('github') ||
-				parsed.url.search ||
-				parsed.url.hash))
+		!parsed?.url ||
+		parsed.url.protocol !== 'https:' ||
+		parsed.url.hostname.includes('github') ||
+		parsed.url.search ||
+		parsed.url.hash
 	)
 		return false;
 	return parsed.path.split('/').every((part) => /^(?!\.+$)[A-Za-z0-9_.-]+$/.test(part));

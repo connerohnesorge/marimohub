@@ -274,7 +274,7 @@ describe('SyncedNotebookDialog', () => {
 	it.each([
 		['GitLab.com', 'https://gitlab.com/team/subgroup/notebooks'],
 		['a self-managed instance', 'https://code.example.com/team/subgroup/notebooks'],
-		['shorthand', 'team/notebooks'],
+		['an SSH remote', 'git@gitlab.com:team/subgroup/notebooks.git'],
 	])('connects GitLab pull sources using %s', async (_label, repository) => {
 		const user = userEvent.setup();
 		const fetchImpl = vi.fn(
@@ -298,6 +298,20 @@ describe('SyncedNotebookDialog', () => {
 			provider: 'gitlab',
 			sync_mode: 'pull',
 		});
+	});
+
+	it('requires an instance URL for GitLab rather than GitHub shorthand', async () => {
+		const user = userEvent.setup();
+		const fetchImpl = vi.fn();
+		renderDialog(fetchImpl, true, { pullProviders: ['gitlab'] });
+		await screen.findByText('Connect to GitLab');
+		await user.type(screen.getByLabelText('Notebook name'), 'Connected');
+		await user.type(screen.getByLabelText('Repository'), 'team/notebooks');
+		await user.type(screen.getByLabelText('Notebook file'), 'app.py');
+		await user.tab();
+		expect(screen.getByText(/pull mode supports GitLab repositories/i)).toBeInTheDocument();
+		expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+		expect(fetchImpl).not.toHaveBeenCalled();
 	});
 
 	it('selects GitLab explicitly when both providers are configured', async () => {

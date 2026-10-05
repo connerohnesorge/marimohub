@@ -85,13 +85,13 @@ Content-Type: application/json
 | `entry_notebook` | yes      | The notebook to open (`.py`, `.md`, `.markdown`, or `.qmd`), **relative to `root_path`**.         |
 | `sync_mode`      | no       | `push` (default) or `pull`. Pull mode requires a configured reader for the repository provider.   |
 
-`repo` accepts `owner/repo` or a repository URL. The shorthand refers to GitHub,
-unless `provider` is `gitlab`. GitLab URLs can contain nested groups, such as
+`repo` accepts `owner/repo` or a repository URL. The shorthand refers to GitHub.
+Use a repository URL for GitLab. GitLab URLs can contain nested groups, such as
 `https://gitlab.example.com/group/subgroup/project`. marimohub converts
 scheme-less and SSH remotes to HTTPS when it stores them.
 
 marimohub normally derives `provider` from the host name. Set it to `gitlab` for
-GitLab shorthand and custom hosts that do not identify the provider. The value selects the server adapter and provider links in the web interface. If neither the host nor `provider` identifies a provider,
+custom hosts that do not identify the provider. The value selects the server adapter and provider links in the web interface. If neither the host nor `provider` identifies a provider,
 the interface shows the sync metadata without links.
 
 For push mode, the response returns the notebook plus its sync credentials:

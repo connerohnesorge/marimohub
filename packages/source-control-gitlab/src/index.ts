@@ -93,6 +93,8 @@ export class GitLabPublisher implements SourceControlReader, SourceControlPublis
 		const query = new URLSearchParams({ sha: commit });
 		const response = await this.client.request(
 			`${this.api(repository)}/repository/archive.tar.gz?${query}`,
+			// Node fetch defaults to Sec-Fetch-Mode: cors, which GitLab's archive hotlink guard rejects.
+			{ mode: 'same-origin' },
 		);
 		return collectTarballWorkspace(response, rootPath);
 	}
