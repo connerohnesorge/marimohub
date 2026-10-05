@@ -75,7 +75,7 @@ import {
 	projectCreationRestricted,
 } from './auth';
 import { buildConfigSummary } from './configSummary';
-import { computeBackend, makeCompute, resolveSandboxImages } from './compute';
+import { computeBackend, makeCompute, resolveSandboxImages, sandboxStripHeaders } from './compute';
 import {
 	parseComputeProfileOverride,
 	parseComputeProfiles,
@@ -673,6 +673,7 @@ export function createFromEnv(
 	const services = createServices(bucket, metrics, { tracing: options?.tracing });
 	const projectAlerts = makeProjectAlerts(env, bucket, metrics);
 	const surfaces = surfacesFromEnv(env);
+	const stripHeaders = sandboxStripHeaders(env);
 	const compute = makeCompute(env, {
 		sessionMaxLifetimeSeconds: Millis.toSeconds(sessionLifetime.maxLifetimeMs),
 		sessionIdleTimeoutMs: sessionLifetime.idleTimeoutMsByMode.edit,
@@ -745,7 +746,11 @@ export function createFromEnv(
 		}),
 		authRoutes,
 		sandbox: {
-			credentialHeaders: env.MARIMOHUB_AUTH_PROXY_HEADER?.split(',').map((header) => header.trim()),
+			credentialHeaders: [
+				...(env.MARIMOHUB_AUTH_PROXY_HEADER?.split(',').map((header) => header.trim()) ?? []),
+				...stripHeaders.names,
+			],
+			credentialHeaderPrefixes: stripHeaders.prefixes,
 			bucket: makeSandboxBucketConfig(env),
 			hostname: env.MARIMOHUB_COMPUTE_SANDBOX_HOSTNAME ?? '',
 			workdir: env.MARIMOHUB_COMPUTE_WORKDIR ?? '/workspace',

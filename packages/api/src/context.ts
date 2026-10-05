@@ -121,6 +121,8 @@ export interface SandboxUserHomeResolver {
 export interface SandboxConfig {
 	/** Ingress identity headers stripped before HTTP and WebSocket kernel forwarding. */
 	credentialHeaders?: readonly string[];
+	/** Header-name prefixes stripped the same way, e.g. a gateway's whole identity family. */
+	credentialHeaderPrefixes?: readonly string[];
 	/** Bucket connection info the sandbox mounts for notebook files (was `c.env.R2_*`). */
 	bucket: BucketConfig;
 	/** Public hostname used when exposing kernel ports (was `c.env.SANDBOX_HOSTNAME`). */

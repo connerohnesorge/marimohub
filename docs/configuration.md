@@ -296,7 +296,6 @@ Attaches every edit session to the signed-in user's own long-lived marimo server
 | --- | --- | --- | --- | --- |
 | `MARIMOHUB_COMPUTE_EXTERNAL_URL` | Base URL of the external kernel API, reachable from the hub. | Yes | — | `http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1` |
 | `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER` | Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there. | — | `x-pantheon-bearer` | — |
-| `MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES` | Comma-separated header-name prefixes never forwarded from the browser to the kernel. Cookies, `Authorization`, and the token header are always stripped. | — | `x-pantheon-` | — |
 
 ### Local (dev only)
 
@@ -360,6 +359,8 @@ All kernel traffic is forwarded through the app, authenticated like `/api/v1/*` 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
 | `MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED` | Safety gate: must be `true` to boot in proxy mode, acknowledging that kernels then run untrusted code same-origin with the app (XSS-capable). Fails closed. | Yes | `false` | `true` |
+| `MARIMOHUB_SANDBOX_STRIP_HEADERS` | Comma-separated browser request headers never forwarded to a kernel or surface, on every compute backend, in addition to cookies, `Authorization`, and the auth proxy headers. Notebook code can read forwarded headers, so list any identity token a gateway adds. An empty value strips none beyond the built-in set. | — | `x-pantheon-bearer` | — |
+| `MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES` | Comma-separated header-name prefixes stripped the same way, for a gateway that adds a family of identity headers. The external-kernel backend applies the same prefixes. | — | `x-pantheon-` | — |
 
 ## Auth
 

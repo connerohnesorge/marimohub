@@ -1066,13 +1066,6 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 							"Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there.",
 						default: 'x-pantheon-bearer',
 					},
-					{
-						id: 'MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES',
-						name: 'Stripped header prefixes',
-						description:
-							'Comma-separated header-name prefixes never forwarded from the browser to the kernel. Cookies, `Authorization`, and the token header are always stripped.',
-						default: 'x-pantheon-',
-					},
 				],
 			},
 			{
@@ -1181,6 +1174,20 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						example: 'true',
 						default: 'false',
 						required: true,
+					},
+					{
+						id: 'MARIMOHUB_SANDBOX_STRIP_HEADERS',
+						name: 'Stripped kernel request headers',
+						description:
+							'Comma-separated browser request headers never forwarded to a kernel or surface, on every compute backend, in addition to cookies, `Authorization`, and the auth proxy headers. Notebook code can read forwarded headers, so list any identity token a gateway adds. An empty value strips none beyond the built-in set.',
+						default: 'x-pantheon-bearer',
+					},
+					{
+						id: 'MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES',
+						name: 'Stripped kernel request header prefixes',
+						description:
+							'Comma-separated header-name prefixes stripped the same way, for a gateway that adds a family of identity headers. The external-kernel backend applies the same prefixes.',
+						default: 'x-pantheon-',
 					},
 				],
 			},

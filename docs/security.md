@@ -79,7 +79,9 @@ If you combine proxy mode with app access, trust every notebook author in the de
 
 HTTP and WebSocket proxies remove hub credentials before they forward requests to kernels or secondary editor surfaces.
 The filter includes cookies, Authorization, Cloudflare Access headers, the IAP assertion, and configured `MARIMOHUB_AUTH_PROXY_HEADER` names.
-Library deployments must supply custom identity headers through `sandbox.credentialHeaders`.
+It also removes `MARIMOHUB_SANDBOX_STRIP_HEADERS` (default `x-pantheon-bearer`) and every header that starts with a `MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES` prefix (default `x-pantheon-`).
+Notebook code can read forwarded request headers, so list every identity header or token your gateway adds. Otherwise the author of a notebook can read the identity of each viewer who opens it.
+Library deployments must supply custom identity headers through `sandbox.credentialHeaders` and `sandbox.credentialHeaderPrefixes`.
 
 ## Native kernel authentication
 

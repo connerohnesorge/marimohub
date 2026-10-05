@@ -94,7 +94,14 @@ export function attachSandboxProxyUpgrade(server: UpgradeServer, deps: ApiDeps):
 				// header passes through.
 				const forwarded: http.OutgoingHttpHeaders = {};
 				for (const [key, value] of Object.entries(req.headers)) {
-					if (isCredentialHeader(key, deps.sandbox.credentialHeaders)) continue;
+					if (
+						isCredentialHeader(
+							key,
+							deps.sandbox.credentialHeaders,
+							deps.sandbox.credentialHeaderPrefixes,
+						)
+					)
+						continue;
 					forwarded[key] = value;
 				}
 				let headers: http.OutgoingHttpHeaders = {

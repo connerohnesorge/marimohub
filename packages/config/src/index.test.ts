@@ -962,7 +962,12 @@ describe('createFromEnv sandbox-host isolation guard', () => {
 			MARIMOHUB_AUTH_PROXY_HEADER: 'X-Custom-Email, X-Custom-User',
 		});
 		expect(deps.sandbox.hostname).toBe('kernels.example.net');
-		expect(deps.sandbox.credentialHeaders).toEqual(['X-Custom-Email', 'X-Custom-User']);
+		expect(deps.sandbox.credentialHeaders).toEqual([
+			'X-Custom-Email',
+			'X-Custom-User',
+			'x-pantheon-bearer',
+		]);
+		expect(deps.sandbox.credentialHeaderPrefixes).toEqual(['x-pantheon-']);
 	});
 
 	it('throws when the sandbox host equals the app host', () => {

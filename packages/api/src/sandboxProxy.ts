@@ -340,10 +340,16 @@ export const CREDENTIAL_HEADERS = new Set([
  */
 export const UNSAFE_RESPONSE_HEADERS = new Set(['set-cookie', 'set-cookie2']);
 
-export function isCredentialHeader(name: string, additional: readonly string[] = []): boolean {
+export function isCredentialHeader(
+	name: string,
+	additional: readonly string[] = [],
+	prefixes: readonly string[] = [],
+): boolean {
 	const lower = name.toLowerCase();
 	return (
-		CREDENTIAL_HEADERS.has(lower) || additional.some((header) => header.toLowerCase() === lower)
+		CREDENTIAL_HEADERS.has(lower) ||
+		additional.some((header) => header.toLowerCase() === lower) ||
+		prefixes.some((prefix) => lower.startsWith(prefix.toLowerCase()))
 	);
 }
 
@@ -352,11 +358,13 @@ function requestHeaders(
 	targetUrl: string,
 	kernelAuthToken?: string,
 	credentialHeaders?: readonly string[],
+	credentialHeaderPrefixes?: readonly string[],
 ): Headers {
 	const out = new Headers();
 	request.headers.forEach((value, key) => {
 		const k = key.toLowerCase();
-		if (!HOP_BY_HOP.has(k) && !isCredentialHeader(k, credentialHeaders)) out.set(key, value);
+		if (!HOP_BY_HOP.has(k) && !isCredentialHeader(k, credentialHeaders, credentialHeaderPrefixes))
+			out.set(key, value);
 	});
 	// marimo validates a request's Origin against its own host; present the kernel
 	// origin so the proxied request reads as same-origin (Host is set by `fetch`).
@@ -416,13 +424,22 @@ export async function forwardHttp(
 	sessionId?: string,
 	kernelAuthToken?: string,
 	credentialHeaders?: readonly string[],
-	resolveTarget?: (target: KernelProxyTarget) => Promise<KernelProxyTarget>,
+	options: {
+		credentialHeaderPrefixes?: readonly string[];
+		resolveTarget?: (target: KernelProxyTarget) => Promise<KernelProxyTarget>;
+	} = {},
 ): Promise<Response> {
 	let resolved: KernelProxyTarget = {
 		url: defaultTargetUrl,
-		headers: requestHeaders(request, defaultTargetUrl, kernelAuthToken, credentialHeaders),
+		headers: requestHeaders(
+			request,
+			defaultTargetUrl,
+			kernelAuthToken,
+			credentialHeaders,
+			options.credentialHeaderPrefixes,
+		),
 	};
-	if (resolveTarget) resolved = await resolveTarget(resolved);
+	if (options.resolveTarget) resolved = await options.resolveTarget(resolved);
 	const targetUrl = resolved.url;
 	const init: RequestInit = {
 		method: request.method,
@@ -507,7 +524,10 @@ export function sandboxProxyMiddleware(deps: ApiDeps): MiddlewareHandler<HonoEnv
 			decision.sessionId,
 			decision.kernelAuthToken,
 			deps.sandbox.credentialHeaders,
-			(target) => resolveKernelUpstream(deps, c.req.raw, decision, target),
+			{
+				credentialHeaderPrefixes: deps.sandbox.credentialHeaderPrefixes,
+				resolveTarget: (target) => resolveKernelUpstream(deps, c.req.raw, decision, target),
+			},
 		);
 	};
 }

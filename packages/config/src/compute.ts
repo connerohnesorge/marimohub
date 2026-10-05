@@ -8,7 +8,7 @@ import { createWandbCompute } from '@marimo-hub/compute-coreweave/wandb';
 import { DockerCompute } from '@marimo-hub/compute-container/docker';
 import { PodmanCompute } from '@marimo-hub/compute-container/podman';
 import { E2bCompute } from '@marimo-hub/compute-e2b';
-import { ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
+import { DEFAULT_TOKEN_HEADER, ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
 import { FargateCompute, validateFargateTaskDefinition } from '@marimo-hub/compute-fargate';
 import {
 	KubernetesCompute,
@@ -321,6 +321,42 @@ function parseModalSecretNames(env: Env): string[] | undefined {
 		}
 	}
 	return [...new Set(names)];
+}
+
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+function headerNames(env: Env, key: string, fallback: readonly string[]): string[] {
+	const values = env[key] === undefined ? [...fallback] : (parseList(env[key]) ?? []);
+	for (const value of values) {
+		if (!HEADER_NAME.test(value)) {
+			throw new ConfigError(`Invalid ${key} entry: ${value}`, {
+				variable: key,
+				remediation: 'Use comma-separated HTTP header names or name prefixes.',
+			});
+		}
+	}
+	return values.map((value) => value.toLowerCase());
+}
+
+function externalTokenHeader(env: Env): string | undefined {
+	return headerNames(env, 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER', [])[0];
+}
+
+/**
+ * Browser headers never forwarded to a kernel, on every backend. Notebook code
+ * can read forwarded request headers, so a gateway-injected identity token would
+ * otherwise reach whoever wrote the notebook a viewer opens.
+ */
+export function sandboxStripHeaders(env: Env): { names: string[]; prefixes: string[] } {
+	const names = headerNames(env, 'MARIMOHUB_SANDBOX_STRIP_HEADERS', ['x-pantheon-bearer']);
+	const token =
+		externalTokenHeader(env) ??
+		(computeBackend(env) === 'external-kernel' ? DEFAULT_TOKEN_HEADER : undefined);
+	if (token) names.push(token);
+	return {
+		names: [...new Set(names)],
+		prefixes: headerNames(env, 'MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES', ['x-pantheon-']),
+	};
 }
 
 function withWarmPoolSupport(provider: SandboxProvider, support: WarmPoolSupport): SandboxProvider {
@@ -742,21 +778,12 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 				);
 			}
 			const url = computeVar(env, 'MARIMOHUB_COMPUTE_EXTERNAL_URL', 'external-kernel');
-			const tokenHeader = env.MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER?.trim() || undefined;
-			if (tokenHeader !== undefined && !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(tokenHeader)) {
-				throw new ConfigError(`Invalid MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER: ${tokenHeader}`, {
-					variable: 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER',
-					docs,
-				});
-			}
+			const tokenHeader = externalTokenHeader(env);
 			try {
 				return new ExternalKernelCompute({
 					baseUrl: url,
 					tokenHeader,
-					stripHeaderPrefixes:
-						env.MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES === undefined
-							? undefined
-							: (parseList(env.MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES) ?? []),
+					stripHeaderPrefixes: sandboxStripHeaders(env).prefixes,
 					workdir: env.MARIMOHUB_COMPUTE_WORKDIR,
 				});
 			} catch (cause) {

@@ -16,8 +16,8 @@ MARIMOHUB_COMPUTE_BACKEND=external-kernel
 MARIMOHUB_COMPUTE_EXTERNAL_URL=http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1
 # Header the gateway sets to the caller's own verified JWT (default shown).
 MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER=x-pantheon-bearer
-# Browser headers never forwarded to the kernel (default shown).
-MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES=x-pantheon-
+# Browser header prefixes never forwarded to any kernel (default shown).
+MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES=x-pantheon-
 MARIMOHUB_SANDBOX_EXPOSURE=proxy
 MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED=true
 MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive
@@ -54,9 +54,11 @@ the hub-side root that maps to each workspace.
 - A proxied browser request always uses the requesting user's own token from
   that request. The hub refuses a request from anyone but the session owner
   before it reaches the service, and never substitutes a cached token.
-- Proxied browser requests lose cookies, `Authorization`, the token header, and
-  every header that matches a stripped prefix before the hub sets the bearer
-  and the owner header.
+- Proxied browser requests lose cookies, `Authorization`, the token header,
+  `MARIMOHUB_SANDBOX_STRIP_HEADERS`, and every header that matches
+  `MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES` before the hub sets the bearer and
+  the owner header. The hub applies the same filter to kernels on every other
+  backend, so no notebook code sees a viewer's token.
 - Accepted residual risk: a compromised hub process can replay the tokens of
   users who are using it at that moment, until those tokens expire.
 - The hub sends the kernel no environment variables, credential files, setup

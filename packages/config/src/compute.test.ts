@@ -16,6 +16,7 @@ import {
 	makeCompute,
 	resolveLifetimeBackstop,
 	resolveSandboxImages,
+	sandboxStripHeaders,
 	usesSandboxNativeObjectStorage,
 } from './compute';
 import { surfacesFromEnv } from './surfaces';
@@ -407,6 +408,47 @@ describe('makeCompute fail-fast', () => {
 				{ sandboxExposureMode: 'proxy' },
 			),
 		).toThrow(/MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER/);
+	});
+
+	it('strips gateway identity headers from kernel traffic on every backend by default', () => {
+		expect(sandboxStripHeaders({ MARIMOHUB_COMPUTE_BACKEND: 'kubernetes' })).toEqual({
+			names: ['x-pantheon-bearer'],
+			prefixes: ['x-pantheon-'],
+		});
+		expect(
+			sandboxStripHeaders({
+				MARIMOHUB_COMPUTE_BACKEND: 'local',
+				MARIMOHUB_SANDBOX_STRIP_HEADERS: 'X-Gateway-Token, x-other',
+				MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES: 'X-Gateway-',
+			}),
+		).toEqual({ names: ['x-gateway-token', 'x-other'], prefixes: ['x-gateway-'] });
+		expect(
+			sandboxStripHeaders({
+				MARIMOHUB_COMPUTE_BACKEND: 'local',
+				MARIMOHUB_SANDBOX_STRIP_HEADERS: '',
+				MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES: '',
+			}),
+		).toEqual({ names: [], prefixes: [] });
+		expect(() =>
+			sandboxStripHeaders({ MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES: 'bad prefix' }),
+		).toThrow(/MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES/);
+	});
+
+	it('always strips the external token header, and passes the prefixes to the adapter', () => {
+		const env = {
+			MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+			MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1',
+			MARIMOHUB_SANDBOX_STRIP_HEADERS: '',
+			MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES: 'x-gw-',
+		};
+		expect(sandboxStripHeaders(env)).toEqual({ names: ['x-pantheon-bearer'], prefixes: ['x-gw-'] });
+		expect(
+			sandboxStripHeaders({ ...env, MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER: 'X-User-Jwt' }).names,
+		).toEqual(['x-user-jwt']);
+		const provider = makeCompute(env, { sandboxExposureMode: 'proxy' }) as ExternalKernelCompute;
+		expect((provider as unknown as { stripHeaderPrefixes: string[] }).stripHeaderPrefixes).toEqual([
+			'x-gw-',
+		]);
 	});
 
 	it('requires a pinned fargate task-definition revision', () => {

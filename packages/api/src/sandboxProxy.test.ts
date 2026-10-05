@@ -964,6 +964,23 @@ describe('forwardHttp', () => {
 		},
 	);
 
+	it('strips configured header-name prefixes, case-insensitively', async () => {
+		const request = new Request('https://hub/x', {
+			headers: {
+				'X-Pantheon-Bearer': 'eyJ.viewer.jwt',
+				'x-pantheon-email': 'viewer@example.com',
+				'X-PANTHEON-GROUPS': 'finance',
+				'x-pantheonic': 'not-a-prefix-match',
+			},
+		});
+		const res = await forwardHttp(request, `${origin}/echo`, undefined, undefined, undefined, {
+			credentialHeaderPrefixes: ['X-Pantheon-'],
+		});
+		const seen = (await res.json()) as Record<string, string>;
+		expect(Object.keys(seen).filter((name) => name.startsWith('x-pantheon-'))).toEqual([]);
+		expect(seen['x-pantheonic']).toBe('not-a-prefix-match');
+	});
+
 	it('forwards no authorization header for a legacy tokenless session', async () => {
 		const res = await forwardHttp(new Request('https://hub/x'), `${origin}/echo`);
 		const seen = (await res.json()) as Record<string, string>;
