@@ -19,6 +19,12 @@ const GATEWAY_HEADERS = {
 	'x-pantheon-email': 'viewer@example.com',
 	'x-pantheon-bearer': 'eyJhbGciOiJSUzI1NiJ9.viewer-identity.sig',
 	'x-pantheon-groups': 'finance',
+	'x-pantheon-subject': 'viewer-subject',
+	'x-pantheon-subject-sig': 'a1b2c3',
+	// An HMAC over email and groups with a key that many apps share, valid for
+	// 300 s and bound to no app: a replayable identity in an author's hands.
+	'x-pantheon-gateway-sig': 'd4e5f6',
+	'x-pantheon-gateway-exp': '1791240000',
 };
 
 const authenticator: Authenticator = {
