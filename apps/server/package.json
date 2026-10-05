@@ -32,6 +32,7 @@
 		"zod": "catalog:"
 	},
 	"devDependencies": {
+		"@marimo-hub/compute-external-kernel": "workspace:*",
 		"@marimo-hub/tsconfig": "workspace:*",
 		"@opentelemetry/core": "catalog:",
 		"@types/node": "catalog:",
