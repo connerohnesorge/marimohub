@@ -8,6 +8,7 @@ import { createWandbCompute } from '@marimo-hub/compute-coreweave/wandb';
 import { DockerCompute } from '@marimo-hub/compute-container/docker';
 import { PodmanCompute } from '@marimo-hub/compute-container/podman';
 import { E2bCompute } from '@marimo-hub/compute-e2b';
+import { DEFAULT_TOKEN_HEADER, ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
 import { FargateCompute, validateFargateTaskDefinition } from '@marimo-hub/compute-fargate';
 import {
 	KubernetesCompute,
@@ -188,6 +189,7 @@ export function resolveSandboxImages(env: Env): string[] {
 		case 'noop':
 			return [];
 		case 'fargate':
+		case 'external-kernel':
 			return [];
 		case 'e2b':
 			return (
@@ -319,6 +321,42 @@ function parseModalSecretNames(env: Env): string[] | undefined {
 		}
 	}
 	return [...new Set(names)];
+}
+
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+function headerNames(env: Env, key: string, fallback: readonly string[]): string[] {
+	const values = env[key] === undefined ? [...fallback] : (parseList(env[key]) ?? []);
+	for (const value of values) {
+		if (!HEADER_NAME.test(value)) {
+			throw new ConfigError(`Invalid ${key} entry: ${value}`, {
+				variable: key,
+				remediation: 'Use comma-separated HTTP header names or name prefixes.',
+			});
+		}
+	}
+	return values.map((value) => value.toLowerCase());
+}
+
+function externalTokenHeader(env: Env): string | undefined {
+	return headerNames(env, 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER', [])[0];
+}
+
+/**
+ * Browser headers never forwarded to a kernel, on every backend. Notebook code
+ * can read forwarded request headers, so a gateway-injected identity token would
+ * otherwise reach whoever wrote the notebook a viewer opens.
+ */
+export function sandboxStripHeaders(env: Env): { names: string[]; prefixes: string[] } {
+	const names = headerNames(env, 'MARIMOHUB_SANDBOX_STRIP_HEADERS', ['x-pantheon-bearer']);
+	const token =
+		externalTokenHeader(env) ??
+		(computeBackend(env) === 'external-kernel' ? DEFAULT_TOKEN_HEADER : undefined);
+	if (token) names.push(token);
+	return {
+		names: [...new Set(names)],
+		prefixes: headerNames(env, 'MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES', ['x-pantheon-']),
+	};
 }
 
 function withWarmPoolSupport(provider: SandboxProvider, support: WarmPoolSupport): SandboxProvider {
@@ -715,6 +753,45 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 				readyTimeoutMs,
 				exposureMode: opts.sandboxExposureMode,
 			});
+		}
+		case 'external-kernel': {
+			const docs = 'docs/setup/compute/external-kernel.md';
+			if (env.MARIMOHUB_COMPUTE_IMAGE?.trim()) {
+				throw new ConfigError(
+					'MARIMOHUB_COMPUTE_IMAGE is not supported by the external-kernel backend; the external service owns the kernel image',
+					{
+						variable: 'MARIMOHUB_COMPUTE_IMAGE',
+						remediation: 'Unset MARIMOHUB_COMPUTE_IMAGE.',
+						docs,
+					},
+				);
+			}
+			if (opts?.sandboxExposureMode !== 'proxy') {
+				throw new ConfigError(
+					'The external-kernel backend requires MARIMOHUB_SANDBOX_EXPOSURE=proxy',
+					{
+						variable: 'MARIMOHUB_SANDBOX_EXPOSURE',
+						remediation:
+							"Set MARIMOHUB_SANDBOX_EXPOSURE=proxy: the hub must attach each user's own token to kernel traffic.",
+						docs,
+					},
+				);
+			}
+			const url = computeVar(env, 'MARIMOHUB_COMPUTE_EXTERNAL_URL', 'external-kernel');
+			const tokenHeader = externalTokenHeader(env);
+			try {
+				return new ExternalKernelCompute({
+					baseUrl: url,
+					tokenHeader,
+					stripHeaderPrefixes: sandboxStripHeaders(env).prefixes,
+					workdir: env.MARIMOHUB_COMPUTE_WORKDIR,
+				});
+			} catch (cause) {
+				throw new ConfigError(
+					`Invalid external-kernel configuration: ${cause instanceof Error ? cause.message : String(cause)}`,
+					{ variable: 'MARIMOHUB_COMPUTE_EXTERNAL_URL', docs },
+				);
+			}
 		}
 		case 'cloudflare':
 			throw new ConfigError(

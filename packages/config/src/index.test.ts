@@ -22,6 +22,38 @@ const validStorageFixture = fileURLToPath(
  * fail-closed behavior of the auth-backend selector (an unset backend must refuse
  * to boot rather than silently enabling the dev bypass).
  */
+describe('createFromEnv external-kernel compute', () => {
+	const env = {
+		MARIMOHUB_STORAGE_BACKEND: 'memory',
+		MARIMOHUB_ALLOW_EPHEMERAL_STORAGE: 'true',
+		MARIMOHUB_AUTH_BACKEND: 'dev',
+		MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+		MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1',
+		MARIMOHUB_SANDBOX_EXPOSURE: 'proxy',
+		MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED: 'true',
+		MARIMOHUB_AUTH_SESSION_SECRET: 'a-test-signing-secret-at-least-32-bytes-long!!',
+		MARIMOHUB_EDITOR_SANDBOX_SHARING: 'exclusive',
+	};
+
+	it('requires exclusive editor sandboxes', () => {
+		expect(() => createFromEnv({ ...env, MARIMOHUB_EDITOR_SANDBOX_SHARING: 'shared' })).toThrow(
+			/requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive/,
+		);
+	});
+
+	it('turns off in-sandbox thumbnails and sandbox data previews by default', () => {
+		const deps = createFromEnv({
+			...env,
+			MARIMOHUB_INTEGRATIONS: 'on',
+			MARIMOHUB_DATA_BROWSER: 'full',
+			MARIMOHUB_DATA_PREVIEW_IMAGE: 'preview-image',
+		});
+		expect(deps.compute.capabilities?.managedEnvironment).toBe(true);
+		expect(deps.sandbox.automaticThumbnails).toBe(false);
+		expect(deps.policy.editorSandboxSharing).toBe('exclusive');
+	});
+});
+
 describe('createFromEnv auth backend selection', () => {
 	// Storage `memory` + compute `none` keep these tests free of S3/Modal config.
 	// `memory` is non-durable, so it must be explicitly allowed.
@@ -930,7 +962,12 @@ describe('createFromEnv sandbox-host isolation guard', () => {
 			MARIMOHUB_AUTH_PROXY_HEADER: 'X-Custom-Email, X-Custom-User',
 		});
 		expect(deps.sandbox.hostname).toBe('kernels.example.net');
-		expect(deps.sandbox.credentialHeaders).toEqual(['X-Custom-Email', 'X-Custom-User']);
+		expect(deps.sandbox.credentialHeaders).toEqual([
+			'X-Custom-Email',
+			'X-Custom-User',
+			'x-pantheon-bearer',
+		]);
+		expect(deps.sandbox.credentialHeaderPrefixes).toEqual(['x-pantheon-']);
 	});
 
 	it('throws when the sandbox host equals the app host', () => {

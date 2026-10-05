@@ -143,6 +143,8 @@ describe('buildConfigSummary', () => {
 			'MARIMOHUB_SECRETS_KUBERNETES_CACHE_TTL_SECONDS',
 			// Egress-policy toggle, not private key material.
 			'MARIMOHUB_NOTIFY_ALLOW_PRIVATE',
+			// Name of the request header that carries user tokens, not a token.
+			'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER',
 		]);
 		const suspicious = /SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE|CONNECTION_STRING/;
 		const unflagged = CONFIG_SPEC.flatMap((g) => g.backends)

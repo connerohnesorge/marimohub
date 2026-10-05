@@ -33,6 +33,8 @@ export const SANDBOX_INSTANCE_OPTIONAL_METHODS = [
 	'readFileBounded',
 	'ready',
 	'launchProcess',
+	'launchMarimo',
+	'ensureDirectories',
 	'drainTimings',
 	'drainCounters',
 ] as const satisfies readonly (keyof SandboxInstance)[];

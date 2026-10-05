@@ -19,7 +19,11 @@ import {
 	UnavailableError,
 	verifyProxyToken,
 } from '@marimo-hub/core';
-import type { ResourceSecurityLabels } from '@marimo-hub/core';
+import type {
+	KernelProxyRequest,
+	KernelProxyTarget,
+	ResourceSecurityLabels,
+} from '@marimo-hub/core';
 import type { ApiDeps, HonoEnv } from './context';
 import { errorMetadataChain, logEvent } from './log';
 import { authorizationService, fail } from './shared';
@@ -45,6 +49,8 @@ export type ProxyDecision =
 			sessionId: string;
 			kernelAuthToken?: string;
 			authorizationDeadline?: number;
+			/** Kernel (not surface) traffic: what a provider needs to shape the upstream. */
+			kernel?: Omit<KernelProxyRequest, 'request' | 'headers'>;
 	  };
 
 const PROXY_PREFIX = /^\/proxy\/([^/]+)/;
@@ -275,6 +281,17 @@ export async function authorizeProxyRequest(
 		kind: 'forward',
 		targetUrl,
 		sessionId,
+		...(kernelMatch && session.sandbox_id
+			? {
+					kernel: {
+						principal: { userId: user.id, email: user.email },
+						ownerUserId: session.user_id,
+						sandboxId: session.sandbox_id,
+						originUrl,
+						kernelPath: `${url.pathname.slice(kernelMatch[0].length) || '/'}${url.search}`,
+					},
+				}
+			: {}),
 		...(kernelMatch && session.kernel_auth_token
 			? { kernelAuthToken: session.kernel_auth_token }
 			: {}),
@@ -323,10 +340,16 @@ export const CREDENTIAL_HEADERS = new Set([
  */
 export const UNSAFE_RESPONSE_HEADERS = new Set(['set-cookie', 'set-cookie2']);
 
-export function isCredentialHeader(name: string, additional: readonly string[] = []): boolean {
+export function isCredentialHeader(
+	name: string,
+	additional: readonly string[] = [],
+	prefixes: readonly string[] = [],
+): boolean {
 	const lower = name.toLowerCase();
 	return (
-		CREDENTIAL_HEADERS.has(lower) || additional.some((header) => header.toLowerCase() === lower)
+		CREDENTIAL_HEADERS.has(lower) ||
+		additional.some((header) => header.toLowerCase() === lower) ||
+		prefixes.some((prefix) => lower.startsWith(prefix.toLowerCase()))
 	);
 }
 
@@ -335,11 +358,13 @@ function requestHeaders(
 	targetUrl: string,
 	kernelAuthToken?: string,
 	credentialHeaders?: readonly string[],
+	credentialHeaderPrefixes?: readonly string[],
 ): Headers {
 	const out = new Headers();
 	request.headers.forEach((value, key) => {
 		const k = key.toLowerCase();
-		if (!HOP_BY_HOP.has(k) && !isCredentialHeader(k, credentialHeaders)) out.set(key, value);
+		if (!HOP_BY_HOP.has(k) && !isCredentialHeader(k, credentialHeaders, credentialHeaderPrefixes))
+			out.set(key, value);
 	});
 	// marimo validates a request's Origin against its own host; present the kernel
 	// origin so the proxied request reads as same-origin (Host is set by `fetch`).
@@ -363,6 +388,22 @@ function responseHeaders(headers: Headers): Headers {
 	return out;
 }
 
+/**
+ * Let the compute provider shape a kernel request's upstream when it routes
+ * kernels itself; otherwise keep the hub's default target. Shared by the HTTP
+ * and WebSocket forwarders.
+ */
+export async function resolveKernelUpstream(
+	deps: Pick<ApiDeps, 'compute'>,
+	request: Request,
+	decision: Extract<ProxyDecision, { kind: 'forward' }>,
+	target: KernelProxyTarget,
+): Promise<KernelProxyTarget> {
+	const resolve = deps.compute.resolveKernelProxyTarget?.bind(deps.compute);
+	if (!resolve || !decision.kernel) return target;
+	return resolve({ ...decision.kernel, request, headers: target.headers });
+}
+
 /** Upstream statuses that mean "a gateway between hub and kernel failed", not the kernel itself. */
 const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
@@ -379,14 +420,30 @@ const GATEWAY_STATUSES = new Set([502, 503, 504]);
  */
 export async function forwardHttp(
 	request: Request,
-	targetUrl: string,
+	defaultTargetUrl: string,
 	sessionId?: string,
 	kernelAuthToken?: string,
 	credentialHeaders?: readonly string[],
+	options: {
+		credentialHeaderPrefixes?: readonly string[];
+		resolveTarget?: (target: KernelProxyTarget) => Promise<KernelProxyTarget>;
+	} = {},
 ): Promise<Response> {
+	let resolved: KernelProxyTarget = {
+		url: defaultTargetUrl,
+		headers: requestHeaders(
+			request,
+			defaultTargetUrl,
+			kernelAuthToken,
+			credentialHeaders,
+			options.credentialHeaderPrefixes,
+		),
+	};
+	if (options.resolveTarget) resolved = await options.resolveTarget(resolved);
+	const targetUrl = resolved.url;
 	const init: RequestInit = {
 		method: request.method,
-		headers: requestHeaders(request, targetUrl, kernelAuthToken, credentialHeaders),
+		headers: resolved.headers,
 		redirect: 'manual',
 	};
 	const retryable = request.method === 'GET' || request.method === 'HEAD';
@@ -467,6 +524,10 @@ export function sandboxProxyMiddleware(deps: ApiDeps): MiddlewareHandler<HonoEnv
 			decision.sessionId,
 			decision.kernelAuthToken,
 			deps.sandbox.credentialHeaders,
+			{
+				credentialHeaderPrefixes: deps.sandbox.credentialHeaderPrefixes,
+				resolveTarget: (target) => resolveKernelUpstream(deps, c.req.raw, decision, target),
+			},
 		);
 	};
 }

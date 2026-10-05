@@ -6,7 +6,12 @@ import type { NotebookBridgeRuntime } from '../../ports/notebookBridge';
 import type { Bucket } from '../../ports/bucket';
 import { MARIMO_PORT } from '../../constants';
 import { Millis } from '../../duration';
-import { NotFoundError, PythonEnvironmentSetupError, UnavailableError } from '../../errors';
+import {
+	DomainError,
+	NotFoundError,
+	PythonEnvironmentSetupError,
+	UnavailableError,
+} from '../../errors';
 import type { NotebookId, ProjectId, SandboxId, UserId } from '../../ids';
 import { workspaceSourcePolicy } from '../../integrations/remoteWorkspace';
 import type { WorkspaceLoadMode } from '../../integrations/remoteWorkspace';
@@ -618,6 +623,10 @@ export class SandboxProvisioner {
 		private workspaceLoadStrategies: WorkspaceLoadStrategies = createWorkspaceLoadStrategies(),
 	) {}
 
+	private get managedEnvironment(): boolean {
+		return this.provider.capabilities?.managedEnvironment === true;
+	}
+
 	async provision(options: ProvisionOptions): Promise<ProvisionResult> {
 		const provisionStart = Date.now();
 		// A restored sandbox boots from the snapshot image; the workspace load below
@@ -675,6 +684,11 @@ export class SandboxProvisioner {
 	 * expose; a failure here self-destroys the partial sandbox exactly like it.
 	 */
 	async prepare(options: ProvisionOptions): Promise<PreparedSandbox> {
+		if (this.managedEnvironment) {
+			throw new UnavailableError(
+				'This compute backend runs notebooks in externally managed kernels, which cannot run headless jobs',
+			);
+		}
 		const prepareStart = Date.now();
 		const createStart = Date.now();
 		let sandbox: SandboxInstance | undefined;
@@ -724,7 +738,11 @@ export class SandboxProvisioner {
 		options: ProvisionOptions,
 	): Promise<ProvisionResult> {
 		const { load, startup, sw, mountPath } = await this.prepareInto(sandbox, options);
-		await this.launchKernel(sandbox, mountPath, sw, startup);
+		if (this.managedEnvironment) {
+			await this.launchManagedKernel(sandbox, options, mountPath, sw, startup);
+		} else {
+			await this.launchKernel(sandbox, mountPath, sw, startup);
+		}
 		const expose = await this.exposeKernel(sandbox, options, sw);
 
 		const counters = loadCounters(load);
@@ -771,10 +789,19 @@ export class SandboxProvisioner {
 				});
 				return loaded;
 			});
-		const injectSessionEnv = () =>
-			withSandboxSpan(sw, 'inject', (time) => this.injectSessionEnv(sandbox, options, time));
-		const setupEnvironment = () => this.setupEnvironment(sandbox, options, mountPath, sw);
-		const uploadBridge = () => this.uploadNotebookBridge(sandbox, options, sw);
+		// A managed-environment kernel must receive nothing the hub would inject:
+		// no env vars, credential files, setup commands, or bridge launcher.
+		const managed = this.managedEnvironment;
+		const injectSessionEnv = async () => {
+			if (managed) {
+				await Promise.resolve(options.sessionEnv).catch(() => {});
+				return;
+			}
+			await withSandboxSpan(sw, 'inject', (time) => this.injectSessionEnv(sandbox, options, time));
+		};
+		const setupEnvironment = () => this.setupEnvironment(sandbox, options, mountPath, sw, managed);
+		const uploadBridge = async () =>
+			managed ? undefined : this.uploadNotebookBridge(sandbox, options, sw);
 
 		// Setup reads only the loaded workspace. The kernel waits for credential
 		// injection and bridge upload as well.
@@ -920,6 +947,9 @@ export class SandboxProvisioner {
 					await (sandbox.ready?.() ?? sandbox.exec('true'));
 				});
 			} catch (err) {
+				// A managed kernel belongs to the user, so its readiness failure (no
+				// kernel, access denied) is actionable by them and keeps its message.
+				if (this.managedEnvironment && err instanceof DomainError) throw err;
 				throw new UnavailableError('Sandbox compute backend is not available', { cause: err });
 			}
 		});
@@ -932,7 +962,7 @@ export class SandboxProvisioner {
 		workspacePrefix: string,
 	): Promise<WorkspaceLoadResult> {
 		const loaded = await this.restoreWorkspaceFiles(sandbox, options, layout, workspacePrefix);
-		if (options.gitPrefix) {
+		if (options.gitPrefix && !this.managedEnvironment) {
 			await this.markGitWorkdirTrusted(sandbox, layout.gitRoot);
 			if (layout.rootPath) await this.configureSparseCheckout(sandbox, options, layout);
 		}
@@ -948,7 +978,8 @@ export class SandboxProvisioner {
 		if (
 			options.workspaceLoadMode === 'copy-only' &&
 			options.workspaceArchive &&
-			options.bucketHandle
+			options.bucketHandle &&
+			!this.managedEnvironment
 		) {
 			const packed = await restorePackedWorkspace(
 				sandbox,
@@ -1121,6 +1152,7 @@ export class SandboxProvisioner {
 		options: ProvisionOptions,
 		mountPath: string,
 		sw: Stopwatch,
+		managed: boolean,
 	): Promise<MarimoStartup> {
 		const startup: MarimoStartup = {
 			plan: buildMarimoLaunch(
@@ -1142,7 +1174,7 @@ export class SandboxProvisioner {
 				timeoutMs: options.startupTimeoutMs ?? DEFAULT_SANDBOX_STARTUP_TIMEOUT_MS,
 			},
 		};
-		if (startup.plan.setup.length === 0) return startup;
+		if (startup.plan.setup.length === 0 || managed) return startup;
 
 		const command = `cd ${shellQuote(mountPath)} && ${instrumentSetup(startup.plan.setup)}`;
 		let diagnostics: SetupDiagnostics | undefined;
@@ -1234,6 +1266,51 @@ export class SandboxProvisioner {
 			const logs = await readKernelLogs(process);
 			const step = kernelLaunchFailureStep(error, startup, portWaitStarted);
 			throw provisionFailure(logs ? `${step}; kernel output:\n${logs}` : step, error);
+		}
+	}
+
+	private async launchManagedKernel(
+		sandbox: SandboxInstance,
+		options: ProvisionOptions,
+		mountPath: string,
+		sw: Stopwatch,
+		startup: MarimoStartup,
+	): Promise<void> {
+		const launchMarimo = sandbox.launchMarimo?.bind(sandbox);
+		const mode = options.launchMode ?? 'edit';
+		if (!launchMarimo || mode === 'job') {
+			throw provisionFailure(
+				'starting the marimo kernel',
+				new Error('managed-environment sandbox cannot launch this session'),
+			);
+		}
+		const timeoutMs = remainingStartupMs(startup);
+		if (startup.deadline.timeoutMs !== 0 && timeoutMs === 0) {
+			throw provisionFailure(
+				kernelReadinessTimeoutStep(startup.deadline.timeoutMs),
+				new Error('readiness_timeout'),
+			);
+		}
+		try {
+			await withSandboxSpan(sw, 'start', (time) =>
+				time(() =>
+					launchMarimo({
+						workdir: mountPath,
+						notebookFile: options.entryNotebook ?? 'notebook.py',
+						mode,
+						port: MARIMO_PORT,
+						projectId: options.projectId,
+						notebookId: options.notebookId,
+						baseUrl: options.baseUrl,
+						assetUrl: options.assetUrl,
+						watch: options.marimoWatch,
+						timeoutMs,
+					}),
+				),
+			);
+		} catch (error) {
+			if (error instanceof DomainError) throw error;
+			throw provisionFailure('starting the marimo kernel', error);
 		}
 	}
 

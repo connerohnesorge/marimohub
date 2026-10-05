@@ -40,6 +40,7 @@ const DOC_HREFS: Record<string, string> = {
 	'compute/e2b': '/compute#e2b',
 	'compute/kubernetes': '/compute#kubernetes',
 	'compute/fargate': '/compute#aws-ecs-fargate',
+	'compute/external-kernel': '/compute#external-kernel',
 	'compute/docker': '/compute#docker',
 	'compute/podman': '/compute#podman',
 	'compute/local': '/compute#local-dev',

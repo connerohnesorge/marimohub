@@ -53,6 +53,23 @@ Without GPU support, the hub strips GPU values and warns at startup.
 Without either flag, profiles remain disabled and startup warns about ignored configuration.
 The adapter `apiVersion` remains `1`.
 
+A provider whose kernels are managed elsewhere can declare
+`capabilities.managedEnvironment: true`. The hub then injects nothing into the
+sandbox: no env vars, credential files, kernel auth token, notebook bridge,
+setup commands, or Git commands. The session route does not mint AI tokens,
+workload identity credentials, or integration renders for it. Its instances
+must implement `launchMarimo(spec)`, which receives the notebook, mode, port,
+and startup budget as data instead of a shell command. `ensureDirectories`
+replaces `mkdir -p` through `exec` when present. Headless job preparation is
+refused.
+
+Two optional provider hooks support kernels that act with the end user's own
+credential. `withEndUserRequest(request, principal, next)` wraps each
+authenticated `/api/v1` request, so the provider can read the caller's token.
+`resolveKernelProxyTarget(input)` shapes the upstream URL and headers of each
+`proxy`-exposure kernel request, HTTP and WebSocket, after the hub has
+authorized it. `compute-external-kernel` implements all of these.
+
 At startup, the loader validates the five required `Bucket` methods and its CAS
 safety contract. For compute, it validates `create` and `proxy`, plus optional
 methods when present. It validates the first `SandboxInstance` after the provider
@@ -114,6 +131,7 @@ Then mount the file in the server image. Node ESM does not use `NODE_PATH`. See
 | 🟡     | Podman                          | `compute-container/podman` | Hermetic CLI tests; not yet live-verified             |
 | 🟡     | Kubernetes                      | `compute-kubernetes`       | Pod + Service; optional Ingress; vendor-neutral       |
 | 🟡     | AWS ECS Fargate                 | `compute-fargate`          | Private task ENI + authenticated in-task agent        |
+| 🟡     | External per-user kernel        | `compute-external-kernel`  | End-user token only; hermetic tests, not yet live     |
 | ⬜     | Fly.io Machines                 | —                          | VM per sandbox, per-machine public hostname           |
 | ⬜     | Daytona                         | —                          | Sandbox SDK (exec/files/preview URLs)                 |
 | ⬜     | Runpod / Lambda / Beam          | —                          | For GPU kernels                                       |

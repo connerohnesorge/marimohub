@@ -118,7 +118,7 @@ _No environment variables to set here._
 
 ## Compute
 
-Selected by `MARIMOHUB_COMPUTE_BACKEND`; one of `coreweave`, `wandb`, `modal`, `docker`, `podman`, `e2b`, `fargate`, `kubernetes`, `local`, `library`, `none`.
+Selected by `MARIMOHUB_COMPUTE_BACKEND`; one of `coreweave`, `wandb`, `modal`, `docker`, `podman`, `e2b`, `fargate`, `kubernetes`, `external-kernel`, `local`, `library`, `none`.
 
 Where notebook kernels run. The shared variables apply across compute backends.
 
@@ -286,6 +286,17 @@ Native Kubernetes creates one keep-alive Pod and Service per session through `@k
 | `MARIMOHUB_COMPUTE_KUBERNETES_RUN_AS_USER` | Sets Pod `runAsUser`, matching `fsGroup`, and `runAsNonRoot` (false for UID `0`). Overrides these template fields only. Unset preserves the template security context. The UID needs write access to the image workdir. `fsGroup` affects mounted volumes only. | — | — | `1000` |
 | `MARIMOHUB_COMPUTE_KUBERNETES_POD_READY_TIMEOUT_SECONDS` | How long to wait for the kernel Pod to reach `Running`. | — | `120` | — |
 
+### External kernel
+
+`MARIMOHUB_COMPUTE_BACKEND=external-kernel`
+
+Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, workload identity, integrations, per-notebook dependencies, jobs, apps, or surfaces. See [External kernel](compute.md#external-kernel).
+
+| Variable | Description | Required | Default | Example |
+| --- | --- | --- | --- | --- |
+| `MARIMOHUB_COMPUTE_EXTERNAL_URL` | Base URL of the external kernel API, reachable from the hub. | Yes | — | `http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1` |
+| `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER` | Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there. | — | `x-pantheon-bearer` | — |
+
 ### Local (dev only)
 
 `MARIMOHUB_COMPUTE_BACKEND=local`
@@ -348,6 +359,8 @@ All kernel traffic is forwarded through the app, authenticated like `/api/v1/*` 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
 | `MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED` | Safety gate: must be `true` to boot in proxy mode, acknowledging that kernels then run untrusted code same-origin with the app (XSS-capable). Fails closed. | Yes | `false` | `true` |
+| `MARIMOHUB_SANDBOX_STRIP_HEADERS` | Comma-separated browser request headers never forwarded to a kernel or surface, on every compute backend, in addition to cookies, `Authorization`, and the auth proxy headers. Notebook code can read forwarded headers, so list any identity token a gateway adds. An empty value strips none beyond the built-in set. | — | `x-pantheon-bearer` | — |
+| `MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES` | Comma-separated header-name prefixes stripped the same way, for a gateway that adds a family of identity headers. The external-kernel backend applies the same prefixes. | — | `x-pantheon-` | — |
 
 ## Auth
 

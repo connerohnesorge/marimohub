@@ -1515,7 +1515,11 @@ export async function startNotebookSession(input: {
 	let sandboxId = admission?.member.sandbox_id ?? createSandboxId();
 	const sessionId = admission?.member.session_id ?? createSessionId();
 	let warmClaim: WarmPoolClaim | undefined;
-	const kernelAuthToken = sandbox.auth === 'on' ? createKernelAuthToken() : undefined;
+	// A managed-environment kernel takes no hub-injected credential of any kind,
+	// so none is minted for it: no kernel token, AI token, WIF exchange, or render.
+	const managedEnvironment = compute.capabilities?.managedEnvironment === true;
+	const kernelAuthToken =
+		sandbox.auth === 'on' && !managedEnvironment ? createKernelAuthToken() : undefined;
 
 	// Provision as a saga: if a later step fails, completed steps compensate in
 	// reverse — the session record is terminated (so it does not linger in
@@ -1763,10 +1767,11 @@ export async function startNotebookSession(input: {
 							},
 						});
 
+					if (managedEnvironment) observer.tag('session_env_withheld', true);
 					const { provision } = await all({
-						wifVars: resolveWifVars,
-						marimoEnv: resolveMarimoConfigEnv,
-						integrationEnv: resolveIntegrationEnv,
+						wifVars: () => (managedEnvironment ? undefined : resolveWifVars()),
+						marimoEnv: () => (managedEnvironment ? undefined : resolveMarimoConfigEnv()),
+						integrationEnv: () => (managedEnvironment ? undefined : resolveIntegrationEnv()),
 						async sessionEnv(): Promise<SessionEnv | undefined> {
 							const wifVars = await this.$.wifVars;
 							const marimoEnv = await this.$.marimoEnv;

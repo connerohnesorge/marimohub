@@ -1047,6 +1047,28 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 				],
 			},
 			{
+				name: 'External kernel',
+				selectorValue: 'external-kernel',
+				description:
+					"Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, workload identity, integrations, per-notebook dependencies, jobs, apps, or surfaces. See [External kernel](compute.md#external-kernel).",
+				vars: [
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_URL',
+						name: 'External kernel API URL',
+						description: 'Base URL of the external kernel API, reachable from the hub.',
+						example: 'http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1',
+						required: true,
+					},
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER',
+						name: 'End-user token header',
+						description:
+							"Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there.",
+						default: 'x-pantheon-bearer',
+					},
+				],
+			},
+			{
 				name: 'Local (dev only)',
 				selectorValue: 'local',
 				description:
@@ -1152,6 +1174,20 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						example: 'true',
 						default: 'false',
 						required: true,
+					},
+					{
+						id: 'MARIMOHUB_SANDBOX_STRIP_HEADERS',
+						name: 'Stripped kernel request headers',
+						description:
+							'Comma-separated browser request headers never forwarded to a kernel or surface, on every compute backend, in addition to cookies, `Authorization`, and the auth proxy headers. Notebook code can read forwarded headers, so list any identity token a gateway adds. An empty value strips none beyond the built-in set.',
+						default: 'x-pantheon-bearer',
+					},
+					{
+						id: 'MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES',
+						name: 'Stripped kernel request header prefixes',
+						description:
+							'Comma-separated header-name prefixes stripped the same way, for a gateway that adds a family of identity headers. The external-kernel backend applies the same prefixes.',
+						default: 'x-pantheon-',
 					},
 				],
 			},

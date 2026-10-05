@@ -75,7 +75,7 @@ import {
 	projectCreationRestricted,
 } from './auth';
 import { buildConfigSummary } from './configSummary';
-import { computeBackend, makeCompute, resolveSandboxImages } from './compute';
+import { computeBackend, makeCompute, resolveSandboxImages, sandboxStripHeaders } from './compute';
 import {
 	parseComputeProfileOverride,
 	parseComputeProfiles,
@@ -201,6 +201,7 @@ function dataPreviewFromEnv(
 		image !== '' &&
 		computeBackendValue !== 'local' &&
 		computeBackendValue !== 'e2b' &&
+		computeBackendValue !== 'external-kernel' &&
 		computeBackendValue !== 'none' &&
 		computeBackendValue !== 'noop';
 	const maxConcurrent = parsePositiveIntEnv(
@@ -646,6 +647,18 @@ export function createFromEnv(
 		env.MARIMOHUB_COMPUTE_PROFILE_OVERRIDE,
 	);
 	const editorSandboxSharing = parseEditorSandboxSharing(env);
+	if (computeBackendValue === 'external-kernel' && editorSandboxSharing !== 'exclusive') {
+		// A shared editor sandbox would put one user's kernel in front of another.
+		throw new ConfigError(
+			'The external-kernel backend requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive',
+			{
+				variable: 'MARIMOHUB_EDITOR_SANDBOX_SHARING',
+				remediation:
+					'Set MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive so each session runs in the personal kernel of its owner.',
+				docs: 'docs/setup/compute/external-kernel.md',
+			},
+		);
+	}
 	const userHome = makeSandboxUserHome(env, editorSandboxSharing);
 	const profileNotice = unsupportedBackendNotice(
 		computeBackendValue,
@@ -660,6 +673,7 @@ export function createFromEnv(
 	const services = createServices(bucket, metrics, { tracing: options?.tracing });
 	const projectAlerts = makeProjectAlerts(env, bucket, metrics);
 	const surfaces = surfacesFromEnv(env);
+	const stripHeaders = sandboxStripHeaders(env);
 	const compute = makeCompute(env, {
 		sessionMaxLifetimeSeconds: Millis.toSeconds(sessionLifetime.maxLifetimeMs),
 		sessionIdleTimeoutMs: sessionLifetime.idleTimeoutMsByMode.edit,
@@ -732,7 +746,11 @@ export function createFromEnv(
 		}),
 		authRoutes,
 		sandbox: {
-			credentialHeaders: env.MARIMOHUB_AUTH_PROXY_HEADER?.split(',').map((header) => header.trim()),
+			credentialHeaders: [
+				...(env.MARIMOHUB_AUTH_PROXY_HEADER?.split(',').map((header) => header.trim()) ?? []),
+				...stripHeaders.names,
+			],
+			credentialHeaderPrefixes: stripHeaders.prefixes,
 			bucket: makeSandboxBucketConfig(env),
 			hostname: env.MARIMOHUB_COMPUTE_SANDBOX_HOSTNAME ?? '',
 			workdir: env.MARIMOHUB_COMPUTE_WORKDIR ?? '/workspace',
@@ -744,7 +762,12 @@ export function createFromEnv(
 			auth: parseSandboxAuth(env.MARIMOHUB_SANDBOX_AUTH),
 			appBaseUrl: env.MARIMOHUB_APP_BASE_URL,
 			persistWorkspace: parsePersistWorkspace(env),
-			automaticThumbnails: parseBool(env, 'MARIMOHUB_AUTOMATIC_THUMBNAILS', true),
+			// Thumbnails render inside the sandbox, which an external kernel does not allow.
+			automaticThumbnails: parseBool(
+				env,
+				'MARIMOHUB_AUTOMATIC_THUMBNAILS',
+				computeBackendValue !== 'external-kernel',
+			),
 			sessionLifetime,
 			images: sandboxImages,
 			resources: computeResources,
