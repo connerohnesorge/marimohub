@@ -118,7 +118,7 @@ _No environment variables to set here._
 
 ## Compute
 
-Selected by `MARIMOHUB_COMPUTE_BACKEND`; one of `coreweave`, `wandb`, `modal`, `docker`, `podman`, `e2b`, `fargate`, `kubernetes`, `local`, `library`, `none`.
+Selected by `MARIMOHUB_COMPUTE_BACKEND`; one of `coreweave`, `wandb`, `modal`, `docker`, `podman`, `e2b`, `fargate`, `kubernetes`, `external-kernel`, `local`, `library`, `none`.
 
 Where notebook kernels run. The shared variables apply across compute backends.
 
@@ -285,6 +285,18 @@ Native Kubernetes creates one keep-alive Pod and Service per session through `@k
 | `MARIMOHUB_COMPUTE_KUBERNETES_POD_LABELS` | Comma-separated `key=value` labels added to each kernel Pod, Service, and Ingress. Use for ownership labels that cluster admission policies require on every object. | — | — | `team=data,app.kubernetes.io/part-of=marimohub` |
 | `MARIMOHUB_COMPUTE_KUBERNETES_RUN_AS_USER` | Sets Pod `runAsUser`, matching `fsGroup`, and `runAsNonRoot` (false for UID `0`). Overrides these template fields only. Unset preserves the template security context. The UID needs write access to the image workdir. `fsGroup` affects mounted volumes only. | — | — | `1000` |
 | `MARIMOHUB_COMPUTE_KUBERNETES_POD_READY_TIMEOUT_SECONDS` | How long to wait for the kernel Pod to reach `Running`. | — | `120` | — |
+
+### External kernel
+
+`MARIMOHUB_COMPUTE_BACKEND=external-kernel`
+
+Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, workload identity, integrations, per-notebook dependencies, jobs, apps, or surfaces. See [External kernel](compute.md#external-kernel).
+
+| Variable | Description | Required | Default | Example |
+| --- | --- | --- | --- | --- |
+| `MARIMOHUB_COMPUTE_EXTERNAL_URL` | Base URL of the external kernel API, reachable from the hub. | Yes | — | `http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1` |
+| `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER` | Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there. | — | `x-pantheon-bearer` | — |
+| `MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES` | Comma-separated header-name prefixes never forwarded from the browser to the kernel. Cookies, `Authorization`, and the token header are always stripped. | — | `x-pantheon-` | — |
 
 ### Local (dev only)
 

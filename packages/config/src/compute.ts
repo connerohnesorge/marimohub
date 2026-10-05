@@ -8,6 +8,7 @@ import { createWandbCompute } from '@marimo-hub/compute-coreweave/wandb';
 import { DockerCompute } from '@marimo-hub/compute-container/docker';
 import { PodmanCompute } from '@marimo-hub/compute-container/podman';
 import { E2bCompute } from '@marimo-hub/compute-e2b';
+import { ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
 import { FargateCompute, validateFargateTaskDefinition } from '@marimo-hub/compute-fargate';
 import {
 	KubernetesCompute,
@@ -188,6 +189,7 @@ export function resolveSandboxImages(env: Env): string[] {
 		case 'noop':
 			return [];
 		case 'fargate':
+		case 'external-kernel':
 			return [];
 		case 'e2b':
 			return (
@@ -715,6 +717,54 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 				readyTimeoutMs,
 				exposureMode: opts.sandboxExposureMode,
 			});
+		}
+		case 'external-kernel': {
+			const docs = 'docs/setup/compute/external-kernel.md';
+			if (env.MARIMOHUB_COMPUTE_IMAGE?.trim()) {
+				throw new ConfigError(
+					'MARIMOHUB_COMPUTE_IMAGE is not supported by the external-kernel backend; the external service owns the kernel image',
+					{
+						variable: 'MARIMOHUB_COMPUTE_IMAGE',
+						remediation: 'Unset MARIMOHUB_COMPUTE_IMAGE.',
+						docs,
+					},
+				);
+			}
+			if (opts?.sandboxExposureMode !== 'proxy') {
+				throw new ConfigError(
+					'The external-kernel backend requires MARIMOHUB_SANDBOX_EXPOSURE=proxy',
+					{
+						variable: 'MARIMOHUB_SANDBOX_EXPOSURE',
+						remediation:
+							"Set MARIMOHUB_SANDBOX_EXPOSURE=proxy: the hub must attach each user's own token to kernel traffic.",
+						docs,
+					},
+				);
+			}
+			const url = computeVar(env, 'MARIMOHUB_COMPUTE_EXTERNAL_URL', 'external-kernel');
+			const tokenHeader = env.MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER?.trim() || undefined;
+			if (tokenHeader !== undefined && !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(tokenHeader)) {
+				throw new ConfigError(`Invalid MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER: ${tokenHeader}`, {
+					variable: 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER',
+					docs,
+				});
+			}
+			try {
+				return new ExternalKernelCompute({
+					baseUrl: url,
+					tokenHeader,
+					stripHeaderPrefixes:
+						env.MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES === undefined
+							? undefined
+							: (parseList(env.MARIMOHUB_COMPUTE_EXTERNAL_STRIP_HEADER_PREFIXES) ?? []),
+					workdir: env.MARIMOHUB_COMPUTE_WORKDIR,
+				});
+			} catch (cause) {
+				throw new ConfigError(
+					`Invalid external-kernel configuration: ${cause instanceof Error ? cause.message : String(cause)}`,
+					{ variable: 'MARIMOHUB_COMPUTE_EXTERNAL_URL', docs },
+				);
+			}
 		}
 		case 'cloudflare':
 			throw new ConfigError(

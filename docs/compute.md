@@ -18,20 +18,21 @@ Selector: `MARIMOHUB_COMPUTE_BACKEND`. Full variables:
 
 ## Choose a backend
 
-| Backend    | Selector     | Use for                                     |
-| ---------- | ------------ | ------------------------------------------- |
-| CoreWeave  | `coreweave`  | Production on CoreWeave Sandboxes           |
-| W&B        | `wandb`      | CoreWeave Sandboxes via your W&B account    |
-| Modal      | `modal`      | Production serverless sandboxes             |
-| E2B        | `e2b`        | Managed code sandboxes                      |
-| Fargate    | `fargate`    | Private on-demand tasks in your AWS account |
-| Kubernetes | `kubernetes` | Pods in your own cluster                    |
-| Docker     | `docker`     | Single-host container per kernel            |
-| Podman     | `podman`     | Rootless or remote container per kernel     |
-| Local      | `local`      | Local development with `uv run marimo edit` |
-| Cloudflare | `cloudflare` | Workers entrypoint with Containers binding  |
-| None       | `none`       | Browse notebooks without runnable kernels   |
-| External   | `library`    | Operator-provided Node adapter              |
+| Backend         | Selector          | Use for                                        |
+| --------------- | ----------------- | ---------------------------------------------- |
+| CoreWeave       | `coreweave`       | Production on CoreWeave Sandboxes              |
+| W&B             | `wandb`           | CoreWeave Sandboxes via your W&B account       |
+| Modal           | `modal`           | Production serverless sandboxes                |
+| E2B             | `e2b`             | Managed code sandboxes                         |
+| Fargate         | `fargate`         | Private on-demand tasks in your AWS account    |
+| Kubernetes      | `kubernetes`      | Pods in your own cluster                       |
+| External kernel | `external-kernel` | Each user's own kernel, run by another service |
+| Docker          | `docker`          | Single-host container per kernel               |
+| Podman          | `podman`          | Rootless or remote container per kernel        |
+| Local           | `local`           | Local development with `uv run marimo edit`    |
+| Cloudflare      | `cloudflare`      | Workers entrypoint with Containers binding     |
+| None            | `none`            | Browse notebooks without runnable kernels      |
+| External        | `library`         | Operator-provided Node adapter                 |
 
 ## Shared settings
 
@@ -138,6 +139,10 @@ sandboxes at the largest profile can exceed the host's capacity.
 ### Kubernetes
 
 <!--@include: ./setup/compute/kubernetes.md-->
+
+### External kernel
+
+<!--@include: ./setup/compute/external-kernel.md-->
 
 ### Docker
 

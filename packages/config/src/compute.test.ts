@@ -8,6 +8,7 @@ import { LocalCompute } from '@marimo-hub/compute-local';
 import { DockerCompute } from '@marimo-hub/compute-container/docker';
 import { PodmanCompute } from '@marimo-hub/compute-container/podman';
 import { CoreWeaveCompute } from '@marimo-hub/compute-coreweave';
+import { ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
 import { FargateCompute } from '@marimo-hub/compute-fargate';
 import { KubernetesCompute } from '@marimo-hub/compute-kubernetes';
 import type { KubernetesPodTemplate } from '@marimo-hub/compute-kubernetes';
@@ -359,6 +360,53 @@ describe('makeCompute fail-fast', () => {
 			),
 		).toThrow(/MARIMOHUB_COMPUTE_IMAGE/);
 		expect(() => makeCompute(env)).toThrow(/requires MARIMOHUB_SANDBOX_EXPOSURE=proxy/);
+	});
+
+	it('selects external-kernel with only an endpoint and a token header', () => {
+		const provider = makeCompute(
+			{
+				MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+				MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1/',
+				MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER: 'Authorization',
+				MARIMOHUB_COMPUTE_WORKDIR: '/home/marimo/work',
+			},
+			{ sandboxExposureMode: 'proxy' },
+		);
+		expect(provider).toBeInstanceOf(ExternalKernelCompute);
+		const external = provider as ExternalKernelCompute;
+		expect(external.capabilities).toEqual({ multiPort: false, managedEnvironment: true });
+		expect(external.baseUrl).toBe('http://kira.svc:8080/api/external-kernel/v1');
+		expect(external.workdir).toBe('/home/marimo/work');
+		expect(external.credentials.header).toBe('authorization');
+	});
+
+	it('rejects external-kernel without proxy exposure, an endpoint, or a valid header', () => {
+		const env = {
+			MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+			MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1',
+		};
+		expect(() => makeCompute(env)).toThrow(/requires MARIMOHUB_SANDBOX_EXPOSURE=proxy/);
+		expect(() =>
+			makeCompute({ ...env, MARIMOHUB_COMPUTE_IMAGE: 'img' }, { sandboxExposureMode: 'proxy' }),
+		).toThrow(/MARIMOHUB_COMPUTE_IMAGE/);
+		expect(() =>
+			makeCompute(
+				{ MARIMOHUB_COMPUTE_BACKEND: 'external-kernel' },
+				{ sandboxExposureMode: 'proxy' },
+			),
+		).toThrow(/MARIMOHUB_COMPUTE_EXTERNAL_URL/);
+		expect(() =>
+			makeCompute(
+				{ ...env, MARIMOHUB_COMPUTE_EXTERNAL_URL: 'ftp://kira' },
+				{ sandboxExposureMode: 'proxy' },
+			),
+		).toThrow(/http or https/);
+		expect(() =>
+			makeCompute(
+				{ ...env, MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER: 'bad header' },
+				{ sandboxExposureMode: 'proxy' },
+			),
+		).toThrow(/MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER/);
 	});
 
 	it('requires a pinned fargate task-definition revision', () => {
@@ -844,7 +892,7 @@ describe('sandbox image list', () => {
 		expect(resolveSandboxImages({})).toEqual([]);
 	});
 
-	it.each(['local', 'none', 'noop', 'fargate'])(
+	it.each(['local', 'none', 'noop', 'fargate', 'external-kernel'])(
 		'resolveSandboxImages is empty for %s',
 		(backend) => {
 			expect(

@@ -177,7 +177,7 @@ function checkSandboxConfig(env: Env, deps: ApiDeps): CheckOutcome {
 	}
 	if (
 		!env.MARIMOHUB_COMPUTE_IMAGE &&
-		!['library', 'local', 'none', 'noop', 'fargate'].includes(backend)
+		!['library', 'local', 'none', 'noop', 'fargate', 'external-kernel'].includes(backend)
 	) {
 		issues.push(
 			'MARIMOHUB_COMPUTE_IMAGE is unset (the kernel image, or a comma-separated list of images)',

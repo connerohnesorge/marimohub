@@ -616,6 +616,7 @@ packages/
   compute-kubernetes/     Kubernetes adapter (Pod + Service, optional Ingress)
   compute-container/      Docker and Podman adapters (a container per kernel)
   compute-e2b/            E2B sandboxes adapter (bring-your-own e2b SDK)
+  compute-external-kernel/ per-user marimo server run by an external service
   compute-commons/        vendor-free helpers shared by the compute adapters
   compute-local/          local host-subprocess adapter (dev)
   object-browser-commons/ shared transport, preview, and validation helpers

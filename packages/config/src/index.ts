@@ -201,6 +201,7 @@ function dataPreviewFromEnv(
 		image !== '' &&
 		computeBackendValue !== 'local' &&
 		computeBackendValue !== 'e2b' &&
+		computeBackendValue !== 'external-kernel' &&
 		computeBackendValue !== 'none' &&
 		computeBackendValue !== 'noop';
 	const maxConcurrent = parsePositiveIntEnv(
@@ -646,6 +647,18 @@ export function createFromEnv(
 		env.MARIMOHUB_COMPUTE_PROFILE_OVERRIDE,
 	);
 	const editorSandboxSharing = parseEditorSandboxSharing(env);
+	if (computeBackendValue === 'external-kernel' && editorSandboxSharing !== 'exclusive') {
+		// A shared editor sandbox would put one user's kernel in front of another.
+		throw new ConfigError(
+			'The external-kernel backend requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive',
+			{
+				variable: 'MARIMOHUB_EDITOR_SANDBOX_SHARING',
+				remediation:
+					'Set MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive so each session runs in the personal kernel of its owner.',
+				docs: 'docs/setup/compute/external-kernel.md',
+			},
+		);
+	}
 	const userHome = makeSandboxUserHome(env, editorSandboxSharing);
 	const profileNotice = unsupportedBackendNotice(
 		computeBackendValue,
@@ -744,7 +757,12 @@ export function createFromEnv(
 			auth: parseSandboxAuth(env.MARIMOHUB_SANDBOX_AUTH),
 			appBaseUrl: env.MARIMOHUB_APP_BASE_URL,
 			persistWorkspace: parsePersistWorkspace(env),
-			automaticThumbnails: parseBool(env, 'MARIMOHUB_AUTOMATIC_THUMBNAILS', true),
+			// Thumbnails render inside the sandbox, which an external kernel does not allow.
+			automaticThumbnails: parseBool(
+				env,
+				'MARIMOHUB_AUTOMATIC_THUMBNAILS',
+				computeBackendValue !== 'external-kernel',
+			),
 			sessionLifetime,
 			images: sandboxImages,
 			resources: computeResources,
