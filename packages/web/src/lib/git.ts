@@ -233,6 +233,23 @@ export function isGitHubRepoInput(input: string): boolean {
 	);
 }
 
+export function isGitLabRepoInput(input: string): boolean {
+	const parsed = parseRepoInput(input);
+	if (
+		!parsed ||
+		(parsed.url &&
+			(parsed.url.protocol !== 'https:' ||
+				parsed.url.hostname.includes('github') ||
+				parsed.url.search ||
+				parsed.url.hash))
+	)
+		return false;
+	return parsed.path.split('/').every((part) => /^(?!\.+$)[A-Za-z0-9_.-]+$/.test(part));
+}
+
+export const GITLAB_REPO_INPUT_HINT =
+	'Pull mode supports GitLab repositories on the configured instance, e.g. https://gitlab.com/group/project';
+
 export const GITHUB_REPO_INPUT_HINT =
 	'Pull mode supports github.com repositories, e.g. acme/analytics or https://github.com/acme/analytics';
 

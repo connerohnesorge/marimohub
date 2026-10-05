@@ -504,9 +504,9 @@ Headless notebook runs on a cron schedule or on demand, with a durable run histo
 
 ## Source control publishing
 
-Connect Git-synced notebooks to GitHub through the server. Editors can create pull sources without a CI workflow. They can also compare and sync either source mode with **Sync now**. Managers can publish session edits as draft pull requests.
+Connect Git-synced notebooks to GitHub or GitLab through the server. Editors can create pull sources without a CI workflow. They can also compare and sync either source mode with **Sync now**. Managers can publish session edits as draft pull requests or merge requests.
 
-The server stores credential-free Git metadata for pull sources. Provider credentials never enter a notebook sandbox. GitHub.com is the only supported provider in this release. See [Syncing from external sources](./syncing.md) for source modes and limits.
+The server stores credential-free Git metadata for pull sources. Provider credentials never enter a notebook sandbox. GitHub.com and one configured GitLab HTTPS instance are supported. See [Syncing from external sources](./syncing.md) for source modes and limits.
 
 ### GitHub App
 
@@ -517,6 +517,16 @@ Create a GitHub App with Contents (read and write) and Pull requests (read and w
 | `MARIMOHUB_SOURCE_CONTROL_GITHUB_APP_ID` | Numeric app id from the GitHub App settings page. | — | — | `123456` |
 | `MARIMOHUB_SOURCE_CONTROL_GITHUB_APP_PRIVATE_KEY` 🔒 | PKCS8 or PKCS1 PEM private key downloaded for the GitHub App, or its single-line base64 encoding. Held by the server and never injected into notebook sandboxes. | — | — | `-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----` |
 | `MARIMOHUB_SOURCE_CONTROL_GITHUB_ALLOWED_REPOSITORIES` | Optional JSON array of `{resource, projects}` rules. Unset or blank policies keep shared access with a startup warning. `[]` denies all. See [GitHub project policies](syncing.md#github-project-policies) for syntax. | — | — | `[{"resource":"team/notebooks","projects":["proj-0000000000000000"]}]` |
+
+### GitLab token
+
+Use a service-account, group, or project access token with the `api` scope and Developer access to the target repositories. Set the token to enable GitLab pull sources, drift checks, sync, and merge-request publishing. Credentials stay on the server; no webhook or CI workflow is required.
+
+| Variable | Description | Required | Default | Example |
+| --- | --- | --- | --- | --- |
+| `MARIMOHUB_SOURCE_CONTROL_GITLAB_TOKEN` 🔒 | Access token used by the server for repository reads, Git pushes, and merge requests. Never injected into notebook sandboxes. | — | — | — |
+| `MARIMOHUB_SOURCE_CONTROL_GITLAB_BASE_URL` | HTTPS origin of the GitLab instance. Root-path installations only; authenticated requests and repository URLs must use this origin. Redirects are rejected. | — | `https://gitlab.com` | `https://gitlab.example.com` |
+| `MARIMOHUB_SOURCE_CONTROL_GITLAB_ALLOWED_REPOSITORIES` | Optional JSON array of `{resource, projects}` rules. Resources are repository URLs on the configured instance or case-sensitive `group/subgroup/project` paths. Unset or blank policies keep shared access with a startup warning. `[]` denies all. See [GitLab project policies](syncing.md#gitlab-project-policies). | — | — | `[{"resource":"team/notebooks","projects":["proj-0000000000000000"]}]` |
 
 ## Workload Identity Federation
 

@@ -1,7 +1,6 @@
 # Source-control publishing
 
-marimohub can publish edits from a git-synced notebook as a provider change request. The first
-implementation opens a draft GitHub pull request through a GitHub App. Capture is provider-neutral
+marimohub can publish edits from a git-synced notebook as a provider change request. GitHub uses a GitHub App to open draft pull requests; GitLab uses a server token to open draft merge requests. Capture is provider-neutral
 and can include multiple added, modified, or deleted files.
 
 ## Trust boundary
@@ -49,7 +48,7 @@ Capture selects one of two strategies automatically and records the choice in
   configured entry notebook with the immutable source version, preserving compatibility with
   copy-based sandbox backends.
 
-Pull-mode GitHub sources store a shallow Git directory for the exact synced
+Pull-mode GitHub and GitLab sources store a shallow Git directory for the exact synced
 commit. The control plane restores it when the session starts. Repository
 credentials never enter the sandbox. Pull sources therefore use
 `git-working-tree`. Push sources use this strategy only when the uploaded archive
@@ -85,17 +84,15 @@ GitHub source control. If only one variable is set, startup fails. The key can b
 single-line base64 encoding of the PEM. No GitHub App webhook is required.
 
 The GitHub App supports publishing and
-[server sync](../docs/syncing.md#sync-now-with-github). Project editors can
+[server sync](../docs/syncing.md#sync-now-with-github-or-gitlab). Project editors can
 compare a synced notebook with its branch head and pull that commit on demand. Pulls use the same
 workspace parser and limits as pushed archives. The drift and sync endpoints always use the
 source coordinates stored on the notebook. They do not accept a repository from the caller.
 
-The repositories selected during App installation define the v1 repository authorization
-boundary. Marimohub does not keep a second allowlist that binds projects or tenants to an App
-installation. A project manager can configure or publish to any repository on which the App is
-installed. A project editor can pull from the repository configured on the notebook. Multi-tenant
-deployments must use narrowly selected installations. Do not install the App on repositories that
-project managers must not share.
+The repositories selected during App installation bound credential access. Optional
+`MARIMOHUB_SOURCE_CONTROL_GITHUB_ALLOWED_REPOSITORIES` project/resource rules restrict each
+operation before the adapter runs. GitLab has a separate policy variable. Unset policies retain
+shared access with a startup warning; explicit `[]` policies deny all.
 
 The adapter discovers the installation for the target repository and creates a short-lived token.
 The token is restricted to that repository and to the configured App permissions. During
@@ -167,17 +164,25 @@ still race under concurrent requests and is not used as a substitute.
 
 The combined endpoint requires a project manager. A future standalone capture endpoint can permit
 editors to save proposals while retaining manager approval for publication. Provider commits use
-the GitHub App identity as committer and include the authenticated marimohub user in a
+the integration identity as committer and include the authenticated marimohub user in a
 `Co-authored-by` trailer. The proposal manifest and audit event retain the user's stable marimohub
 identity.
 
 ## Extension path
 
 Provider support lives behind `SourceControlPublisher`; the API and proposal service do not import
-the GitHub adapter. The port has a required create operation and an optional update operation. A
-GitLab, Bitbucket, or other provider adds an adapter and registers it in the configuration
+provider adapters. The port has a required create operation and an optional update operation. A
+Bitbucket or other provider adds an adapter and registers it in the configuration
 composition root. The provider owns authentication and API-specific branch/merge request
 operations, while the proposal format and authorization remain unchanged.
 
 Additional capture strategies are capture-policy extensions, not provider rewrites. They must emit
 the same bounded, immutable change model and define how they identify generated or runtime files.
+
+## GitLab adapter
+
+`@marimo-hub/source-control-gitlab` implements both source-control ports with a server-held access token. It uses GitLab REST for branch resolution, pinned archives, and MR metadata; bounded Git smart HTTP fetches supply pull-source metadata and proposal objects. Common archive and Git-fetch helpers live in `@marimo-hub/source-control-commons`.
+
+Publication creates Git trees and commits locally and pushes only the proposal ref. `isomorphic-git` exposes the server's advertised old OID through `onPrePush`; the adapter requires the expected OID (zero for creation) before uploading. The receive-pack command carries that same old OID, so GitLab rejects changes between advertisement and push even for replacement commits. Never replace this with a REST `force` commit or a branch check followed by an unconditional force push.
+
+Provider policy dispatch includes the provider id, keeping GitHub and GitLab authorizers independent when repository paths coincide. GitLab tokens are redacted in the configuration summary and passed only as request headers to the configured HTTPS origin; saved remotes contain no credentials.

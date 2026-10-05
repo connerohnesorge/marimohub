@@ -1801,7 +1801,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 	{
 		name: 'Source control publishing',
 		description:
-			'Connect Git-synced notebooks to GitHub through the server. Editors can create pull sources without a CI workflow. They can also compare and sync either source mode with **Sync now**. Managers can publish session edits as draft pull requests.\n\nThe server stores credential-free Git metadata for pull sources. Provider credentials never enter a notebook sandbox. GitHub.com is the only supported provider in this release. See [Syncing from external sources](./syncing.md) for source modes and limits.',
+			'Connect Git-synced notebooks to GitHub or GitLab through the server. Editors can create pull sources without a CI workflow. They can also compare and sync either source mode with **Sync now**. Managers can publish session edits as draft pull requests or merge requests.\n\nThe server stores credential-free Git metadata for pull sources. Provider credentials never enter a notebook sandbox. GitHub.com and one configured GitLab HTTPS instance are supported. See [Syncing from external sources](./syncing.md) for source modes and limits.',
 		backends: [
 			{
 				name: 'GitHub App',
@@ -1829,6 +1829,38 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						name: 'GitHub repository project policy',
 						description:
 							'Optional JSON array of `{resource, projects}` rules. Unset or blank policies keep shared access with a startup warning. `[]` denies all. See [GitHub project policies](syncing.md#github-project-policies) for syntax.',
+						example: '[{"resource":"team/notebooks","projects":["proj-0000000000000000"]}]',
+						optIn: true,
+					},
+				],
+			},
+			{
+				name: 'GitLab token',
+				description:
+					'Use a service-account, group, or project access token with the `api` scope and Developer access to the target repositories. Set the token to enable GitLab pull sources, drift checks, sync, and merge-request publishing. Credentials stay on the server; no webhook or CI workflow is required.',
+				vars: [
+					{
+						id: 'MARIMOHUB_SOURCE_CONTROL_GITLAB_TOKEN',
+						name: 'GitLab access token',
+						description:
+							'Access token used by the server for repository reads, Git pushes, and merge requests. Never injected into notebook sandboxes.',
+						secret: true,
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_SOURCE_CONTROL_GITLAB_BASE_URL',
+						name: 'GitLab instance',
+						description:
+							'HTTPS origin of the GitLab instance. Root-path installations only; authenticated requests and repository URLs must use this origin. Redirects are rejected.',
+						default: 'https://gitlab.com',
+						example: 'https://gitlab.example.com',
+						optIn: true,
+					},
+					{
+						id: 'MARIMOHUB_SOURCE_CONTROL_GITLAB_ALLOWED_REPOSITORIES',
+						name: 'GitLab repository project policy',
+						description:
+							'Optional JSON array of `{resource, projects}` rules. Resources are repository URLs on the configured instance or case-sensitive `group/subgroup/project` paths. Unset or blank policies keep shared access with a startup warning. `[]` denies all. See [GitLab project policies](syncing.md#gitlab-project-policies).',
 						example: '[{"resource":"team/notebooks","projects":["proj-0000000000000000"]}]',
 						optIn: true,
 					},

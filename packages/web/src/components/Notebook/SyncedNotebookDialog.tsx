@@ -14,6 +14,9 @@ import {
 	ENTRY_NOTEBOOK_HINT,
 	ENTRY_NOTEBOOK_PATTERN,
 	GITHUB_REPO_INPUT_HINT,
+	GITLAB_REPO_INPUT_HINT,
+	isGitLabRepoInput,
+	providerLabel,
 	isGitHubRepoInput,
 	isRepoInput,
 	normalizeRootPathInput,
@@ -40,6 +43,7 @@ export interface SyncedNotebookDialogProps {
 
 const syncedSchema = z
 	.object({
+		provider: z.enum(['github', 'gitlab']),
 		syncMode: z.enum(['push', 'pull']),
 		title: requiredText('Notebook name'),
 		repo: requiredText('Repository').refine(isRepoInput, REPO_INPUT_HINT),
@@ -50,17 +54,22 @@ const syncedSchema = z
 		computeProfile: z.string(),
 	})
 	.superRefine((value, context) => {
-		if (value.syncMode === 'pull' && isRepoInput(value.repo) && !isGitHubRepoInput(value.repo)) {
+		if (
+			value.syncMode === 'pull' &&
+			isRepoInput(value.repo) &&
+			!(value.provider === 'gitlab' ? isGitLabRepoInput(value.repo) : isGitHubRepoInput(value.repo))
+		) {
 			context.addIssue({
 				code: 'custom',
 				path: ['repo'],
-				message: GITHUB_REPO_INPUT_HINT,
+				message: value.provider === 'gitlab' ? GITLAB_REPO_INPUT_HINT : GITHUB_REPO_INPUT_HINT,
 			});
 		}
 	});
 
-const emptyValues = (syncMode: 'push' | 'pull') => ({
+const emptyValues = (syncMode: 'push' | 'pull', provider: 'github' | 'gitlab') => ({
 	syncMode,
+	provider,
 	title: '',
 	repo: '',
 	branch: 'main',
@@ -77,15 +86,17 @@ export function SyncedNotebookDialog({
 	onCreated,
 }: SyncedNotebookDialogProps) {
 	const { data: capabilities } = useCapabilitiesQuery();
-	const pullAvailable = (capabilities?.source_control?.pull_source_providers ?? []).includes(
-		'github',
+	const pullProviders = (capabilities?.source_control?.pull_source_providers ?? []).filter(
+		(provider): provider is 'github' | 'gitlab' => provider === 'github' || provider === 'gitlab',
 	);
+	const pullAvailable = pullProviders.length > 0;
+	const initialProvider = pullProviders[0] ?? 'github';
 	const sandboxImages = capabilities?.sandbox_images ?? [];
 	const offersImageChoice = sandboxImages.length > 1;
 	const computeProfiles = capabilities?.compute_profiles ?? [];
 	const offersComputeChoice =
 		capabilities?.compute_profile_override === 'editors' && computeProfiles.length > 1;
-	const initialValues = emptyValues(pullAvailable ? 'pull' : 'push');
+	const initialValues = emptyValues(pullAvailable ? 'pull' : 'push', initialProvider);
 	const createSynced = useCreateSyncedNotebook(projectId);
 	const form = useAppForm({
 		defaultValues: initialValues,
@@ -100,6 +111,7 @@ export function SyncedNotebookDialog({
 					root_path: normalizeRootPathInput(value.rootPath) || undefined,
 					entry_notebook: value.entryNotebook.trim(),
 					sync_mode: value.syncMode,
+					...(value.syncMode === 'pull' ? { provider: value.provider } : {}),
 					...(value.baseImage !== DEFAULT_BASE_IMAGE ? { base_image: value.baseImage } : {}),
 					...(value.computeProfile !== DEFAULT_COMPUTE_PROFILE
 						? { compute_profile: value.computeProfile }
@@ -126,8 +138,12 @@ export function SyncedNotebookDialog({
 	});
 	useSeedOnOpen(form, isOpen, initialValues);
 	useEffect(() => {
-		if (isOpen && pullAvailable) form.setFieldValue('syncMode', 'pull');
-	}, [form, isOpen, pullAvailable]);
+		if (isOpen && pullAvailable) {
+			form.setFieldValue('syncMode', 'pull');
+			form.setFieldValue('provider', initialProvider);
+		}
+	}, [form, isOpen, pullAvailable, initialProvider]);
+	const provider = useSelector(form.store, (state) => state.values.provider);
 	const syncMode = useSelector(form.store, (state) => state.values.syncMode);
 
 	return (
@@ -149,7 +165,10 @@ export function SyncedNotebookDialog({
 							options={[
 								{
 									value: 'pull',
-									label: 'Connect to GitHub',
+									label:
+										pullProviders.length === 1
+											? `Connect to ${providerLabel(initialProvider)}`
+											: 'Connect repository',
 									description: 'The server pulls the repository; no CI setup is required.',
 								},
 								{
@@ -179,13 +198,28 @@ export function SyncedNotebookDialog({
 					)}
 				</form.AppField>
 			)}
+			{syncMode === 'pull' && pullProviders.length > 1 && (
+				<form.AppField name="provider">
+					{(f) => (
+						<f.RadioGroupField
+							label="Source control provider"
+							options={pullProviders.map((provider) => ({
+								value: provider,
+								label: providerLabel(provider),
+							}))}
+						/>
+					)}
+				</form.AppField>
+			)}
 			<form.AppField name="repo">
 				{(f) => (
 					<f.TextField
 						label="Repository"
 						placeholder={
 							syncMode === 'pull'
-								? 'owner/repo'
+								? provider === 'gitlab'
+									? 'https://gitlab.example.com/group/project'
+									: 'owner/repo'
 								: 'owner/repo or https://gitlab.example.com/group/project'
 						}
 					/>

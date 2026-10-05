@@ -69,7 +69,7 @@ describe('ConfiguredSourceControlRegistry', () => {
 			await publisher.updateChangeRequest!({ ...input, changeRequest: adapter.publication }),
 		).toEqual(adapter.publication);
 		expect(authorize.mock.calls).toEqual(
-			Array.from({ length: 6 }, () => [input.repository, projectId]),
+			Array.from({ length: 6 }, () => ['test', input.repository, projectId]),
 		);
 	});
 

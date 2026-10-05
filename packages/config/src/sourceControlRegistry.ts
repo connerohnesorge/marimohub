@@ -6,7 +6,7 @@ import type {
 import type { ProjectId } from '@marimo-hub/core/ids';
 import { ConfigError } from './errors';
 
-type AuthorizeRepository = (repository: string, projectId?: ProjectId) => void;
+type AuthorizeRepository = (provider: string, repository: string, projectId?: ProjectId) => void;
 type RepositoryArgument = string | { repository: string };
 
 export class ConfiguredSourceControlRegistry implements SourceControlRegistry {
@@ -33,12 +33,14 @@ export class ConfiguredSourceControlRegistry implements SourceControlRegistry {
 			provider,
 			supportsRepository: (repository) => {
 				if (!reader.supportsRepository(repository)) return false;
-				this.authorize!(repository, projectId);
+				this.authorize!(provider, repository, projectId);
 				return true;
 			},
-			getBranchHead: this.guard(reader.getBranchHead.bind(reader), projectId),
-			fetchWorkspace: this.guard(reader.fetchWorkspace.bind(reader), projectId),
-			...(fetchGitDirectory ? { fetchGitDirectory: this.guard(fetchGitDirectory, projectId) } : {}),
+			getBranchHead: this.guard(reader.getBranchHead.bind(reader), provider, projectId),
+			fetchWorkspace: this.guard(reader.fetchWorkspace.bind(reader), provider, projectId),
+			...(fetchGitDirectory
+				? { fetchGitDirectory: this.guard(fetchGitDirectory, provider, projectId) }
+				: {}),
 		};
 	}
 
@@ -48,9 +50,13 @@ export class ConfiguredSourceControlRegistry implements SourceControlRegistry {
 		const updateChangeRequest = publisher.updateChangeRequest?.bind(publisher);
 		return {
 			provider,
-			openChangeRequest: this.guard(publisher.openChangeRequest.bind(publisher), projectId),
+			openChangeRequest: this.guard(
+				publisher.openChangeRequest.bind(publisher),
+				provider,
+				projectId,
+			),
 			...(updateChangeRequest
-				? { updateChangeRequest: this.guard(updateChangeRequest, projectId) }
+				? { updateChangeRequest: this.guard(updateChangeRequest, provider, projectId) }
 				: {}),
 		};
 	}
@@ -71,11 +77,12 @@ export class ConfiguredSourceControlRegistry implements SourceControlRegistry {
 
 	private guard<Args extends [RepositoryArgument, ...unknown[]], Result>(
 		operation: (...args: Args) => Promise<Result>,
+		provider: string,
 		projectId?: ProjectId,
 	): (...args: Args) => Promise<Result> {
 		return async (...args) => {
 			const first = args[0];
-			this.authorize!(typeof first === 'string' ? first : first.repository, projectId);
+			this.authorize!(provider, typeof first === 'string' ? first : first.repository, projectId);
 			return operation(...args);
 		};
 	}

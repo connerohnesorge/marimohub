@@ -11,10 +11,10 @@ description: Sync read-only notebooks into marimohub from external Git repositor
 marimohub can serve a notebook whose source of truth is an external **Git
 repository**. Choose a source mode when you create the notebook:
 
-| Mode   | Primary sync path               | Credential | Supported path   | Git metadata                    |
-| ------ | ------------------------------- | ---------- | ---------------- | ------------------------------- |
-| `push` | CI upload or **Sync now**       | Sync token | Root or subtree  | Only when the upload has `.git` |
-| `pull` | Create request and **Sync now** | GitHub App | Any subdirectory | Included in every version       |
+| Mode   | Primary sync path               | Credential                 | Supported path   | Git metadata                    |
+| ------ | ------------------------------- | -------------------------- | ---------------- | ------------------------------- |
+| `push` | CI upload or **Sync now**       | Sync token                 | Root or subtree  | Only when the upload has `.git` |
+| `pull` | Create request and **Sync now** | GitHub App or GitLab token | Any subdirectory | Included in every version       |
 
 The source mode cannot change after creation. For a push source, **Sync now**
 updates the files but does not add Git metadata to the version.
@@ -29,8 +29,8 @@ session edits to the provider without changing these stored versions.
 ```
 ┌─────────────┐   CI archive + token   ┌──────────────────┐
 │ your repo   │ ─────────────────────▶ │ POST {sync_url}  │ ──┐
-│             │   GitHub App pull      ├──────────────────┤   │
-│  (GitHub)   │ ─────────────────────▶ │ source/sync API  │ ──┤
+│             │   Provider pull        ├──────────────────┤   │
+│ GitHub/GitLab│ ─────────────────────▶ │ source/sync API  │ ──┤
 └─────────────┘                        └──────────────────┘   │
                                                            ▼
                                                 ┌─────────────────────┐
@@ -76,23 +76,22 @@ Content-Type: application/json
 }
 ```
 
-| Field            | Required | Notes                                                                                     |
-| ---------------- | -------- | ----------------------------------------------------------------------------------------- |
-| `provider`       | no       | `github` or `gitlab`. Usually derived from `repo`.                                        |
-| `repo`           | yes      | Repository URL or `owner/name`. Pull mode currently supports GitHub.com only.             |
-| `branch`         | yes      | Branch this notebook tracks.                                                              |
-| `root_path`      | no       | Repo subdirectory whose tree is mirrored. Defaults to the repo root (`""`).               |
-| `entry_notebook` | yes      | The notebook to open (`.py`, `.md`, `.markdown`, or `.qmd`), **relative to `root_path`**. |
-| `sync_mode`      | no       | `push` (default) or `pull`. Pull mode is GitHub-only.                                     |
+| Field            | Required | Notes                                                                                             |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `provider`       | no       | `github` or `gitlab`. Usually derived from `repo`.                                                |
+| `repo`           | yes      | Repository URL or `owner/name`. Pull mode supports GitHub.com and the configured GitLab instance. |
+| `branch`         | yes      | Branch this notebook tracks.                                                                      |
+| `root_path`      | no       | Repo subdirectory whose tree is mirrored. Defaults to the repo root (`""`).                       |
+| `entry_notebook` | yes      | The notebook to open (`.py`, `.md`, `.markdown`, or `.qmd`), **relative to `root_path`**.         |
+| `sync_mode`      | no       | `push` (default) or `pull`. Pull mode requires a configured reader for the repository provider.   |
 
 `repo` accepts `owner/repo` or a repository URL. The shorthand refers to GitHub,
 unless `provider` is `gitlab`. GitLab URLs can contain nested groups, such as
 `https://gitlab.example.com/group/subgroup/project`. marimohub converts
 scheme-less and SSH remotes to HTTPS when it stores them.
 
-marimohub normally derives `provider` from the host name. Set it only when a
-custom host does not identify the provider. The value controls provider links
-in the web interface. If neither the host nor `provider` identifies a provider,
+marimohub normally derives `provider` from the host name. Set it to `gitlab` for
+GitLab shorthand and custom hosts that do not identify the provider. The value selects the server adapter and provider links in the web interface. If neither the host nor `provider` identifies a provider,
 the interface shows the sync metadata without links.
 
 For push mode, the response returns the notebook plus its sync credentials:
@@ -111,7 +110,7 @@ For push mode, the response returns the notebook plus its sync credentials:
 The `sync_token` is shown **once**. Store it as a CI secret. The server keeps
 only a SHA-256 of it.
 
-### Pull mode: connect a GitHub repository
+### Pull mode: connect a repository
 
 Use pull mode when marimohub must sync the repository. Set `sync_mode` to
 `pull`:
@@ -128,13 +127,13 @@ Use pull mode when marimohub must sync the repository. Set `sync_mode` to
 }
 ```
 
-The deployment must list `"github"` in `source_control.pull_source_providers`
+The deployment must list the repository provider (`"github"` or `"gitlab"`) in `source_control.pull_source_providers`
 from `GET /api/v1/capabilities`. The create request reads the branch head before
 it returns. On success, the response contains an active notebook without
 `sync_url` or `sync_token`.
 
 If the first pull fails, the response contains a draft notebook and
-`sync_error`. Correct the repository coordinates or GitHub App access. Then use
+`sync_error`. Correct the repository coordinates or provider access. Then use
 **Sync now** to retry.
 
 `root_path` selects the subtree to mirror, such as the `python/` directory of a
@@ -149,7 +148,7 @@ it. The sparse checkout is best-effort. If it fails, `git status` reports the
 rest of the repository as deleted. Proposals still contain only changes inside
 the subtree, because capture runs with `--relative`. Session startup fails if
 the Git directory cannot be restored completely.
-The GitHub installation token stays on the server.
+Provider tokens stay on the server.
 
 Git data larger than 25 MB is rejected. Use push mode for a repository that
 exceeds this limit. The stored `.git` covers the whole repository, not only
@@ -179,7 +178,7 @@ For an existing custom-host source, a bare `owner/repo` continues to use that
 host. GitHub.com shorthand remains bare.
 
 The source mode cannot change. A pull source must continue to use a supported
-GitHub.com repository. marimohub rejects unsupported source changes before it
+repository on GitHub.com or the configured GitLab instance. marimohub rejects unsupported source changes before it
 stores them.
 
 Before the first successful sync, changes take effect immediately. After that,
@@ -189,15 +188,13 @@ the meantime. Editing the source does not change the sync URL or rotate its
 token. Pull sources promote pending settings on the next **Sync now**. Push
 sources promote them on a matching CI upload or server sync.
 
-## Sync now with GitHub
+## Sync now with GitHub or GitLab
 
-**Sync now** reads a GitHub branch through the server. Pull sources use this
+**Sync now** reads a repository branch through the server. Pull sources use this
 action as their normal sync method. Push sources can use it as an alternative to
 a CI upload.
 
-The deployment must have a configured
-[GitHub App](configuration.md#source-control-publishing). This feature currently
-supports GitHub.com repositories only.
+The deployment must have a configured [GitHub App or GitLab token](configuration.md#source-control-publishing) for the repository provider.
 
 The deployment advertises supported providers in
 `source_control.sync_providers` from `GET /api/v1/capabilities`. The list
@@ -450,16 +447,16 @@ cannot start before the first successful sync (`400` otherwise).
 
 When [source-control publishing](configuration.md#source-control-publishing) is
 configured, a project manager can publish edits from a persistent editor
-session. The current GitHub App integration creates an immutable proposal and a
-draft pull request.
+session. GitHub creates a draft pull request; GitLab creates a draft merge request.
+Both store an immutable proposal.
 
-After the first publication, the editor shows **View PR** and two more actions:
+After the first publication, the editor shows **View PR** (GitHub) or **View MR** (GitLab) and two more actions:
 
-- **Update PR** publishes a new proposal to the same pull request. It adds a
+- **Update PR** or **Update MR** publishes a new proposal to the same change request. It adds a
   commit when possible. Otherwise, marimohub rebuilds the proposal branch from
   the synced base. It never overwrites external branch changes.
-- **Create new PR** opens another pull request and replaces the displayed link.
-  The previous pull request remains on GitHub.
+- **Create new PR** or **Create new MR** opens another change request and replaces the displayed link.
+  The previous change request remains on the provider.
 
 The web interface uses this endpoint:
 
@@ -491,3 +488,35 @@ and updates. The App installation must also allow the repository. The policy doe
 user-supplied credentials.
 
 Restart the hub to apply policy changes.
+
+## GitLab setup
+
+Set `MARIMOHUB_SOURCE_CONTROL_GITLAB_TOKEN` to a personal token for a service account, a group token, or a project token with `api` scope and Developer access to each target repository. See [GitLab token authentication](https://docs.gitlab.com/user/project/settings/project_access_tokens/) and [repository permissions](https://docs.gitlab.com/user/permissions/#repository). GitLab.com is the default instance. For a self-managed instance, set `MARIMOHUB_SOURCE_CONTROL_GITLAB_BASE_URL` to its HTTPS origin, such as `https://code.example.com`. Installations under a URL subpath and redirects are not supported. Use full repository URLs for self-managed sources; set `provider` to `gitlab` if the hostname does not identify GitLab.
+
+Create a pull source using the existing notebook API:
+
+```json
+{
+	"title": "Sales dashboard",
+	"provider": "gitlab",
+	"repo": "https://gitlab.com/team/subgroup/analytics",
+	"branch": "main",
+	"root_path": "apps",
+	"entry_notebook": "dashboard.py",
+	"sync_mode": "pull"
+}
+```
+
+GitLab sources support drift checks, **Sync now**, and draft merge-request publishing. Pull sources retain credential-free Git metadata for multi-file capture. Managers can update the same MR or create a new one; publishing does not update the hub's synced version. Sync again after the MR is merged.
+
+MR commits use the token account's commit identity and include the notebook editor as a co-author. The adapter updates a proposal branch only while it still points to the previously published commit, including when rebuilding from the pinned source. External branch changes cause a conflict; closed or merged MRs and deleted branches require a new MR. Proposal branches (`marimohub/*`) must permit pushes and force updates; replacement pushes remain conditional on the expected commit. Protected branches that prohibit replacement pushes must use **Create new MR** instead.
+
+### GitLab project policies
+
+`MARIMOHUB_SOURCE_CONTROL_GITLAB_ALLOWED_REPOSITORIES` uses the same `{resource, projects}` rules as GitHub. Resources are full URLs on the configured instance or case-sensitive paths with nested groups. `"*"` allows any repository accessible to the token for the specified projects. An unset policy shares access across projects with a startup warning; `[]` denies all. Rules apply to reads, syncs, and MR creation and updates, and are independent of GitHub's rules.
+
+```bash
+MARIMOHUB_SOURCE_CONTROL_GITLAB_ALLOWED_REPOSITORIES='[{"resource":"team/subgroup/analytics","projects":["proj-0000000000000000"]}]'
+```
+
+Restart the hub after changing the instance, token, or policy. GitLab and GitHub can be configured together.

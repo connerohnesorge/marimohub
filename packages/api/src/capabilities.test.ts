@@ -81,39 +81,42 @@ describe('GET /api/v1/capabilities', () => {
 		});
 	});
 
-	it('reports configured source-control publisher and reader providers', async () => {
-		const none = makeTestDeps(new MemoryBucket(), { authenticator: authed });
-		expect(await expectOk(await createApi(none).request('/api/v1/capabilities'))).toMatchObject({
-			source_control: {
-				change_request_providers: [],
-				sync_providers: [],
-				pull_source_providers: [],
-			},
-		});
-
-		const configured = makeTestDeps(new MemoryBucket(), {
-			authenticator: authed,
-			sourceControl: stubSourceControl({
-				publisher: { provider: 'github', openChangeRequest: vi.fn() },
-				reader: {
-					provider: 'github',
-					supportsRepository: () => true,
-					getBranchHead: vi.fn(),
-					fetchWorkspace: vi.fn(),
-					fetchGitDirectory: vi.fn(),
+	it.each(['github', 'gitlab'])(
+		'reports %s source-control publisher and reader capabilities',
+		async (provider) => {
+			const none = makeTestDeps(new MemoryBucket(), { authenticator: authed });
+			expect(await expectOk(await createApi(none).request('/api/v1/capabilities'))).toMatchObject({
+				source_control: {
+					change_request_providers: [],
+					sync_providers: [],
+					pull_source_providers: [],
 				},
-			}),
-		});
-		expect(
-			await expectOk(await createApi(configured).request('/api/v1/capabilities')),
-		).toMatchObject({
-			source_control: {
-				change_request_providers: ['github'],
-				sync_providers: ['github'],
-				pull_source_providers: ['github'],
-			},
-		});
-	});
+			});
+
+			const configured = makeTestDeps(new MemoryBucket(), {
+				authenticator: authed,
+				sourceControl: stubSourceControl({
+					publisher: { provider, openChangeRequest: vi.fn() },
+					reader: {
+						provider,
+						supportsRepository: () => true,
+						getBranchHead: vi.fn(),
+						fetchWorkspace: vi.fn(),
+						fetchGitDirectory: vi.fn(),
+					},
+				}),
+			});
+			expect(
+				await expectOk(await createApi(configured).request('/api/v1/capabilities')),
+			).toMatchObject({
+				source_control: {
+					change_request_providers: [provider],
+					sync_providers: [provider],
+					pull_source_providers: [provider],
+				},
+			});
+		},
+	);
 
 	it('reports the role derived from the current OIDC session', async () => {
 		const authenticator: Authenticator = {

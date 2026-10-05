@@ -154,6 +154,56 @@ describe('Source drift and sync-now routes', () => {
 		).toBeNull();
 	});
 
+	it('creates, checks drift and syncs a self-managed GitLab pull source', async () => {
+		let commit = HEAD;
+		const reader = stubReader({
+			provider: 'gitlab',
+			getBranchHead: async () => ({ commit }),
+			fetchGitDirectory: async () => [{ path: 'HEAD', bytes: encode(commit) }],
+		});
+		const sourceControl = stubSourceControl({ reader });
+		const getReader = vi.spyOn(sourceControl, 'getReader');
+		const { request, deps } = createTestApi({ bucket, deps: { sourceControl } });
+		const created = await expectOk<{ notebook: { id: NotebookId }; sync_token?: string }>(
+			await request('POST', `/projects/${projectId}/notebooks/git`, {
+				title: 'GitLab app',
+				description: 'Connected',
+				provider: 'gitlab',
+				repo: 'https://code.example.com/team/subgroup/repo',
+				branch: 'main',
+				root_path: 'apps',
+				entry_notebook: 'app.py',
+				sync_mode: 'pull',
+			}),
+			201,
+		);
+		const nid = created.notebook.id;
+		expect(created.sync_token).toBeUndefined();
+		expect((await deps.services.notebooks.getNotebook(projectId, nid)).source).toMatchObject({
+			provider: 'gitlab',
+			commit: HEAD,
+			sync_mode: 'pull',
+			root_path: 'apps',
+		});
+		expect(
+			await expectOk(await request('POST', `/projects/${projectId}/notebooks/${nid}/source/sync`)),
+		).toMatchObject({ synced: false, commit: HEAD });
+		commit = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+		expect(
+			await expectOk(await request('GET', `/projects/${projectId}/notebooks/${nid}/source/drift`)),
+		).toMatchObject({ remote_commit: commit, in_sync: false });
+		expect(
+			await expectOk(await request('POST', `/projects/${projectId}/notebooks/${nid}/source/sync`)),
+		).toMatchObject({ synced: true, commit });
+		expect((await deps.services.notebooks.getNotebook(projectId, nid)).source).toMatchObject({
+			provider: 'gitlab',
+			commit,
+		});
+		expect(
+			getReader.mock.calls.every((call) => call[0] === 'gitlab' && call[1] === projectId),
+		).toBe(true);
+	});
+
 	it('returns the created notebook when the post-sync refetch fails', async () => {
 		const reader = stubReader({
 			fetchGitDirectory: async () => [{ path: 'HEAD', bytes: encode('HEAD') }],

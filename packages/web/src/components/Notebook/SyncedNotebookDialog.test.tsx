@@ -7,6 +7,7 @@ import { Toaster } from 'sonner';
 import { SyncedNotebookDialog } from './SyncedNotebookDialog';
 
 interface ResourceOptions {
+	pullProviders?: string[];
 	sandboxImages?: string[];
 	computeProfiles?: { name: string; cpu?: number; memory_bytes?: number }[];
 	computeProfileOverride?: 'none' | 'editors';
@@ -27,7 +28,7 @@ function renderDialog(
 						success: true,
 						data: {
 							source_control: {
-								pull_source_providers: available ? ['github'] : [],
+								pull_source_providers: resources.pullProviders ?? (available ? ['github'] : []),
 							},
 							sandbox_images: resources.sandboxImages ?? [],
 							compute_profiles: resources.computeProfiles ?? [],
@@ -268,6 +269,64 @@ describe('SyncedNotebookDialog', () => {
 		expect(screen.getByText(/pull mode supports github\.com repositories/i)).toBeInTheDocument();
 		expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
 		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['GitLab.com', 'https://gitlab.com/team/subgroup/notebooks'],
+		['a self-managed instance', 'https://code.example.com/team/subgroup/notebooks'],
+		['shorthand', 'team/notebooks'],
+	])('connects GitLab pull sources using %s', async (_label, repository) => {
+		const user = userEvent.setup();
+		const fetchImpl = vi.fn(
+			async (_url: RequestInfo | URL, _init?: RequestInit) =>
+				new Response(
+					JSON.stringify({
+						success: true,
+						data: { notebook: { id: 'nb-gitlab', title: 'Connected' } },
+					}),
+					{ headers: { 'content-type': 'application/json' } },
+				),
+		);
+		renderDialog(fetchImpl, true, { pullProviders: ['gitlab'] });
+		await screen.findByText('Connect to GitLab');
+		await user.type(screen.getByLabelText('Notebook name'), 'Connected');
+		await user.type(screen.getByLabelText('Repository'), repository);
+		await user.type(screen.getByLabelText('Notebook file'), 'app.py');
+		await user.click(screen.getByRole('button', { name: 'Create' }));
+		expect(JSON.parse(fetchImpl.mock.calls[0][1]!.body as string)).toMatchObject({
+			repo: repository,
+			provider: 'gitlab',
+			sync_mode: 'pull',
+		});
+	});
+
+	it('selects GitLab explicitly when both providers are configured', async () => {
+		const user = userEvent.setup();
+		const fetchImpl = vi.fn(
+			async (_url: RequestInfo | URL, _init?: RequestInit) =>
+				new Response(
+					JSON.stringify({
+						success: true,
+						data: { notebook: { id: 'nb-gitlab', title: 'Connected' } },
+					}),
+					{ headers: { 'content-type': 'application/json' } },
+				),
+		);
+		renderDialog(fetchImpl, true, { pullProviders: ['github', 'gitlab'] });
+		await screen.findByText('Connect repository');
+		await user.type(screen.getByLabelText('Notebook name'), 'Connected');
+		await user.type(
+			screen.getByLabelText('Repository'),
+			'https://code.example.com/team/subgroup/notebooks',
+		);
+		await user.type(screen.getByLabelText('Notebook file'), 'app.py');
+		expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+		await user.click(screen.getByRole('radio', { name: 'GitLab' }));
+		await user.click(screen.getByRole('button', { name: 'Create' }));
+		expect(JSON.parse(fetchImpl.mock.calls[0][1]!.body as string)).toMatchObject({
+			provider: 'gitlab',
+			sync_mode: 'pull',
+		});
 	});
 
 	it('rejects an unsafe folder before submitting', async () => {
