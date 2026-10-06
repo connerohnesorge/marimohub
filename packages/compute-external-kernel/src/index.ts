@@ -47,6 +47,7 @@ import type {
 	ListFilesResult,
 	MarimoLaunchSpec,
 	ReadFileResult,
+	RenderedThumbnail,
 	SandboxFileWrite,
 	SandboxInstance,
 	SandboxProcess,
@@ -495,6 +496,30 @@ class ExternalKernelSandbox implements SandboxInstance {
 			);
 		}
 		await discard(response);
+	}
+
+	/**
+	 * The service renders the HTML in a runtime with no handles and no network,
+	 * as the owner. A service without the route answers `unsupported`.
+	 */
+	async renderThumbnail(html: string, timeoutMs: number): Promise<RenderedThumbnail> {
+		const response = await this.provider.call(`${this.workspaceUrl}/thumbnail`, {
+			method: 'POST',
+			credential: this.credential(),
+			action: 'rendering a thumbnail',
+			body: new TextEncoder().encode(html),
+			headers: { 'content-type': 'text/html; charset=utf-8' },
+			allow: [404, 422],
+			timeoutMs,
+		});
+		if (response.status === 404) {
+			await discard(response);
+			return { status: 'unsupported' };
+		}
+		if (response.status === 422) {
+			return { status: (await errorCode(response)) === 'timeout' ? 'timeout' : 'render_failed' };
+		}
+		return { status: 'ok', png: new Uint8Array(await response.arrayBuffer()) };
 	}
 
 	async exposePort(port: number): Promise<ExposePortResult> {

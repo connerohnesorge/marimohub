@@ -775,12 +775,7 @@ export function createFromEnv(
 			auth: parseSandboxAuth(env.MARIMOHUB_SANDBOX_AUTH),
 			appBaseUrl: env.MARIMOHUB_APP_BASE_URL,
 			persistWorkspace: parsePersistWorkspace(env),
-			// Thumbnails render inside the sandbox, which an external kernel does not allow.
-			automaticThumbnails: parseBool(
-				env,
-				'MARIMOHUB_AUTOMATIC_THUMBNAILS',
-				defaultBackendValue !== 'external-kernel',
-			),
+			automaticThumbnails: parseBool(env, 'MARIMOHUB_AUTOMATIC_THUMBNAILS', true),
 			sessionLifetime,
 			images: sandboxImages,
 			resources: computeResources,

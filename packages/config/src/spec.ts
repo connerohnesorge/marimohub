@@ -1608,7 +1608,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_AUTOMATIC_THUMBNAILS',
 						name: 'Automatic notebook thumbnails',
 						description:
-							'Capture saved HTML once at editor shutdown when Playwright and Chromium are already installed. Never executes notebook code. Set false to disable.',
+							'Capture saved HTML once at editor shutdown when Playwright and Chromium are already installed. Never executes notebook code. External-kernel sessions ask the kernel service to render it instead. Set false to disable.',
 						default: 'true',
 					},
 					{

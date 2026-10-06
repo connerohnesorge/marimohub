@@ -206,6 +206,42 @@ describe('shutdown capture', () => {
 		expect(JSON.stringify(log.mock.calls)).not.toContain('private sandbox output');
 	});
 
+	it("uses a sandbox's own renderer instead of running a command", async () => {
+		const { notebooks, pid, nid } = await setup();
+		const sandbox = makeFakeSandbox().instance;
+		const exec = vi.spyOn(sandbox, 'exec');
+		const writeFiles = vi.spyOn(sandbox, 'writeFiles');
+		const renderThumbnail = vi.fn(async () => ({ status: 'ok' as const, png: thumbnailPng() }));
+
+		await captureThumbnail(
+			Object.assign(sandbox, { renderThumbnail }),
+			notebooks,
+			pid,
+			nid,
+			'kernel',
+		);
+
+		expect(renderThumbnail).toHaveBeenCalledWith('<div>saved</div>', expect.any(Number));
+		expect(exec).not.toHaveBeenCalled();
+		expect(writeFiles).not.toHaveBeenCalled();
+		expect((await notebooks.thumbnails.metadata(pid, nid)).source).toBe('automatic');
+	});
+
+	it('keeps the fallback when the renderer is unsupported', async () => {
+		const { notebooks, pid, nid } = await setup();
+		const renderThumbnail = vi.fn(async () => ({ status: 'unsupported' as const }));
+
+		await captureThumbnail(
+			Object.assign(makeFakeSandbox().instance, { renderThumbnail }),
+			notebooks,
+			pid,
+			nid,
+			'kernel',
+		);
+
+		expect((await notebooks.thumbnails.metadata(pid, nid)).source).toBeNull();
+	});
+
 	it('publishes PNG bytes from saved HTML and does not execute notebook code', async () => {
 		const { notebooks, pid, nid } = await setup();
 		const sandbox = makeFakeSandbox().instance;

@@ -46,6 +46,8 @@ class FakeKernelService {
 	readonly admins = new Set([ADMIN_EMAIL]);
 	readonly environments = new Map<string, unknown>();
 	readonly jobs = new Map<string, unknown>();
+	/** Whether the service offers the thumbnail route. */
+	thumbnails = true;
 	/** App sessions by id: who opened them and what was sent. */
 	readonly apps = new Map<string, { viewer: string; author: string; body: unknown }>();
 	forbidden = new Set<string>();
@@ -169,6 +171,13 @@ class FakeKernelService {
 			const { notebook } = JSON.parse(body.toString()) as { notebook: string };
 			return reply.status(200, { file: `/home/kira/workspaces/${workspace}/${notebook}` });
 		}
+		if (method === 'POST' && rest === '/thumbnail') {
+			if (!this.thumbnails) return reply.status(404, { error: { code: 'not_found' } });
+			if (body.toString().includes('BROKEN')) {
+				return reply.status(422, { error: { code: 'render_failed' } });
+			}
+			return reply.bytes(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+		}
 		if (method === 'PUT' && rest === '/environment') {
 			const environment = JSON.parse(body.toString()) as { env?: Record<string, string> };
 			if (environment.env?.REJECT) {
@@ -224,6 +233,7 @@ afterEach(() => {
 	service.environments.clear();
 	service.jobs.clear();
 	service.apps.clear();
+	service.thumbnails = true;
 	service.forbidden.clear();
 	service.admins.clear();
 	service.admins.add(ADMIN_EMAIL);
@@ -693,6 +703,26 @@ describe('ExternalKernelCompute', () => {
 			).rejects.toBeInstanceOf(ForbiddenError);
 			expect(service.requests).toEqual([]);
 		});
+	});
+
+	it('renders thumbnails in the service with the owner token, and reports a missing route', async () => {
+		makeProvider();
+		const sandbox = provider.create(SANDBOX, { owner: { projectId: PROJECT, userId: OWNER } });
+
+		const rendered = await asOwner(() => sandbox.renderThumbnail!('<div>saved</div>', 5000));
+		const failed = await asOwner(() => sandbox.renderThumbnail!('<div>BROKEN</div>', 5000));
+		service.thumbnails = false;
+		const missing = await asOwner(() => sandbox.renderThumbnail!('<div>saved</div>', 5000));
+
+		expect(rendered).toEqual({ status: 'ok', png: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) });
+		expect(failed).toEqual({ status: 'render_failed' });
+		expect(missing).toEqual({ status: 'unsupported' });
+		const [post] = service.requests;
+		expect(post.method).toBe('POST');
+		expect(post.url).toBe(`/api/external-kernel/v1/workspaces/${SANDBOX}/thumbnail`);
+		expect(post.headers.authorization).toBe(`Bearer ${ownerToken}`);
+		expect(post.headers['content-type']).toBe('text/html; charset=utf-8');
+		expect(post.body).toBe('<div>saved</div>');
 	});
 
 	describe('app sessions', () => {

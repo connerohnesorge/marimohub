@@ -47,7 +47,7 @@ describe('createFromEnv external-kernel compute', () => {
 		);
 	});
 
-	it('turns off in-sandbox thumbnails and sandbox data previews by default', () => {
+	it('keeps thumbnails on; external sessions ask the kernel service to render them', () => {
 		const deps = createFromEnv({
 			...env,
 			MARIMOHUB_INTEGRATIONS: 'on',
@@ -55,7 +55,7 @@ describe('createFromEnv external-kernel compute', () => {
 			MARIMOHUB_DATA_PREVIEW_IMAGE: 'preview-image',
 		});
 		expect(deps.compute.capabilities?.managedEnvironment).toBe(true);
-		expect(deps.sandbox.automaticThumbnails).toBe(false);
+		expect(deps.sandbox.automaticThumbnails).toBe(true);
 	});
 });
 

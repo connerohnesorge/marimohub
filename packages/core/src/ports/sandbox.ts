@@ -174,6 +174,11 @@ export interface ExecOptions {
 }
 
 /** One file to write into a sandbox. `Uint8Array` content is written verbatim. */
+export interface RenderedThumbnail {
+	status: 'ok' | 'render_failed' | 'timeout' | 'unsupported';
+	png?: Uint8Array;
+}
+
 export interface SandboxFileWrite {
 	path: string;
 	content: string | Uint8Array;
@@ -280,6 +285,12 @@ export interface SandboxInstance {
 	 * through `exec`. A backend without directory entries may treat it as a no-op.
 	 */
 	ensureDirectories?(paths: readonly string[]): Promise<void>;
+	/**
+	 * Render a notebook's HTML snapshot to a PNG thumbnail outside the hub, for a
+	 * sandbox that runs no commands. Without it the hub runs its own render
+	 * program in the sandbox. `unsupported` means the backend cannot render.
+	 */
+	renderThumbnail?(html: string, timeoutMs: number): Promise<RenderedThumbnail>;
 	exposePort(port: number, options: ExposePortOptions): Promise<ExposePortResult>;
 	destroy(): Promise<void>;
 	/**

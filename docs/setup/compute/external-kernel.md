@@ -263,9 +263,12 @@ authors without a kernel.
 - Per-notebook dependencies. The hub runs no `uv sync` or setup step; the
   kernel image is the environment.
 - Anything that runs a command in the sandbox: **Run as app**, VS Code
-  and OpenCode surfaces, in-sandbox thumbnails (off by default for this
-  backend), sandbox data previews, connection-aware idle detection, proposal
-  capture from Git, and MCP code execution.
+  and OpenCode surfaces, sandbox data previews, connection-aware idle
+  detection, proposal capture from Git, and MCP code execution.
+- Thumbnails need the service's thumbnail route. The hub sends the saved HTML
+  (never notebook code) to `POST /workspaces/{workspaceId}/thumbnail` with the
+  owner's token when it settles the session; a service without the route
+  answers `404` and the notebook keeps its previous thumbnail.
 - Warm pools and compute profiles.
 - Saving, ending, or refreshing credentials without a request from the owner.
   See [Saving and ending sessions](#saving-and-ending-sessions).
@@ -345,6 +348,7 @@ any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch
 | `GET /workspaces/{workspaceId}/list?path=<rel>`                                                 | `200 {"entries":[{"path":"<workspace-relative path>","type":"file"\|"directory","size":<n>}]}` for one level; `404` when the workspace or directory does not exist                                                              |
 | `POST /workspaces/{workspaceId}/open` `{"notebook","projectId","notebookId"}`                   | `200 {"file":"<marimo file key>"}`                                                                                                                                                                                              |
 | `DELETE /workspaces/{workspaceId}`                                                              | `2xx` or `404`                                                                                                                                                                                                                  |
+| `POST /workspaces/{workspaceId}/thumbnail` (`text/html` body)                                   | `200` PNG of the HTML, rendered with no handles and no network, at most 3 MiB; `422 {"error":{"code":"render_failed"\|"timeout"}}`; `404` when the service does not render thumbnails                                           |
 | `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`                          | Saves the open notebooks into the workspace, then closes them; runs no cell. `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller. |
 | `* /workspaces/{workspaceId}/proxy/{path}`                                                      | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                                                                                |
 | `POST /apps/sessions` `{"session","app","version","notebook","files","environment"}`            | `2xx {"session":"<the hub's id>"}`; `404 {"error":{"code":"no_kernel"}}` when the author has no kernel (see [Apps](#apps))                                                                                                      |
