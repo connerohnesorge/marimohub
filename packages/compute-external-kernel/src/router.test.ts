@@ -185,6 +185,55 @@ describe('ExternalKernelRouter', () => {
 		});
 	});
 
+	describe('kernelJobs', () => {
+		it("places an author's jobs by the same rule as their edit sessions", async () => {
+			const { fallback } = fallbackProvider();
+			const external = new ExternalKernelCompute({ baseUrl, now: () => NOW });
+			const router = new ExternalKernelRouter(external, fallback, {
+				enrolledUsers: [OWNER_EMAIL],
+			});
+			const stranger = { userId: 'user-stranger' as UserId, email: 'x@example.com' };
+
+			await expect(router.kernelJobs.runsJobsOf(stranger)).resolves.toBe(false);
+			expect(seen).toHaveLength(0);
+			await expect(asOwner(router, () => router.kernelJobs.runsJobsOf(owner))).resolves.toBe(true);
+			answer = { status: 404, body: { error: { code: 'no_kernel' } } };
+			await expect(asOwner(router, () => router.kernelJobs.runsJobsOf(owner))).resolves.toBe(false);
+			answer = { status: 503, body: { error: { code: 'unavailable' } } };
+			await expect(asOwner(router, () => router.kernelJobs.runsJobsOf(owner))).rejects.toThrow();
+		});
+
+		it('hands a run its environment in the service format, without AWS keys in env', () => {
+			const { router } = makeRouter();
+
+			const body = router.kernelJobs.environment({
+				vars: { A: '1', AWS_ACCESS_KEY_ID: 'AK' },
+				files: [],
+				network: {
+					tunnels: [],
+					hosts: [],
+					mongodb: [],
+					aws: [
+						{
+							services: ['s3'],
+							region: 'us-east-1',
+							accessKeyId: 'AK',
+							secretAccessKey: 'SK',
+							credentialVars: ['AWS_ACCESS_KEY_ID'],
+							endpointVars: [],
+						},
+					],
+					relayEnv: {},
+					relayFiles: [],
+					unrelayable: [],
+				},
+			}) as { env: Record<string, string>; aws: unknown[] };
+
+			expect(body.env).toEqual({ A: '1' });
+			expect(body.aws).toHaveLength(1);
+		});
+	});
+
 	it('names each backend and refuses an unknown one', () => {
 		const { router, external, fallback } = makeRouter();
 		expect(router.routing.backend(undefined)).toBe(fallback);

@@ -2297,6 +2297,108 @@
 			"accepts_idempotency_key": false
 		},
 		{
+			"id": "jobs.kernel.recordRun",
+			"command": ["jobs", "kernel", "recordRun"],
+			"method": "POST",
+			"path": "/api/v1/jobs/{job_key}/external-runs",
+			"summary": "Record a run that the job author's personal kernel finished",
+			"description": "Only for the job's author. The run is recorded, audited, and notified like a hub run; it is never retried. Repeating a report with the same `run_id` returns the recorded run.",
+			"parameters": [
+				{
+					"name": "job_key",
+					"cli_name": "job-key",
+					"in": "path",
+					"required": true,
+					"description": "The project, notebook, and job ids joined by dots.",
+					"value_type": "string",
+					"repeatable": false
+				}
+			],
+			"body": {
+				"required": true,
+				"properties": [
+					{
+						"name": "error",
+						"cli_name": "error",
+						"required": false,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "finished_at",
+						"cli_name": "finished-at",
+						"required": true,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "html_base64",
+						"cli_name": "html-base64",
+						"required": false,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "run_id",
+						"cli_name": "run-id",
+						"required": false,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "started_at",
+						"cli_name": "started-at",
+						"required": true,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "status",
+						"cli_name": "status",
+						"required": true,
+						"value_type": "string",
+						"repeatable": false
+					},
+					{
+						"name": "version",
+						"cli_name": "version",
+						"required": false,
+						"value_type": "string",
+						"repeatable": false
+					}
+				]
+			},
+			"destructive": false,
+			"paginated": false,
+			"response_kind": "json",
+			"accepts_if_match": false,
+			"accepts_idempotency_key": false
+		},
+		{
+			"id": "jobs.kernel.runSpec",
+			"command": ["jobs", "kernel", "runSpec"],
+			"method": "GET",
+			"path": "/api/v1/jobs/{job_key}/run-spec",
+			"summary": "What a job author's personal kernel runs when it fires the job",
+			"description": "Only for the job's author, whose personal kernel fires its schedule; anyone else gets 404. 404 means the job is gone; 409 means it should not run now (disabled, unscheduled, or back on the hub).",
+			"parameters": [
+				{
+					"name": "job_key",
+					"cli_name": "job-key",
+					"in": "path",
+					"required": true,
+					"description": "The project, notebook, and job ids joined by dots.",
+					"value_type": "string",
+					"repeatable": false
+				}
+			],
+			"destructive": false,
+			"paginated": false,
+			"response_kind": "json",
+			"accepts_if_match": false,
+			"accepts_idempotency_key": false
+		},
+		{
 			"id": "jobs.list",
 			"command": ["jobs", "list"],
 			"method": "GET",

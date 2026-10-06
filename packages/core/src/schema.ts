@@ -1059,6 +1059,11 @@ export const JobDefinitionSchema = z.looseObject({
 	concurrency_policy: z.enum(JOB_CONCURRENCY_POLICIES).default('forbid'),
 	/** Delivered through the project's alert destinations (`job.run.*` kinds). */
 	notifications: JobNotificationsSchema.optional(),
+	/**
+	 * The author's personal kernel fires this job's schedule and reports each
+	 * run; the hub scheduler never fires it.
+	 */
+	kernel_schedule: z.boolean().optional(),
 	created_by: UserIdSchema,
 	created_at: z.iso.datetime(),
 	updated_at: z.iso.datetime(),
@@ -1112,6 +1117,8 @@ export const JobRunSchema = z.looseObject({
 		})
 		.optional(),
 	cancelled_by: UserIdSchema.optional(),
+	/** The author's personal kernel ran it and reported the outcome; the hub never retries it. */
+	runner: z.literal('kernel').optional(),
 });
 
 export type JobRun = z.infer<typeof JobRunSchema>;

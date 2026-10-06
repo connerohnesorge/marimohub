@@ -412,11 +412,35 @@ export interface SandboxRouting {
 	backend(name: string | undefined): SandboxProvider;
 }
 
+/** A job schedule that a kernel service fires on its author's behalf. */
+export interface KernelJobSchedule {
+	cron: string;
+	timezone: string;
+	enabled: boolean;
+}
+
+/**
+ * Hands scheduled jobs to their author's own kernel service, which fires them as
+ * the author and reports each run back. Every call runs inside the author's own
+ * request and uses only the author's credential.
+ */
+export interface KernelJobs {
+	/** Whether `author`'s scheduled jobs run in their kernel. Throws when that cannot be told. */
+	runsJobsOf(author: EndUserPrincipal): Promise<boolean>;
+	register(author: UserId, jobKey: string, schedule: KernelJobSchedule): Promise<void>;
+	/** Idempotent: a job the service does not know is already gone. */
+	unregister(author: UserId, jobKey: string): Promise<void>;
+	/** A run's environment in the kernel service's own form. */
+	environment(env: ManagedSessionEnvironment): unknown;
+}
+
 export interface SandboxProvider {
 	/** Opt-in requires strict reconnect and idempotent destruction by the original sandbox ID. */
 	readonly warmPool?: WarmPoolSupport;
 	/** Present on a provider that routes edit sessions between backends per user. */
 	readonly routing?: SandboxRouting;
+	/** Present when authors' scheduled jobs can run in their own kernels. */
+	readonly kernelJobs?: KernelJobs;
 	readonly capabilities?: {
 		multiPort: boolean;
 		/** Applies resources.cpu and resources.memoryBytes from compute profiles. */

@@ -38,6 +38,7 @@ import type {
 	ExecResult,
 	ExposePortResult,
 	FileInfo,
+	KernelJobSchedule,
 	KernelProxyRequest,
 	KernelProxyTarget,
 	ListFilesOptions,
@@ -91,6 +92,7 @@ const DEFAULT_WORKDIR = '/workspace';
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_OPEN_TIMEOUT_MS = 120_000;
 const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const JOB_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 // Bounds a listing walk; capture applies its own count and byte caps afterwards.
 const MAX_LIST_ENTRIES = 50_000;
 
@@ -605,6 +607,40 @@ export class ExternalKernelCompute implements SandboxProvider {
 			return false;
 		}
 		throw await serviceError(response, 'checking for a personal kernel');
+	}
+
+	/** Register or replace `author`'s scheduled job, with the author's own token. */
+	async registerJob(author: UserId, jobKey: string, schedule: KernelJobSchedule): Promise<void> {
+		const response = await this.call(this.jobUrl(jobKey), {
+			method: 'PUT',
+			credential: this.credentials.forOwner(author),
+			action: 'registering a scheduled job',
+			body: new TextEncoder().encode(
+				JSON.stringify({
+					schedule: schedule.cron,
+					timezone: schedule.timezone,
+					enabled: schedule.enabled,
+				}),
+			),
+			headers: { 'content-type': 'application/json' },
+		});
+		await discard(response);
+	}
+
+	/** Remove `author`'s scheduled job; one the service does not know is already gone. */
+	async unregisterJob(author: UserId, jobKey: string): Promise<void> {
+		const response = await this.call(this.jobUrl(jobKey), {
+			method: 'DELETE',
+			credential: this.credentials.forOwner(author),
+			action: 'removing a scheduled job',
+			allow: [404],
+		});
+		await discard(response);
+	}
+
+	private jobUrl(jobKey: string): string {
+		if (!JOB_KEY.test(jobKey)) throw new Error(`Invalid scheduled job key: ${jobKey}`);
+		return `${this.baseUrl}/jobs/${encodeURIComponent(jobKey)}`;
 	}
 
 	/**

@@ -3,14 +3,23 @@ import type { Context } from 'hono';
 import {
 	JobId,
 	BadRequestError,
+	base64ToBytes,
+	bytesToBase64,
+	ConflictError,
+	createRunId,
+	managedSessionEnvironment,
+	MAX_ARTIFACT_BYTES,
 	NotFoundError,
+	pinnedNotebookFiles,
 	RunId,
 	toPublicJobDefinition,
 	toPublicJobRun,
+	VersionId,
 } from '@marimo-hub/core';
 import { appendJobRunFinishEvent, isTerminalRunStatus } from '@marimo-hub/core/jobs';
 import type { JobDefinition, JobRun } from '@marimo-hub/core';
-import type { HonoEnv } from '../context';
+import type { ApiDeps, HonoEnv } from '../context';
+import { resolveJobRunEnv } from '../sandboxEnv';
 import {
 	CreateJobBody,
 	UpdateJobBody,
@@ -26,6 +35,8 @@ import {
 	createNotebookJob,
 	updateNotebookJob,
 	triggerJobRun,
+	parseKernelJobKey,
+	unregisterKernelJob,
 } from '../jobs/operations';
 import { idempotentCreate } from '../idempotency';
 import { appendAudit, describeError, logEvent } from '../log';
@@ -279,6 +290,112 @@ const getRunLogs = createRoute({
 	},
 });
 
+// --- Kernel-fired jobs ---
+
+export const MAX_KERNEL_RUN_HTML_BYTES = MAX_ARTIFACT_BYTES;
+/** Base64 of the largest HTML, plus room for the rest of the report. */
+export const MAX_KERNEL_RUN_REPORT_BYTES = Math.ceil(MAX_KERNEL_RUN_HTML_BYTES / 3) * 4 + 64 * 1024;
+
+const KernelJobParam = z.object({
+	job_key: z
+		.string()
+		.max(128)
+		.openapi({
+			param: { name: 'job_key', in: 'path' },
+			description: 'The project, notebook, and job ids joined by dots.',
+			example: 'proj-7h2k9qm4xz7rp3w8.nb-3w8h2k9qm4xz7rp3.job-7h2k9qm4xz7rp3w8',
+		}),
+});
+
+const KernelRunSpecSchema = z
+	.object({
+		run_id: z.string().describe('Report the run under this id.'),
+		notebook: z.string().describe('The file to run, relative to the file tree.'),
+		version: z.string().describe('The notebook version the files come from.'),
+		files: z.array(z.object({ path: z.string(), content_base64: z.string() })),
+		parameters: z.record(z.string(), z.string()).optional().describe('Passed as `mo.cli_args()`.'),
+		timeout_seconds: z.number().int(),
+		environment: z
+			.record(z.string(), z.unknown())
+			.describe("The run's integrations, in the kernel service's environment format."),
+	})
+	.openapi('KernelJobRunSpec');
+
+const KernelRunReportSchema = z
+	.object({
+		run_id: z.string().regex(RunId.regex).refine(RunId.is).optional(),
+		status: z.enum(['succeeded', 'failed', 'timed_out']),
+		started_at: z.iso.datetime(),
+		finished_at: z.iso.datetime(),
+		html_base64: z.string().optional(),
+		error: z.string().max(4000).optional(),
+		version: z.string().regex(VersionId.regex).refine(VersionId.is).optional(),
+	})
+	.openapi('KernelJobRunReport');
+
+const getKernelRunSpec = createRoute({
+	method: 'get',
+	path: '/jobs/{job_key}/run-spec',
+	operationId: 'jobs.kernel.runSpec',
+	tags: ['Jobs'],
+	summary: "What a job author's personal kernel runs when it fires the job",
+	description:
+		"Only for the job's author, whose personal kernel fires its schedule; anyone else gets 404. 404 means the job is gone; 409 means it should not run now (disabled, unscheduled, or back on the hub).",
+	request: { params: KernelJobParam },
+	responses: {
+		200: jsonContent(z.object({ success: z.literal(true), data: KernelRunSpecSchema }), 'Run spec'),
+		...commonErrors(),
+		...errorResponses(404, 409),
+	},
+});
+
+const recordKernelRun = createRoute({
+	method: 'post',
+	path: '/jobs/{job_key}/external-runs',
+	operationId: 'jobs.kernel.recordRun',
+	tags: ['Jobs'],
+	summary: "Record a run that the job author's personal kernel finished",
+	description:
+		"Only for the job's author. The run is recorded, audited, and notified like a hub run; it is never retried. Repeating a report with the same `run_id` returns the recorded run.",
+	request: {
+		params: KernelJobParam,
+		body: { content: { 'application/json': { schema: KernelRunReportSchema } }, required: true },
+	},
+	responses: {
+		201: jsonContent(
+			z.object({ success: z.literal(true), data: JobRunResponseSchema }),
+			'Recorded',
+		),
+		...commonErrors(),
+		...errorResponses(400, 404, 409),
+	},
+});
+
+/** The author's kernel-fired job, or 404 for anyone else. */
+async function loadKernelJob(c: Context<HonoEnv>, key: string) {
+	const deps = c.get('deps');
+	const user = c.get('user');
+	requireJobs(deps);
+	const ref = parseKernelJobKey(key);
+	if (!ref) throw new NotFoundError(`Job ${key} not found`);
+	const target = await authorizeJobNotebook(deps, user, ref.pid, ref.nid, 'project.read');
+	const job = await deps.services.jobs.getJob(ref.pid, ref.nid, ref.jid);
+	if (job.created_by !== user.id || (await deps.services.jobs.isDeleting(job))) {
+		throw new NotFoundError(`Job ${key} not found`);
+	}
+	if (!job.kernel_schedule) {
+		throw new ConflictError('job_not_runnable: this job runs on the hub, not in your kernel');
+	}
+	return { ...target, job };
+}
+
+function jobTimeoutSeconds(deps: ApiDeps, job: JobDefinition): number {
+	const config = requireJobs(deps);
+	const requestedMs =
+		job.timeout_seconds !== undefined ? job.timeout_seconds * 1000 : config.defaultTimeoutMs;
+	return Math.floor(Math.min(requestedMs, config.maxTimeoutMs) / 1000);
+}
+
 // --- Helpers ---
 
 async function loadAuthorizedJob(
@@ -313,6 +430,80 @@ app.use('/projects/:pid/notebooks/:nid/jobs', async (c, next) => {
 app.use('/projects/:pid/notebooks/:nid/jobs/*', async (c, next) => {
 	requireJobs(c.get('deps'));
 	await next();
+});
+
+app.openapi(getKernelRunSpec, async (c) => {
+	const deps = c.get('deps');
+	const { project, job } = await loadKernelJob(c, c.req.valid('param').job_key);
+	if (!job.enabled || !job.schedule) {
+		throw new ConflictError('job_not_runnable: the job is disabled or has no schedule');
+	}
+	const pinned = await pinnedNotebookFiles(
+		deps.bucket,
+		deps.services.notebooks,
+		job.project_id,
+		job.notebook_id,
+	);
+	if (!pinned) {
+		throw new ConflictError(
+			'job_not_runnable: notebooks synced from Git run their jobs on the hub',
+		);
+	}
+	const runId = createRunId();
+	const env = await resolveJobRunEnv(deps, { project, job, runId, userId: job.created_by });
+	const environment = deps.compute.kernelJobs?.environment(managedSessionEnvironment(env)) ?? {};
+	return c.json(
+		{
+			success: true as const,
+			data: {
+				run_id: runId,
+				notebook: pinned.notebook,
+				version: pinned.version,
+				files: pinned.files.map(({ path, content }) => ({
+					path,
+					content_base64: bytesToBase64(content),
+				})),
+				...(job.parameters ? { parameters: job.parameters } : {}),
+				timeout_seconds: jobTimeoutSeconds(deps, job),
+				environment: environment as Record<string, unknown>,
+			},
+		},
+		200,
+	);
+});
+
+app.openapi(recordKernelRun, async (c) => {
+	const deps = c.get('deps');
+	const { job } = await loadKernelJob(c, c.req.valid('param').job_key);
+	const report = c.req.valid('json');
+	let html: string | undefined;
+	if (report.html_base64 !== undefined) {
+		let bytes: Uint8Array;
+		try {
+			bytes = base64ToBytes(report.html_base64);
+		} catch {
+			throw new BadRequestError('html_base64 is not base64');
+		}
+		if (bytes.byteLength > MAX_KERNEL_RUN_HTML_BYTES) {
+			throw new BadRequestError(`The run's HTML exceeds ${MAX_KERNEL_RUN_HTML_BYTES} bytes`);
+		}
+		html = new TextDecoder().decode(bytes);
+	}
+	if (Date.parse(report.finished_at) < Date.parse(report.started_at)) {
+		throw new BadRequestError('finished_at is before started_at');
+	}
+	const run = await deps.services.jobRuns.recordKernelRun({
+		job,
+		...(report.run_id ? { runId: RunId.parse(report.run_id) } : {}),
+		status: report.status,
+		startedAt: report.started_at,
+		finishedAt: report.finished_at,
+		...(report.error ? { error: { code: 'KERNEL_RUN_FAILED', message: report.error } } : {}),
+		...(html !== undefined ? { html } : {}),
+		...(report.version ? { sourceVersionId: VersionId.parse(report.version) } : {}),
+		timeoutSeconds: jobTimeoutSeconds(deps, job),
+	});
+	return c.json({ success: true as const, data: toPublicJobRun(run) }, 201);
 });
 
 app.openapi(listJobs, async (c) => {
@@ -367,6 +558,7 @@ app.openapi(deleteJob, async (c) => {
 	const { job: loaded } = await loadAuthorizedJob(c, pid, nid, jid, 'notebook.write');
 	const cancelled = await deps.services.jobRuns.withJobMutation(loaded, async () => {
 		const job = await deps.services.jobs.beginDelete(pid, nid, jid, user.id, ifMatchToken(c));
+		await unregisterKernelJob(deps, user, job);
 		const result = await deps.services.jobRuns.cancelRunsOfJob(job, user.id);
 		const cancelledIds = new Set(result.runs.map((run) => run.run_id));
 		const terminal = (await deps.services.jobRuns.listActive()).flatMap(({ marker, run }) =>

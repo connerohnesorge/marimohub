@@ -1,11 +1,14 @@
 import type { SandboxId } from '@marimo-hub/core/ids';
+import { logEvent } from '@marimo-hub/core/logs';
 import type {
 	CreateSandboxOptions,
 	EndUserPrincipal,
+	KernelJobs,
 	SandboxInstance,
 	SandboxProvider,
 	SandboxRouting,
 } from '@marimo-hub/core/ports/sandbox';
+import { toKernelEnvironment } from './environment';
 import type { ExternalKernelCompute } from './index';
 
 /** The name sessions on the external kernel record as their `compute_backend`. */
@@ -31,6 +34,8 @@ export interface ExternalKernelRouterOptions {
 
 export class ExternalKernelRouter implements SandboxProvider {
 	readonly routing: SandboxRouting;
+	/** Scheduled jobs of authors with a personal kernel; the same choice as their edit sessions. */
+	readonly kernelJobs: KernelJobs;
 	private readonly enrolled?: ReadonlySet<string>;
 
 	constructor(
@@ -50,6 +55,22 @@ export class ExternalKernelRouter implements SandboxProvider {
 				if (name === undefined) return this.fallback;
 				if (name === EXTERNAL_KERNEL_BACKEND) return this.external;
 				throw new Error(`Unknown compute backend on session record: ${name}`);
+			},
+		};
+		this.kernelJobs = {
+			runsJobsOf: async (author) =>
+				this.isEnrolled(author.email) && (await this.external.hasKernel(author.userId)),
+			register: (author, jobKey, schedule) => this.external.registerJob(author, jobKey, schedule),
+			unregister: (author, jobKey) => this.external.unregisterJob(author, jobKey),
+			environment: (env) => {
+				const { body, omitted } = toKernelEnvironment(env);
+				if (omitted.length > 0) {
+					logEvent(
+						{ level: 'warn', event: 'external_kernel_environment_omitted', omitted },
+						{ channel: 'warn' },
+					);
+				}
+				return body;
 			},
 		};
 	}

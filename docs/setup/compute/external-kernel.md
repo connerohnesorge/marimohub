@@ -193,13 +193,46 @@ What changes compared with other backends:
 - Connection counts are unknown (the service runs no commands), so a session is
   extended at its deadline while its heartbeat is fresh.
 
+#### Scheduled jobs
+
+A scheduled job of a notebook stored in the hub runs in its author's personal
+kernel when the author has one, by the same rule as edit sessions (enrolled,
+and the service does not answer `no_kernel`). The kernel service fires the
+schedule; the hub scheduler never does. Every other job runs on the hub as
+before: manual-only jobs, jobs of notebooks synced from Git, and jobs of
+authors without a kernel.
+
+- When the author creates the job, or changes its schedule or whether it is
+  enabled, the hub sends `PUT /jobs/{jobKey}` with the author's token, before
+  it stores the change. A refusal or an unreachable service fails the request.
+  `{jobKey}` is `<project id>.<notebook id>.<job id>`.
+- Other editors may disable or enable the job, or delete it, without reaching
+  the author's kernel: the hub refuses the run when the kernel asks for it.
+  Only the author can change its schedule (`409` for anyone else).
+- Deleting the job sends `DELETE /jobs/{jobKey}` when the author deletes it.
+  Otherwise the service learns at the next firing, from a `404`.
+- When it fires, the service calls the hub as the author (through the front
+  door, with the author's token):
+  - `GET /api/v1/jobs/{jobKey}/run-spec` answers `run_id`, `notebook`,
+    `version`, `files` (`path`, `content_base64`), `parameters` (pass them as
+    `mo.cli_args()`), `timeout_seconds`, and `environment` (the same body as
+    the workspace environment route). `404` means the job is gone; drop it.
+    `409` means it should not run now.
+  - `POST /api/v1/jobs/{jobKey}/external-runs` with `run_id`, `status`
+    (`succeeded`, `failed`, or `timed_out`), `started_at`, `finished_at`, and
+    optionally `html_base64` (at most 25 MB decoded), `error`, and `version`.
+    The run is recorded, audited, and notified like a hub run, and never
+    retried. Repeating a report with the same `run_id` records it once.
+- Both routes answer `404` to anyone but the job's author.
+- **Run now** still runs on the hub.
+
 #### What does not work
 
 - Managed AI and hub-rendered marimo configuration. The hub mints neither for
   these sessions.
 - Per-notebook dependencies. The hub runs no `uv sync` or setup step; the
   kernel image is the environment.
-- Anything that runs a command in the sandbox: jobs, **Run as app**, VS Code
+- Anything that runs a command in the sandbox: **Run as app**, VS Code
   and OpenCode surfaces, in-sandbox thumbnails (off by default for this
   backend), sandbox data previews, connection-aware idle detection, proposal
   capture from Git, and MCP code execution.
@@ -234,6 +267,8 @@ any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch
 | `DELETE /workspaces/{workspaceId}`                                                              | `2xx` or `404`                                                                                                                                                                                                                  |
 | `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`                          | Saves the open notebooks into the workspace, then closes them; runs no cell. `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller. |
 | `* /workspaces/{workspaceId}/proxy/{path}`                                                      | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                                                                                |
+| `PUT /jobs/{jobKey}` `{"schedule","timezone","enabled"}`                                        | `2xx`; registers or replaces the author's scheduled job (see [Scheduled jobs](#scheduled-jobs))                                                                                                                                 |
+| `DELETE /jobs/{jobKey}`                                                                         | `2xx` or `404`                                                                                                                                                                                                                  |
 
 The hub stores the file key in the session's origin URL and adds
 `file=<key>` to every proxied request that has no `file` parameter. The hub

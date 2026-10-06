@@ -45,6 +45,7 @@ class FakeKernelService {
 	readonly kernels = new Set([OWNER_EMAIL, ADMIN_EMAIL]);
 	readonly admins = new Set([ADMIN_EMAIL]);
 	readonly environments = new Map<string, unknown>();
+	readonly jobs = new Map<string, unknown>();
 	forbidden = new Set<string>();
 	ownerMismatch = false;
 	private server?: Server;
@@ -110,6 +111,16 @@ class FakeKernelService {
 		if (!this.kernels.has(email)) return reply.status(404, { error: { code: 'no_kernel' } });
 		if (method === 'GET' && path === '/kernel')
 			return reply.status(200, { ready: true, user: email });
+		const job = /^\/jobs\/([^/]+)$/.exec(path)?.[1];
+		if (job && method === 'PUT') {
+			this.jobs.set(`${email}:${job}`, JSON.parse(body.toString()));
+			return reply.status(204);
+		}
+		if (job && method === 'DELETE') {
+			return this.jobs.delete(`${email}:${job}`)
+				? reply.status(204)
+				: reply.status(404, { error: { code: 'job_not_found' } });
+		}
 		const match = /^\/workspaces\/([^/]+)(\/.*)?$/.exec(path);
 		if (!match) return reply.status(404, { error: { code: 'not_found' } });
 		const [, workspace, rest = ''] = match;
@@ -179,6 +190,7 @@ afterEach(() => {
 	service.files.clear();
 	service.workspaces.clear();
 	service.environments.clear();
+	service.jobs.clear();
 	service.forbidden.clear();
 	service.admins.clear();
 	service.admins.add(ADMIN_EMAIL);
@@ -646,6 +658,47 @@ describe('ExternalKernelCompute', () => {
 					provider.create(SANDBOX, owned).applyEnvironment!({ ...empty, vars: { A: '1' } }),
 				),
 			).rejects.toBeInstanceOf(ForbiddenError);
+			expect(service.requests).toEqual([]);
+		});
+	});
+
+	describe('scheduled jobs', () => {
+		const KEY = 'proj-0123456789abcdef.nb-0123456789abcdef.job-0123456789abcdef';
+		const SCHEDULE = { cron: '0 6 * * *', timezone: 'Europe/Berlin', enabled: true };
+
+		it("registers and removes a job with the author's own token", async () => {
+			makeProvider();
+
+			await asOwner(() => provider.registerJob(OWNER, KEY, SCHEDULE));
+			expect(service.jobs.get(`${OWNER_EMAIL}:${KEY}`)).toEqual({
+				schedule: '0 6 * * *',
+				timezone: 'Europe/Berlin',
+				enabled: true,
+			});
+			await asOwner(() => provider.unregisterJob(OWNER, KEY));
+			// A job the service no longer knows is already gone.
+			await asOwner(() => provider.unregisterJob(OWNER, KEY));
+
+			expect(service.jobs.size).toBe(0);
+			expect(new Set(service.requests.map(({ headers }) => headers.authorization))).toEqual(
+				new Set([`Bearer ${ownerToken}`]),
+			);
+		});
+
+		it("never registers a job for anyone but the request's user", async () => {
+			makeProvider();
+
+			await expect(
+				provider.withEndUserRequest(browserRequest(adminToken), admin, () =>
+					provider.registerJob(OWNER, KEY, SCHEDULE),
+				),
+			).rejects.toBeInstanceOf(ForbiddenError);
+			await expect(provider.registerJob(OWNER, KEY, SCHEDULE)).rejects.toThrow(
+				/No end-user credential/,
+			);
+			await expect(asOwner(() => provider.registerJob(OWNER, '../x', SCHEDULE))).rejects.toThrow(
+				/Invalid scheduled job key/,
+			);
 			expect(service.requests).toEqual([]);
 		});
 	});

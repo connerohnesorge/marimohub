@@ -3235,6 +3235,212 @@ components:
           maxLength: 4096
           description: Workspace-relative file to open. Supported only by the VS Code
             surface.
+    KernelJobRunSpec:
+      type: object
+      properties:
+        run_id:
+          type: string
+          description: Report the run under this id.
+        notebook:
+          type: string
+          description: The file to run, relative to the file tree.
+        version:
+          type: string
+          description: The notebook version the files come from.
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              content_base64:
+                type: string
+            required:
+              - path
+              - content_base64
+        parameters:
+          type: object
+          additionalProperties:
+            type: string
+          description: Passed as `mo.cli_args()`.
+        timeout_seconds:
+          type: integer
+        environment:
+          type: object
+          additionalProperties: {}
+          description: The run's integrations, in the kernel service's environment format.
+      required:
+        - run_id
+        - notebook
+        - version
+        - files
+        - timeout_seconds
+        - environment
+    JobRun:
+      type: object
+      properties:
+        run_id:
+          type: string
+          pattern: ^run_[0-9A-HJKMNP-TV-Z]{26}$
+        job_id:
+          type: string
+        notebook_id:
+          type: string
+        project_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - provisioning
+            - running
+            - succeeded
+            - failed
+            - timed_out
+            - cancelled
+            - skipped
+            - unknown
+          description: queued/provisioning/running are active.
+            succeeded/failed/timed_out/cancelled/skipped are terminal; terminal
+            records are never rewritten.
+          example: queued
+        trigger:
+          type: string
+          enum:
+            - schedule
+            - manual
+            - unknown
+          description: 'Known values: schedule, manual. Unrecognized values normalize to
+            unknown.'
+          example: manual
+        triggered_by:
+          type: string
+        scheduled_for:
+          type: string
+          format: date-time
+        source_version_id:
+          type: string
+        parameters:
+          $ref: '#/components/schemas/JobParameters'
+        attempt:
+          type: integer
+          exclusiveMinimum: 0
+          description: One-based attempt number. A failed or timed-out attempt can create
+            a new run with attempt + 1 and retry_of set, subject to the job
+            retry policy.
+        retry_of:
+          type: string
+        image:
+          type: string
+        compute_profile:
+          type: string
+        compute_resources:
+          $ref: '#/components/schemas/ComputeResources'
+        timeout_seconds:
+          type: integer
+        queued_at:
+          type: string
+          format: date-time
+        eligible_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          description: Present after the run enters running.
+        finished_at:
+          type: string
+          format: date-time
+          description: Present on terminal runs.
+        deadline_at:
+          type: string
+          format: date-time
+          description: Present after provisioning establishes the watchdog deadline.
+        exit_code:
+          type: integer
+          description: Process exit code when the export command reported one.
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required:
+            - code
+            - message
+          description: Sanitized failure detail, present on failed, timed-out, or skipped
+            runs.
+        output:
+          type: object
+          properties:
+            html_bytes:
+              type: integer
+              minimum: 0
+            logs_bytes:
+              type: integer
+              minimum: 0
+          required:
+            - html_bytes
+          description: Captured write-once artifacts, present after execution.
+        cancelled_by:
+          type: string
+      required:
+        - run_id
+        - job_id
+        - notebook_id
+        - project_id
+        - status
+        - trigger
+        - attempt
+        - timeout_seconds
+        - queued_at
+    JobParameters:
+      type: object
+      additionalProperties:
+        type: string
+        maxLength: 4096
+      maxProperties: 32
+      propertyNames: &a2
+        type: string
+        pattern: ^[A-Za-z][A-Za-z0-9_-]{0,63}$
+      description: String parameters passed to the notebook as `--key value` after
+        `--`, readable via `mo.cli_args()`. Parameters are visible to every
+        project member who can read the job or its run history; do not store
+        secrets here.
+      example:
+        region: eu-west-1
+    KernelJobRunReport:
+      type: object
+      properties:
+        run_id:
+          type: string
+          pattern: ^run_[0-9A-HJKMNP-TV-Z]{26}$
+        status:
+          type: string
+          enum:
+            - succeeded
+            - failed
+            - timed_out
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        html_base64:
+          type: string
+        error:
+          type: string
+          maxLength: 4000
+        version:
+          type: string
+          pattern: ^ver_[0-9A-Z]{26}$
+      required:
+        - status
+        - started_at
+        - finished_at
     JobPage:
       type: object
       properties:
@@ -3319,21 +3525,6 @@ components:
       required:
         - cron
         - timezone
-    JobParameters:
-      type: object
-      additionalProperties:
-        type: string
-        maxLength: 4096
-      maxProperties: 32
-      propertyNames: &a2
-        type: string
-        pattern: ^[A-Za-z][A-Za-z0-9_-]{0,63}$
-      description: String parameters passed to the notebook as `--key value` after
-        `--`, readable via `mo.cli_args()`. Parameters are visible to every
-        project member who can read the job or its run history; do not store
-        secrets here.
-      example:
-        region: eu-west-1
     JobRetryPolicy:
       type: object
       properties:
@@ -3483,125 +3674,6 @@ components:
           required:
             - on
       additionalProperties: false
-    JobRun:
-      type: object
-      properties:
-        run_id:
-          type: string
-          pattern: ^run_[0-9A-HJKMNP-TV-Z]{26}$
-        job_id:
-          type: string
-        notebook_id:
-          type: string
-        project_id:
-          type: string
-        status:
-          type: string
-          enum:
-            - queued
-            - provisioning
-            - running
-            - succeeded
-            - failed
-            - timed_out
-            - cancelled
-            - skipped
-            - unknown
-          description: queued/provisioning/running are active.
-            succeeded/failed/timed_out/cancelled/skipped are terminal; terminal
-            records are never rewritten.
-          example: queued
-        trigger:
-          type: string
-          enum:
-            - schedule
-            - manual
-            - unknown
-          description: 'Known values: schedule, manual. Unrecognized values normalize to
-            unknown.'
-          example: manual
-        triggered_by:
-          type: string
-        scheduled_for:
-          type: string
-          format: date-time
-        source_version_id:
-          type: string
-        parameters:
-          $ref: '#/components/schemas/JobParameters'
-        attempt:
-          type: integer
-          exclusiveMinimum: 0
-          description: One-based attempt number. A failed or timed-out attempt can create
-            a new run with attempt + 1 and retry_of set, subject to the job
-            retry policy.
-        retry_of:
-          type: string
-        image:
-          type: string
-        compute_profile:
-          type: string
-        compute_resources:
-          $ref: '#/components/schemas/ComputeResources'
-        timeout_seconds:
-          type: integer
-        queued_at:
-          type: string
-          format: date-time
-        eligible_at:
-          type: string
-          format: date-time
-        started_at:
-          type: string
-          format: date-time
-          description: Present after the run enters running.
-        finished_at:
-          type: string
-          format: date-time
-          description: Present on terminal runs.
-        deadline_at:
-          type: string
-          format: date-time
-          description: Present after provisioning establishes the watchdog deadline.
-        exit_code:
-          type: integer
-          description: Process exit code when the export command reported one.
-        error:
-          type: object
-          properties:
-            code:
-              type: string
-            message:
-              type: string
-          required:
-            - code
-            - message
-          description: Sanitized failure detail, present on failed, timed-out, or skipped
-            runs.
-        output:
-          type: object
-          properties:
-            html_bytes:
-              type: integer
-              minimum: 0
-            logs_bytes:
-              type: integer
-              minimum: 0
-          required:
-            - html_bytes
-          description: Captured write-once artifacts, present after execution.
-        cancelled_by:
-          type: string
-      required:
-        - run_id
-        - job_id
-        - notebook_id
-        - project_id
-        - status
-        - trigger
-        - attempt
-        - timeout_seconds
-        - queued_at
     JobRunTriggerBody:
       type: object
       properties:
@@ -13778,6 +13850,202 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/jobs/{job_key}/run-spec:
+    get:
+      operationId: jobs.kernel.runSpec
+      tags:
+        - Jobs
+      summary: What a job author's personal kernel runs when it fires the job
+      description: Only for the job's author, whose personal kernel fires its
+        schedule; anyone else gets 404. 404 means the job is gone; 409 means it
+        should not run now (disabled, unscheduled, or back on the hub).
+      parameters:
+        - schema:
+            type: string
+            maxLength: 128
+            description: The project, notebook, and job ids joined by dots.
+            example: proj-7h2k9qm4xz7rp3w8.nb-3w8h2k9qm4xz7rp3.job-7h2k9qm4xz7rp3w8
+          required: true
+          description: The project, notebook, and job ids joined by dots.
+          name: job_key
+          in: path
+      responses:
+        '200':
+          description: Run spec
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/KernelJobRunSpec'
+                required:
+                  - success
+                  - data
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Access forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: string
+                description: Seconds to wait before retrying.
+                example: '5'
+              required: true
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/jobs/{job_key}/external-runs:
+    post:
+      operationId: jobs.kernel.recordRun
+      tags:
+        - Jobs
+      summary: Record a run that the job author's personal kernel finished
+      description: Only for the job's author. The run is recorded, audited, and
+        notified like a hub run; it is never retried. Repeating a report with
+        the same `run_id` returns the recorded run.
+      parameters:
+        - schema:
+            type: string
+            maxLength: 128
+            description: The project, notebook, and job ids joined by dots.
+            example: proj-7h2k9qm4xz7rp3w8.nb-3w8h2k9qm4xz7rp3.job-7h2k9qm4xz7rp3w8
+          required: true
+          description: The project, notebook, and job ids joined by dots.
+          name: job_key
+          in: path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KernelJobRunReport'
+      responses:
+        '201':
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/JobRun'
+                required:
+                  - success
+                  - data
         '400':
           description: Bad request
           content:

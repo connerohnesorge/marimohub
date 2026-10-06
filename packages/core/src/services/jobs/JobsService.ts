@@ -210,13 +210,15 @@ export class JobsService {
 		input: CreateJobInput,
 		actor: UserId,
 		limits: JobLimits = {},
+		/** A kernel-scheduled job is registered under its id before it is created. */
+		placement: { id?: JobId; kernelSchedule?: boolean } = {},
 	): Promise<JobDefinition> {
 		if (input.schedule) validateJobSchedule(input.schedule);
 		validateTimeout(input.timeout_seconds, limits);
 		const now = new Date().toISOString();
 		const job = JobDefinitionSchema.parse({
 			schema_version: CURRENT_JOB_DEFINITION_VERSION,
-			id: createJobId(),
+			id: placement.id ?? createJobId(),
 			notebook_id: notebookId,
 			project_id: projectId,
 			name: input.name,
@@ -227,6 +229,7 @@ export class JobsService {
 			...(input.timeout_seconds !== undefined ? { timeout_seconds: input.timeout_seconds } : {}),
 			concurrency_policy: input.concurrency_policy ?? 'forbid',
 			...(input.notifications ? { notifications: input.notifications } : {}),
+			...(placement.kernelSchedule ? { kernel_schedule: true } : {}),
 			created_by: actor,
 			created_at: now,
 			updated_at: now,
@@ -313,6 +316,32 @@ export class JobsService {
 			throw err;
 		}
 		return updated;
+	}
+
+	/**
+	 * Record whether the author's personal kernel fires this job's schedule.
+	 * Bookkeeping only: `updated_at` (the client's version) does not change.
+	 */
+	async setKernelSchedule(
+		projectId: ProjectId,
+		notebookId: NotebookId,
+		jobId: JobId,
+		kernelSchedule: boolean,
+	): Promise<JobDefinition> {
+		const key = paths.project(projectId).notebook(notebookId).job(jobId).head;
+		return mutateObject(
+			this.bucket,
+			key,
+			(raw) => parseStoredJobDefinition(raw, key),
+			(current) => {
+				if ((current.kernel_schedule === true) === kernelSchedule) return null;
+				const { kernel_schedule: _previous, ...rest } = current;
+				return JobDefinitionSchema.parse(
+					kernelSchedule ? { ...rest, kernel_schedule: true } : rest,
+				);
+			},
+			{ notFound: () => new NotFoundError(`Job ${jobId} not found`) },
+		);
 	}
 
 	async beginDelete(
