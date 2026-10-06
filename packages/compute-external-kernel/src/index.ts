@@ -537,7 +537,6 @@ class ExternalKernelSandbox implements SandboxInstance {
 	 */
 	async destroy(): Promise<void> {
 		if (this.app) {
-			// Only its viewer's token can close an app session.
 			const response = await this.provider.call(
 				`${this.provider.baseUrl}/apps/sessions/${encodeURIComponent(this.id)}`,
 				{
