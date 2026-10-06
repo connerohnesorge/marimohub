@@ -31,16 +31,45 @@ export async function authenticateBearer(
 	return principal;
 }
 
+/** Whether a browser marked `request` as sent by another site. */
+function fromAnotherSite(request: Request, publicBaseUrl: string): boolean {
+	const site = request.headers.get('sec-fetch-site');
+	if (site === 'cross-site' || site === 'same-site') return true;
+	const origin = request.headers.get('origin');
+	if (!origin) return false;
+	try {
+		return new URL(origin).origin !== new URL(publicBaseUrl).origin;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * The caller a trusted gateway identified, for a request that carries no bearer
+ * (the gateway consumed it). Only with `gatewayIdentity`, never cross-site.
+ */
+export async function authenticateGatewayCaller(
+	deps: ApiDeps,
+	request: Request,
+): Promise<AuthenticatedPrincipal | null> {
+	if (!deps.mcp?.gatewayIdentity || bearerToken(request)) return null;
+	if (fromAnotherSite(request, deps.mcp.publicBaseUrl)) return null;
+	const principal = await deps.authenticator.authenticate(request);
+	if (!principal || (await deps.services.identities.isSuspended(principal.id))) return null;
+	return principal;
+}
+
 export async function authenticateMcpRequest(
 	c: Context<HonoEnv>,
 	deps: ApiDeps,
 ): Promise<AuthenticatedPrincipal | Response> {
 	const resource = `${deps.mcp?.publicBaseUrl ?? new URL(c.req.url).origin}/mcp`;
-	const principal = await authenticateBearer(deps, c.req.raw, {
-		resource,
-		scope: MCP_SCOPE,
-		allowExternal: Boolean(deps.mcp?.externalAuthorizationServer),
-	});
+	const principal =
+		(await authenticateBearer(deps, c.req.raw, {
+			resource,
+			scope: MCP_SCOPE,
+			allowExternal: Boolean(deps.mcp?.externalAuthorizationServer),
+		})) ?? (await authenticateGatewayCaller(deps, c.req.raw));
 	if (principal) {
 		await refreshIdentity(c, deps, principal);
 		return principal;

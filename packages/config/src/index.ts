@@ -460,9 +460,25 @@ function parseMcpConfig(env: Env, externalIssuer?: string): McpConfig | undefine
 			variable: 'MARIMOHUB_AUTH_OIDC_ACCESS_TOKEN_AUDIENCE',
 		});
 	}
+	const gatewayIdentity = parseOnOff(env, 'MARIMOHUB_MCP_GATEWAY_IDENTITY', {
+		fallback: false,
+		docs: 'docs/mcp.md',
+	});
+	if (gatewayIdentity && authBackend(env) !== 'proxy-header') {
+		throw new ConfigError(
+			'MARIMOHUB_MCP_GATEWAY_IDENTITY=on requires MARIMOHUB_AUTH_BACKEND=proxy-header',
+			{
+				variable: 'MARIMOHUB_MCP_GATEWAY_IDENTITY',
+				remediation:
+					'Only a gateway that verifies each caller and sets identity headers can identify MCP callers. Turn it off, or use the proxy-header backend.',
+				docs: 'docs/mcp.md',
+			},
+		);
+	}
 	return {
 		publicBaseUrl,
 		...(externalIssuer ? { externalAuthorizationServer: externalIssuer } : {}),
+		...(gatewayIdentity ? { gatewayIdentity: true } : {}),
 	};
 }
 

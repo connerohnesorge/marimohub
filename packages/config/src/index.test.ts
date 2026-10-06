@@ -1829,6 +1829,23 @@ describe('createFromEnv MCP config', () => {
 		).toEqual({ publicBaseUrl: 'https://hub.example.com/base' });
 	});
 
+	it('accepts gateway identity on /mcp only behind the proxy-header backend', () => {
+		const env = {
+			...baseEnv,
+			MARIMOHUB_MCP: 'on',
+			MARIMOHUB_APP_BASE_URL: 'https://hub.example.com',
+			MARIMOHUB_MCP_GATEWAY_IDENTITY: 'on',
+		};
+		expect(() => createFromEnv(env)).toThrow(/requires MARIMOHUB_AUTH_BACKEND=proxy-header/);
+		expect(
+			createFromEnv({
+				...env,
+				MARIMOHUB_AUTH_BACKEND: 'proxy-header',
+				MARIMOHUB_AUTH_ALLOWED_EMAIL_DOMAINS: '*',
+			}).mcp,
+		).toEqual({ publicBaseUrl: 'https://hub.example.com', gatewayIdentity: true });
+	});
+
 	it.each([
 		'not a URL',
 		'ftp://hub.example.com',

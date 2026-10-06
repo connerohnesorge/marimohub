@@ -3,7 +3,7 @@ import { UserId } from '@marimo-hub/core';
 import type { AuthenticatedPrincipal } from '@marimo-hub/core';
 import { MemoryBucket } from '@marimo-hub/core/testing';
 import { makeTestDeps } from '../testing';
-import { authenticateBearer } from './auth';
+import { authenticateBearer, authenticateGatewayCaller } from './auth';
 
 const PRINCIPAL: AuthenticatedPrincipal = {
 	id: UserId.parse('oauth-user'),
@@ -137,5 +137,54 @@ describe('authenticateBearer', () => {
 				{ resource: 'https://hub.example/mcp', scope: 'mcp:tools' },
 			),
 		).resolves.toBe(oauthPrincipal);
+	});
+});
+
+describe('authenticateGatewayCaller', () => {
+	const GATEWAY: AuthenticatedPrincipal = { ...PRINCIPAL, credential: { kind: 'sso' } };
+
+	function gatewayDeps(gatewayIdentity = true) {
+		const deps = makeTestDeps(new MemoryBucket(), {
+			mcp: { publicBaseUrl: 'https://hub.example', gatewayIdentity },
+		});
+		deps.authenticator = { authenticate: vi.fn().mockResolvedValue(GATEWAY) };
+		return deps;
+	}
+
+	it("accepts the gateway's caller for a request without a bearer", async () => {
+		const deps = gatewayDeps();
+
+		await expect(
+			authenticateGatewayCaller(
+				deps,
+				new Request('https://hub.example/mcp', {
+					headers: { 'x-pantheon-email': 'oauth@example.com', origin: 'https://hub.example' },
+				}),
+			),
+		).resolves.toEqual(GATEWAY);
+	});
+
+	it('refuses it when off, with a bearer, or for a request from another site', async () => {
+		const requests = [
+			new Request('https://hub.example/mcp', { headers: { Authorization: 'Bearer x' } }),
+			new Request('https://hub.example/mcp', { headers: { origin: 'https://evil.example' } }),
+			new Request('https://hub.example/mcp', { headers: { 'sec-fetch-site': 'cross-site' } }),
+			new Request('https://hub.example/mcp', { headers: { 'sec-fetch-site': 'same-site' } }),
+		];
+		for (const request of requests) {
+			await expect(authenticateGatewayCaller(gatewayDeps(), request)).resolves.toBeNull();
+		}
+		await expect(
+			authenticateGatewayCaller(gatewayDeps(false), new Request('https://hub.example/mcp')),
+		).resolves.toBeNull();
+	});
+
+	it('refuses a suspended caller', async () => {
+		const deps = gatewayDeps();
+		vi.spyOn(deps.services.identities, 'isSuspended').mockResolvedValue(true);
+
+		await expect(
+			authenticateGatewayCaller(deps, new Request('https://hub.example/mcp')),
+		).resolves.toBeNull();
 	});
 });

@@ -1776,6 +1776,14 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						default: 'off',
 						example: 'on',
 					},
+					{
+						id: 'MARIMOHUB_MCP_GATEWAY_IDENTITY',
+						name: 'MCP gateway identity',
+						description:
+							'Behind a gateway that verifies each caller and sets identity headers (`MARIMOHUB_AUTH_BACKEND=proxy-header`), accept a `/mcp` request that carries no bearer as the caller the gateway identified. A request a browser marks as coming from another site is refused. Values: `on`, `off`.',
+						default: 'off',
+						example: 'on',
+					},
 				],
 			},
 		],

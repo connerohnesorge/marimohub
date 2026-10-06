@@ -322,6 +322,22 @@ A gateway needs an access token for the Hub with the required audience and scope
 A shared issuer alone does not guarantee one authorization step.
 Test discovery, client registration, resource requests, and scope requests with your gateway before deployment.
 
+## Behind an identity gateway
+
+Some deployments put the Hub behind a gateway that verifies each caller's own
+token, removes `Authorization`, and passes the caller's identity in headers
+(`MARIMOHUB_AUTH_BACKEND=proxy-header`). Hub-issued MCP tokens never reach the
+Hub there. Set `MARIMOHUB_MCP_GATEWAY_IDENTITY=on` to accept a `/mcp` request
+that has no bearer as the caller the gateway identified.
+
+- The client sends a token the gateway accepts, as a static
+  `Authorization: Bearer <token>` header in its MCP server configuration.
+- The caller gets their own Hub permissions; there are no scope grants.
+- A request a browser marks as coming from another site (`Sec-Fetch-Site`
+  `cross-site` or `same-site`, or an `Origin` other than the Hub's) is refused.
+- Tools that reach a personal kernel use the same token; see
+  [Signing in API and MCP clients](./setup/compute/external-kernel.md#signing-in-api-and-mcp-clients).
+
 ## OAuth and security
 
 The following OAuth rules apply to Hub-issued credentials. External credentials

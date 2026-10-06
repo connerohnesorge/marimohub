@@ -276,6 +276,56 @@ authors without a kernel.
   without one (for example an API client with a hub token) fails for a listed
   user with sign-in guidance; see [Signing in API and MCP clients](#signing-in-api-and-mcp-clients).
 
+#### Signing in API and MCP clients
+
+Every call to a personal kernel uses the token of the request that causes it.
+In the browser that is the gateway's session token. An API, CLI, or MCP client
+must send its own token, and its audience must include
+`MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE` (for example `marimohub`). The hub
+never forwards a token issued for another client, such as a CLI's own audience:
+the kernel call fails with sign-in guidance instead. Requests that do not reach
+a personal kernel keep working with any credential the hub accepts, including
+personal access tokens.
+
+With Dex, a public client that the hub's client trusts can get such a token by
+device code:
+
+1. In the hub's Dex client, list the CLI's client ID in `trustedPeers`.
+2. Ask for a device code with the scope
+   `openid email profile audience:server:client_id:<hub client id>`:
+
+   ```sh
+   curl -s https://<issuer>/device/code \
+     -d client_id=<cli client id> \
+     -d scope='openid email profile offline_access audience:server:client_id:marimohub'
+   ```
+
+3. Open `verification_uri_complete` and sign in, then exchange the device code:
+
+   ```sh
+   curl -s https://<issuer>/token \
+     -d grant_type=urn:ietf:params:oauth:grant-type:device_code \
+     -d client_id=<cli client id> \
+     -d device_code=<device_code>
+   ```
+
+4. Send the `id_token` from the answer as `Authorization: Bearer <id_token>`.
+   Its `aud` is the hub's client ID. Refresh it with the `refresh_token` grant
+   before it expires.
+
+Clients:
+
+- `mohub`: set `MARIMOHUB_TOKEN` to the token (or pass `--token`).
+- MCP: configure the token as a static `Authorization` header, with
+  [`MARIMOHUB_MCP_GATEWAY_IDENTITY`](../../mcp.md#behind-an-identity-gateway)
+  on when a gateway consumes the header.
+- Scripts: send it on every request; the gateway passes it to the hub in
+  `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER`.
+
+Set `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE` to the hub's client ID, so a
+token for another audience is caught in the hub instead of earning a `401`
+from the service.
+
 #### Protocol
 
 The hub is a client of these endpoints, relative to
