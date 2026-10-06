@@ -81,6 +81,7 @@ import {
 } from '../notifications';
 import type { ApiDeps, SandboxConfig } from '../context';
 import { mergeSessionEnv, resolveFederatedEnv, resolveIntegrationRender } from '../sandboxEnv';
+import { scheduleEnvironmentRefresh, sessionEnvExpiry } from '../sessionEnvironmentRefresh';
 import {
 	assertProjectRole,
 	assertSessionAccess,
@@ -1586,6 +1587,7 @@ export async function startNotebookSession(input: {
 	let usedFallback = false;
 	// Audit pin for the integration versions rendered into this sandbox.
 	let integrationAttachments: SessionRender['attachments'] | undefined;
+	let deliveredEnv: SessionEnv | undefined;
 	// In subdomain mode clientUrl === url and originUrl is unset.
 	let clientUrl = '';
 	let originUrl: string | undefined;
@@ -1826,6 +1828,7 @@ export async function startNotebookSession(input: {
 							if (marimoEnv) env = mergeSessionEnv(env, marimoEnv);
 							// Integration values are defaults; WIF and marimo configuration win collisions.
 							if (integrationEnv) env = mergeSessionEnv(integrationEnv, env ?? {});
+							deliveredEnv = env;
 							return env;
 						},
 						launchStrategy: async () => {
@@ -2095,6 +2098,36 @@ export async function startNotebookSession(input: {
 		throw err;
 	} finally {
 		observer.flush();
+	}
+
+	// Federated credentials expire mid-session; a provider that keeps them gets a
+	// fresh environment before they do.
+	const credentialsExpire = sessionEnvExpiry(deliveredEnv);
+	if (managedEnvironment && !withholdSessionEnv && credentialsExpire !== undefined && updated) {
+		const workload = { kind: 'session' as const, id: updated.session_id };
+		scheduleEnvironmentRefresh(
+			{
+				deps,
+				session: updated,
+				resolve: async () => {
+					const [wifEnv, integrationEnv] = await Promise.all([
+						resolveFederatedEnv(deps, {
+							project,
+							workload,
+							restricted: restrictedViewerCredentials,
+						}),
+						resolveIntegrationRender(deps, {
+							projectId: pid,
+							workload,
+							principal: { userId: user.id, email: user.email },
+							restricted: restrictedViewerCredentials,
+						}),
+					]);
+					return integrationEnv ? mergeSessionEnv(integrationEnv, wifEnv ?? {}) : wifEnv;
+				},
+			},
+			credentialsExpire,
+		);
 	}
 
 	if (replacingAfterTakeover && temporaryToRetire) {

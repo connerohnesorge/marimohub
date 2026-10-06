@@ -121,31 +121,47 @@ service applies it to that workspace only, never to the user's other notebooks.
 
 - Plain variables go to `env`. A variable that is multi-line or longer than
   32 KiB is left out.
-- A rendered file goes to `files` once for each variable whose whole value is
-  its path; the service writes it and sets that variable to the real path.
-  Files no variable names (the integration manifest, connection descriptors),
-  variables that name the integrations directory (`MARIMOHUB_INTEGRATIONS_DIR`,
-  `PYICEBERG_HOME`), and values that embed a rendered path (for example a
-  connection URL with `sslrootcert=` or `credentials_path=`) are left out.
+- A rendered file goes to `files`. A variable whose whole value is its path
+  becomes the file's `envVar`; any other variable that contains the path,
+  plain or percent-encoded (a connection URL with `sslrootcert=`, `ssl_ca=`,
+  `tlsCAFile=`, `credentials_path=`, or a Trino `verify=`), gets
+  `${KIRA_FILE:<name>}` in its place. A variable that names a rendered
+  directory (`PYICEBERG_HOME`, `MARIMOHUB_INTEGRATIONS_DIR`) ships that
+  directory's files under one directory with `dirEnvVar`. Connection
+  descriptors that only a directory listing would find, and files whose content
+  embeds another rendered path, are left out.
 - Database servers go to `tunnels`, with the variables that carry the host,
   the port, or a URL: PostgreSQL, MySQL, SQL Server, Redshift, ClickHouse,
-  MongoDB (`mongodb` scheme), Trino, Spark Connect, and Databricks. At most 16.
-- S3 credentials go to `s3`: an S3 integration with static keys, and workload
-  identity credentials, which win when both exist. Their key variables never
-  reach the kernel; the service points the endpoint variable
-  (`AWS_ENDPOINT_URL_S3` unless the integration names another) at its S3 relay.
-  Only one credential set fits; the others are left out.
-- MongoDB with `mongodb+srv` and Snowflake connect to hosts that no tunnel can
-  name (DNS SRV records, the account identifier), so they get no tunnel. The
-  Iceberg kinds keep their configuration in a directory
-  (`PYICEBERG_HOME/.pyiceberg.yaml`), which the environment route cannot carry,
-  so they do not work. Cloud API kinds (BigQuery, Athena, GCS, Azure Blob,
-  MotherDuck, Weights & Biases, Hugging Face) get their variables and key files
-  but no tunnel, so they need the kernel to reach the vendor directly.
+  Trino, Spark Connect, and the Iceberg SQL catalog and Hive metastore (through
+  `PYICEBERG_CATALOG__<NAME>__URI`, which overrides the YAML). At most 16.
+- HTTPS services go to `hosts`, so TLS stays end to end with the real name:
+  Databricks, Snowflake (`*.snowflakecomputing.com`), BigQuery, GCS, Azure Blob,
+  MotherDuck (`*.motherduck.com` and `extensions.duckdb.org`), Weights & Biases,
+  Hugging Face (with `*.huggingface.co` and `*.hf.co`), Iceberg REST catalogs
+  and their token endpoints, and Iceberg GCS, ADLS, and Hugging Face storage.
+- MongoDB URLs, `mongodb+srv` and replica sets included, go to `mongodb`; the
+  service resolves the members and relays them.
+- AWS credentials go to `aws` with the services they sign: S3 integrations
+  with static keys (`s3`), Athena (`athena` and `s3` for results), Glue and
+  DynamoDB catalogs (`glue`, `dynamodb`, plus `s3` when they share client
+  keys), Iceberg S3 storage keys, and workload identity credentials (`s3`, with
+  `expiresAt`), which win the services they share. No AWS key reaches the
+  kernel: credential variables are withheld, Athena gets a keyless URL, and the
+  Iceberg YAML is sent without its key properties.
+- Before workload identity credentials expire, at 80% of their remaining
+  lifetime, the API pod that started the session renders the environment again
+  and sends it again, until the session ends.
+
+These cannot be relayed and are reported instead: Athena or Glue/DynamoDB with
+ambient AWS credentials, AWS profile or role credentials, S3 remote signing,
+SigV4-signed Iceberg REST catalogs, Iceberg REST catalogs with custom TLS files
+or a Google service account file, Iceberg HDFS storage, Kerberos Hive
+metastores, Azure service principals outside the known clouds, and Iceberg
+catalogs whose storage the catalog names only at run time. DuckDB HTTP and
+DuckLake render nothing for kernels on any backend.
 
 Each left-out item is logged as `external_kernel_environment_omitted` by name
 and reason, never by value. A `400 invalid_environment` fails the session start.
-The hub does not refresh workload identity credentials during a session.
 
 #### What does not work
 
@@ -180,17 +196,17 @@ are relative to the workspace and never contain `..`. Every request carries
 any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch"}}`
 (token email differs from the owner), or `403` (not allowed).
 
-| Request                                                                       | Response                                                                                                                                                                                                                        |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /kernel`                                                                 | `200 {"ready": true, "user": "<email>"}`; `404 {"error":{"code":"no_kernel"}}` when the user has no kernel                                                                                                                      |
-| `PUT /workspaces/{workspaceId}/files?path=<rel>` (raw body)                   | `2xx`; parent directories are created                                                                                                                                                                                           |
-| `PUT /workspaces/{workspaceId}/environment` `{"env","files","tunnels","s3"}`  | `204`; replaces the workspace's whole environment. `400 {"error":{"code":"invalid_environment"}}` for a body outside the limits above                                                                                           |
-| `GET /workspaces/{workspaceId}/files?path=<rel>`                              | `200` bytes; `404` missing                                                                                                                                                                                                      |
-| `GET /workspaces/{workspaceId}/list?path=<rel>`                               | `200 {"entries":[{"path":"<workspace-relative path>","type":"file"\|"directory","size":<n>}]}` for one level; `404` when the workspace or directory does not exist                                                              |
-| `POST /workspaces/{workspaceId}/open` `{"notebook","projectId","notebookId"}` | `200 {"file":"<marimo file key>"}`                                                                                                                                                                                              |
-| `DELETE /workspaces/{workspaceId}`                                            | `2xx` or `404`                                                                                                                                                                                                                  |
-| `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`        | Saves the open notebooks into the workspace, then closes them; runs no cell. `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller. |
-| `* /workspaces/{workspaceId}/proxy/{path}`                                    | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                                                                                |
+| Request                                                                                         | Response                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /kernel`                                                                                   | `200 {"ready": true, "user": "<email>"}`; `404 {"error":{"code":"no_kernel"}}` when the user has no kernel                                                                                                                      |
+| `PUT /workspaces/{workspaceId}/files?path=<rel>` (raw body)                                     | `2xx`; parent directories are created                                                                                                                                                                                           |
+| `PUT /workspaces/{workspaceId}/environment` `{"env","files","tunnels","hosts","mongodb","aws"}` | `204`; replaces the workspace's whole environment. `400 {"error":{"code":"invalid_environment"}}` for a body outside the limits above                                                                                           |
+| `GET /workspaces/{workspaceId}/files?path=<rel>`                                                | `200` bytes; `404` missing                                                                                                                                                                                                      |
+| `GET /workspaces/{workspaceId}/list?path=<rel>`                                                 | `200 {"entries":[{"path":"<workspace-relative path>","type":"file"\|"directory","size":<n>}]}` for one level; `404` when the workspace or directory does not exist                                                              |
+| `POST /workspaces/{workspaceId}/open` `{"notebook","projectId","notebookId"}`                   | `200 {"file":"<marimo file key>"}`                                                                                                                                                                                              |
+| `DELETE /workspaces/{workspaceId}`                                                              | `2xx` or `404`                                                                                                                                                                                                                  |
+| `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`                          | Saves the open notebooks into the workspace, then closes them; runs no cell. `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller. |
+| `* /workspaces/{workspaceId}/proxy/{path}`                                                      | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                                                                                |
 
 The hub stores the file key in the session's origin URL and adds
 `file=<key>` to every proxied request that has no `file` parameter. The hub

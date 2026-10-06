@@ -1,19 +1,36 @@
 import { describe, expect, it } from 'vitest';
-import type { SessionS3Access } from '@marimo-hub/core/ports/integrations';
+import type { SessionAwsAccess, SessionNetwork } from '@marimo-hub/core/ports/integrations';
 import type { ManagedSessionEnvironment } from '@marimo-hub/core/ports/sandbox';
 import { toKernelEnvironment } from './environment';
 
 const ROOT = '/tmp/marimohub-integrations';
 
-function environment(overrides: Partial<ManagedSessionEnvironment>): ManagedSessionEnvironment {
-	return { vars: {}, files: [], tunnels: [], s3: [], unrelayable: [], ...overrides };
+function environment(
+	overrides: Partial<Omit<ManagedSessionEnvironment, 'network'>> & {
+		network?: Partial<SessionNetwork>;
+	},
+): ManagedSessionEnvironment {
+	return {
+		vars: overrides.vars ?? {},
+		files: overrides.files ?? [],
+		network: {
+			tunnels: [],
+			hosts: [],
+			mongodb: [],
+			aws: [],
+			relayEnv: {},
+			relayFiles: [],
+			unrelayable: [],
+			...overrides.network,
+		},
+	};
 }
 
 const b64 = (value: string) => Buffer.from(value).toString('base64');
 
-function access(overrides: Partial<SessionS3Access> = {}): SessionS3Access {
+function access(overrides: Partial<SessionAwsAccess> = {}): SessionAwsAccess {
 	return {
-		endpoint: 'https://minio.internal:9000',
+		services: ['s3'],
 		region: 'us-east-1',
 		accessKeyId: 'AK',
 		secretAccessKey: 'SK',
@@ -42,18 +59,18 @@ describe('toKernelEnvironment', () => {
 		expect(JSON.stringify(omitted)).not.toContain('hidden-value');
 	});
 
-	it('sends a file once per variable whose whole value is its path', () => {
+	it('delivers a file once and names it in every variable that refers to it', () => {
+		const sa = `${ROOT}/bigquery/prod-sa.json`;
 		const { body, omitted } = toKernelEnvironment(
 			environment({
 				vars: {
-					MARIMOHUB_BIGQUERY_PROD_CREDENTIALS_PATH: `${ROOT}/bigquery/prod-sa.json`,
-					GOOGLE_APPLICATION_CREDENTIALS: `${ROOT}/bigquery/prod-sa.json`,
-					MARIMOHUB_BIGQUERY_PROD_URL: `bigquery://p/d?credentials_path=${encodeURIComponent(`${ROOT}/bigquery/prod-sa.json`)}`,
-					MARIMOHUB_INTEGRATIONS_DIR: ROOT,
-					PYICEBERG_HOME: ROOT,
+					MARIMOHUB_BIGQUERY_PROD_CREDENTIALS_PATH: sa,
+					GOOGLE_APPLICATION_CREDENTIALS: sa,
+					MARIMOHUB_BIGQUERY_PROD_URL: `bigquery://p/d?credentials_path=${encodeURIComponent(sa)}`,
+					RAW_EMBED: `--key=${sa}`,
 				},
 				files: [
-					{ path: `${ROOT}/bigquery/prod-sa.json`, content: '{"key":1}' },
+					{ path: sa, content: '{"key":1}' },
 					{ path: `${ROOT}/bigquery/prod.json`, content: '{}' },
 					{ path: `${ROOT}/manifest.json`, content: '{}' },
 				],
@@ -62,37 +79,58 @@ describe('toKernelEnvironment', () => {
 
 		expect(body.files).toEqual([
 			{
-				name: 'bigquery-prod-sa.json',
-				contentBase64: b64('{"key":1}'),
-				envVar: 'MARIMOHUB_BIGQUERY_PROD_CREDENTIALS_PATH',
-			},
-			{
-				name: 'bigquery-prod-sa.json-2',
+				name: 'bigquery/prod-sa.json',
 				contentBase64: b64('{"key":1}'),
 				envVar: 'GOOGLE_APPLICATION_CREDENTIALS',
 			},
 		]);
-		expect(body.env).toBeUndefined();
-		expect(omitted).toEqual(
-			expect.arrayContaining([
-				{
-					kind: 'variable',
-					name: 'MARIMOHUB_BIGQUERY_PROD_URL',
-					reason: 'embeds the path of a rendered file',
-				},
-				{
-					kind: 'variable',
-					name: 'MARIMOHUB_INTEGRATIONS_DIR',
-					reason: 'names a directory of rendered files',
-				},
-				{ kind: 'variable', name: 'PYICEBERG_HOME', reason: 'names a directory of rendered files' },
-				{ kind: 'file', name: `${ROOT}/bigquery/prod.json`, reason: 'no variable names this file' },
-				{ kind: 'file', name: `${ROOT}/manifest.json`, reason: 'no variable names this file' },
-			]),
-		);
+		expect(body.env).toEqual({
+			MARIMOHUB_BIGQUERY_PROD_CREDENTIALS_PATH: '${KIRA_FILE:bigquery/prod-sa.json}',
+			MARIMOHUB_BIGQUERY_PROD_URL:
+				'bigquery://p/d?credentials_path=${KIRA_FILE:bigquery/prod-sa.json}',
+			RAW_EMBED: '--key=${KIRA_FILE:bigquery/prod-sa.json}',
+		});
+		expect(omitted).toEqual([
+			{ kind: 'file', name: `${ROOT}/bigquery/prod.json`, reason: 'no variable names this file' },
+			{ kind: 'file', name: `${ROOT}/manifest.json`, reason: 'no variable names this file' },
+		]);
 	});
 
-	it('omits a file whose content embeds another rendered path, and its variable', () => {
+	it('ships the files of a directory variable under one directory with dirEnvVar', () => {
+		const { body } = toKernelEnvironment(
+			environment({
+				vars: { PYICEBERG_HOME: ROOT },
+				files: [
+					{ path: `${ROOT}/.pyiceberg.yaml`, content: 'catalog: {}\n' },
+					{ path: `${ROOT}/iceberg/prod.json`, content: '{}' },
+				],
+			}),
+		);
+
+		expect(body.files).toEqual([
+			{
+				name: 'pyiceberg-home/.pyiceberg.yaml',
+				contentBase64: b64('catalog: {}\n'),
+				envVar: '',
+				dirEnvVar: 'PYICEBERG_HOME',
+			},
+		]);
+		expect(body.env).toBeUndefined();
+	});
+
+	it('delivers the relayed version of a file that carries withheld credentials', () => {
+		const yaml = `${ROOT}/.pyiceberg.yaml`;
+		const { body } = toKernelEnvironment(
+			environment({
+				vars: { PYICEBERG_HOME: ROOT },
+				files: [{ path: yaml, content: 'glue.access-key-id: AK\n' }],
+				network: { relayFiles: [{ path: yaml, content: 'glue.region: us-east-2\n' }] },
+			}),
+		);
+		expect(body.files?.[0].contentBase64).toBe(b64('glue.region: us-east-2\n'));
+	});
+
+	it('omits a file whose content embeds a rendered path, and what points at it', () => {
 		const { body, omitted } = toKernelEnvironment(
 			environment({
 				vars: { MARIMOHUB_TRINO_PROD_CONFIG: `${ROOT}/trino/prod.json` },
@@ -111,17 +149,18 @@ describe('toKernelEnvironment', () => {
 		]);
 	});
 
-	it('omits a file over 1 MiB', () => {
+	it('omits a file over 1 MiB and every variable that names it', () => {
 		const { body, omitted } = toKernelEnvironment(
 			environment({
-				vars: { KEY_PATH: `${ROOT}/big.pem` },
+				vars: { KEY_PATH: `${ROOT}/big.pem`, KEY_URL: `x?k=${ROOT}/big.pem` },
 				files: [{ path: `${ROOT}/big.pem`, content: 'x'.repeat(1024 * 1024 + 1) }],
 			}),
 		);
 		expect(body).toEqual({});
-		expect(omitted.map(({ reason }) => reason)).toEqual([
-			'larger than 1 MiB',
-			'names an omitted file',
+		expect(omitted.map(({ name, reason }) => `${name}: ${reason}`)).toEqual([
+			`${ROOT}/big.pem: larger than 1 MiB`,
+			'KEY_PATH: names an omitted file',
+			'KEY_URL: names an omitted file',
 		]);
 	});
 
@@ -131,26 +170,27 @@ describe('toKernelEnvironment', () => {
 				vars: {
 					PG_HOST: 'db.internal',
 					PG_PORT: '5432',
-					PG_URL: 'postgresql://u:p@db.internal:5432/x',
-					PG_CA_URL: `postgresql://u:p@db.internal:5432/x?sslrootcert=${ROOT}/ca.pem`,
+					PG_URL: `postgresql://u:p@db.internal:5432/x?sslrootcert=${encodeURIComponent(`${ROOT}/ca.pem`)}`,
 					PGSSLROOTCERT: `${ROOT}/ca.pem`,
 					V6_URL: 'postgresql://u:p@[fd00::1]:5433/x',
 					STALE: 'other.internal',
 				},
 				files: [{ path: `${ROOT}/ca.pem`, content: 'pem' }],
-				tunnels: [
-					{
-						host: 'db.internal',
-						port: 5432,
-						hostVars: ['PG_HOST', 'STALE', 'MISSING'],
-						portVars: ['PG_PORT'],
-						urlVars: ['PG_URL', 'PG_CA_URL'],
-					},
-					{ host: 'db.internal', port: 5432, hostVars: ['PG_HOST'], portVars: [], urlVars: [] },
-					{ host: 'fd00::1', port: 5433, hostVars: [], portVars: [], urlVars: ['V6_URL'] },
-					{ host: 'gone.internal', port: 1, hostVars: ['NOPE'], portVars: [], urlVars: [] },
-					{ host: 'bad host', port: 5432, hostVars: ['PG_HOST'], portVars: [], urlVars: [] },
-				],
+				network: {
+					tunnels: [
+						{
+							host: 'db.internal',
+							port: 5432,
+							hostVars: ['PG_HOST', 'STALE', 'MISSING'],
+							portVars: ['PG_PORT'],
+							urlVars: ['PG_URL'],
+						},
+						{ host: 'db.internal', port: 5432, hostVars: ['PG_HOST'], portVars: [], urlVars: [] },
+						{ host: 'fd00::1', port: 5433, hostVars: [], portVars: [], urlVars: ['V6_URL'] },
+						{ host: 'gone.internal', port: 1, hostVars: ['NOPE'], portVars: [], urlVars: [] },
+						{ host: 'bad host', port: 5432, hostVars: ['PG_HOST'], portVars: [], urlVars: [] },
+					],
+				},
 			}),
 		);
 
@@ -164,6 +204,7 @@ describe('toKernelEnvironment', () => {
 			},
 			{ host: 'fd00::1', port: 5433, hostVars: [], portVars: [], urlVars: ['V6_URL'] },
 		]);
+		expect(body.env?.PG_URL).toContain('sslrootcert=${KIRA_FILE:ca.pem}');
 		expect(omitted.filter(({ kind }) => kind === 'tunnel').map(({ name }) => name)).toEqual([
 			'gone.internal:1',
 			'bad host:5432',
@@ -183,7 +224,7 @@ describe('toKernelEnvironment', () => {
 			};
 		});
 
-		const { body, omitted } = toKernelEnvironment(environment({ vars, tunnels }));
+		const { body, omitted } = toKernelEnvironment(environment({ vars, network: { tunnels } }));
 
 		expect(body.tunnels).toHaveLength(16);
 		expect(omitted).toEqual([
@@ -191,81 +232,139 @@ describe('toKernelEnvironment', () => {
 		]);
 	});
 
-	it('keeps S3 credentials out of the environment and lets the last set win', () => {
+	it('sends hosts and MongoDB URL variables as declared', () => {
 		const { body, omitted } = toKernelEnvironment(
+			environment({
+				vars: { MONGO_URL: 'mongodb+srv://u:p@cluster0.example.net/db', NOT_MONGO: 'https://x' },
+				network: {
+					hosts: [
+						{ host: 'BigQuery.googleapis.com' },
+						{ host: 'bigquery.googleapis.com', port: 443 },
+						{ host: '*.snowflakecomputing.com' },
+						{ host: 'extensions.duckdb.org', port: 80 },
+						{ host: '*.', port: 443 },
+					],
+					mongodb: [{ urlVar: 'MONGO_URL' }, { urlVar: 'NOT_MONGO' }],
+				},
+			}),
+		);
+
+		expect(body.hosts).toEqual([
+			{ host: 'bigquery.googleapis.com', port: 443 },
+			{ host: '*.snowflakecomputing.com', port: 443 },
+			{ host: 'extensions.duckdb.org', port: 80 },
+		]);
+		expect(body.mongodb).toEqual([{ urlVar: 'MONGO_URL' }]);
+		expect(body.env?.MONGO_URL).toBe('mongodb+srv://u:p@cluster0.example.net/db');
+		expect(omitted.map(({ kind, name }) => `${kind} ${name}`)).toEqual([
+			'host *.:443',
+			'mongodb NOT_MONGO',
+		]);
+	});
+
+	it('keeps AWS credentials out of the environment; a later set wins the services it names', () => {
+		const { body, omitted, expiresAt } = toKernelEnvironment(
 			environment({
 				vars: {
 					MARIMOHUB_S3_LAKE_ACCESS_KEY_ID: 'static-key',
 					MARIMOHUB_S3_LAKE_SECRET_ACCESS_KEY: 'static-secret',
 					MARIMOHUB_S3_LAKE_ENDPOINT_URL: 'https://minio.internal:9000',
 					MARIMOHUB_S3_LAKE_BUCKET: 'lake',
+					MARIMOHUB_ATHENA_Q_URL: 'awsathena+rest://AKATHENA:athena-secret@athena/x',
 					AWS_ACCESS_KEY_ID: 'wif-key',
 					AWS_SECRET_ACCESS_KEY: 'wif-secret',
 					AWS_SESSION_TOKEN: 'wif-token',
 					AWS_ENDPOINT_URL_S3: 'https://objects.example',
 					AWS_REGION: 'us-east-2',
 				},
-				s3: [
-					access({
-						accessKeyId: 'static-key',
-						secretAccessKey: 'static-secret',
-						credentialVars: [
-							'MARIMOHUB_S3_LAKE_ACCESS_KEY_ID',
-							'MARIMOHUB_S3_LAKE_SECRET_ACCESS_KEY',
-						],
-						endpointVars: ['MARIMOHUB_S3_LAKE_ENDPOINT_URL'],
-					}),
-					access({
-						endpoint: 'https://objects.example',
-						region: 'us-east-2',
-						accessKeyId: 'wif-key',
-						secretAccessKey: 'wif-secret',
-						sessionToken: 'wif-token',
-						credentialVars: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'],
-					}),
-				],
+				network: {
+					aws: [
+						access({
+							endpoint: 'https://minio.internal:9000',
+							accessKeyId: 'static-key',
+							secretAccessKey: 'static-secret',
+							credentialVars: [
+								'MARIMOHUB_S3_LAKE_ACCESS_KEY_ID',
+								'MARIMOHUB_S3_LAKE_SECRET_ACCESS_KEY',
+							],
+							endpointVars: ['MARIMOHUB_S3_LAKE_ENDPOINT_URL'],
+						}),
+						access({
+							services: ['athena', 's3'],
+							accessKeyId: 'AKATHENA',
+							secretAccessKey: 'athena-secret',
+							credentialVars: ['MARIMOHUB_ATHENA_Q_URL'],
+							endpointVars: [],
+						}),
+						access({
+							endpoint: 'https://objects.example',
+							region: 'us-east-2',
+							accessKeyId: 'wif-key',
+							secretAccessKey: 'wif-secret',
+							sessionToken: 'wif-token',
+							expiresAt: '2026-10-06T00:00:00Z',
+							credentialVars: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'],
+						}),
+					],
+					relayEnv: { MARIMOHUB_ATHENA_Q_URL: 'awsathena+rest://:@athena/x' },
+				},
 			}),
 		);
 
-		expect(body.env).toEqual({ MARIMOHUB_S3_LAKE_BUCKET: 'lake', AWS_REGION: 'us-east-2' });
-		expect(body.s3).toEqual([
+		expect(body.env).toEqual({
+			MARIMOHUB_S3_LAKE_BUCKET: 'lake',
+			MARIMOHUB_ATHENA_Q_URL: 'awsathena+rest://:@athena/x',
+			AWS_REGION: 'us-east-2',
+		});
+		expect(body.aws).toEqual([
 			{
-				endpoint: 'https://objects.example',
+				services: ['athena'],
+				region: 'us-east-1',
+				endpoint: '',
+				accessKeyId: 'AKATHENA',
+				secretAccessKey: 'athena-secret',
+			},
+			{
+				services: ['s3'],
 				region: 'us-east-2',
+				endpoint: 'https://objects.example',
 				accessKeyId: 'wif-key',
 				secretAccessKey: 'wif-secret',
 				sessionToken: 'wif-token',
-				endpointVar: 'AWS_ENDPOINT_URL_S3',
+				expiresAt: '2026-10-06T00:00:00Z',
 			},
 		]);
+		expect(expiresAt).toBe('2026-10-06T00:00:00Z');
 		expect(omitted).toEqual([
-			{ kind: 's3', name: 'https://minio.internal:9000', reason: expect.stringMatching(/one S3/) },
+			{
+				kind: 'aws',
+				name: 's3@https://minio.internal:9000',
+				reason: expect.stringMatching(/newer/),
+			},
 		]);
-		expect(JSON.stringify(omitted)).not.toMatch(/static-|wif-/);
+		expect(JSON.stringify(omitted)).not.toMatch(/static-|wif-|secret/);
 	});
 
-	it('defaults the endpoint variable and omits an incomplete set', () => {
-		expect(
-			toKernelEnvironment(environment({ s3: [access({ endpointVars: [] })] })).body.s3?.[0]
-				.endpointVar,
-		).toBe('AWS_ENDPOINT_URL_S3');
+	it('omits an incomplete AWS credential set', () => {
 		const { body, omitted } = toKernelEnvironment(
 			environment({
 				vars: { AWS_ACCESS_KEY_ID: 'AK' },
-				s3: [access({ endpoint: 'ftp://nope' })],
+				network: { aws: [access({ endpoint: 'ftp://nope' })] },
 			}),
 		);
 		expect(body).toEqual({});
 		expect(omitted).toEqual([
-			{ kind: 's3', name: 'ftp://nope', reason: 'incomplete S3 credential set' },
+			{ kind: 'aws', name: 's3@ftp://nope', reason: 'incomplete AWS credential set' },
 		]);
 	});
 
-	it('reports integrations whose target no tunnel can describe', () => {
+	it('reports integrations whose network cannot be declared', () => {
 		expect(
 			toKernelEnvironment(
-				environment({ unrelayable: [{ integration: 'mongo', reason: 'srv records' }] }),
+				environment({
+					network: { unrelayable: [{ integration: 'lake', reason: 'hdfs datanodes' }] },
+				}),
 			).omitted,
-		).toEqual([{ kind: 'integration', name: 'mongo', reason: 'no tunnel: srv records' }]);
+		).toEqual([{ kind: 'integration', name: 'lake', reason: 'hdfs datanodes' }]);
 	});
 });

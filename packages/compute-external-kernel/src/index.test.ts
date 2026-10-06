@@ -535,27 +535,40 @@ describe('ExternalKernelCompute', () => {
 
 	describe('applyEnvironment', () => {
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
-		const empty = { vars: {}, files: [], tunnels: [], s3: [], unrelayable: [] };
+		const network = {
+			tunnels: [],
+			hosts: [],
+			mongodb: [],
+			aws: [],
+			relayEnv: {},
+			relayFiles: [],
+			unrelayable: [],
+		};
+		const empty = { vars: {}, files: [], network };
 
 		it("replaces this workspace's environment with the owner's token", async () => {
 			makeProvider();
 			await asOwner(() =>
 				provider.create(SANDBOX, owned).applyEnvironment!({
-					...empty,
 					vars: { PGHOST: 'db.internal', AWS_ACCESS_KEY_ID: 'AK' },
-					tunnels: [
-						{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
-					],
-					s3: [
-						{
-							endpoint: 'https://s3.us-east-2.amazonaws.com',
-							region: 'us-east-2',
-							accessKeyId: 'AK',
-							secretAccessKey: 'SK',
-							credentialVars: ['AWS_ACCESS_KEY_ID'],
-							endpointVars: [],
-						},
-					],
+					files: [],
+					network: {
+						...network,
+						tunnels: [
+							{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
+						],
+						hosts: [{ host: 'bigquery.googleapis.com' }],
+						aws: [
+							{
+								services: ['s3'],
+								region: 'us-east-2',
+								accessKeyId: 'AK',
+								secretAccessKey: 'SK',
+								credentialVars: ['AWS_ACCESS_KEY_ID'],
+								endpointVars: [],
+							},
+						],
+					},
 				}),
 			);
 
@@ -571,13 +584,14 @@ describe('ExternalKernelCompute', () => {
 				tunnels: [
 					{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
 				],
-				s3: [
+				hosts: [{ host: 'bigquery.googleapis.com', port: 443 }],
+				aws: [
 					{
-						endpoint: 'https://s3.us-east-2.amazonaws.com',
+						services: ['s3'],
 						region: 'us-east-2',
+						endpoint: '',
 						accessKeyId: 'AK',
 						secretAccessKey: 'SK',
-						endpointVar: 'AWS_ENDPOINT_URL_S3',
 					},
 				],
 			});

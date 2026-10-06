@@ -6,11 +6,12 @@ import {
 	createProjectId,
 	createSessionId,
 	defaultRegistry,
+	emptySessionNetwork,
 	INTEGRATIONS_DIR,
+	mergeSessionNetworks,
 	s3CredsToSessionEnv,
 	UserId,
 } from '@marimo-hub/core';
-import type { SessionRender } from '@marimo-hub/core';
 import { SAMPLE_CONFIGS } from '@marimo-hub/core/testing';
 
 const registry = defaultRegistry();
@@ -35,229 +36,351 @@ function render(kind: string, overrides: object = {}, name = 'prod') {
 	};
 }
 
-/** What the external kernel service receives for these integrations, as a session would send it. */
-function deliver(...items: ReturnType<typeof render>[]) {
-	const bundle: SessionRender = bundleIntegrations(items, {
-		kind: 'session',
-		id: createSessionId(),
-	});
+type Rendered = ReturnType<typeof render>;
+
+/** What the external kernel service receives for these integrations, as a session sends it. */
+function deliver(items: Rendered[], wif?: ReturnType<typeof s3CredsToSessionEnv>) {
+	const bundle = bundleIntegrations(items, { kind: 'session', id: createSessionId() });
 	return toKernelEnvironment({
-		vars: bundle.vars,
+		vars: { ...bundle.vars, ...wif?.vars },
 		files: bundle.files,
-		tunnels: bundle.tunnels ?? [],
-		s3: bundle.s3 ?? [],
-		unrelayable: bundle.unrelayable ?? [],
+		network: mergeSessionNetworks(bundle.network, wif?.network) ?? emptySessionNetwork(),
 	});
 }
 
-const envNames = (result: ReturnType<typeof deliver>) => Object.keys(result.body.env ?? {});
-const omittedNames = (result: ReturnType<typeof deliver>) => result.omitted.map(({ name }) => name);
+/** A compact view of one delivery, so each kind's mapping reads as one line. */
+function summary(result: ReturnType<typeof deliver>) {
+	const { body } = result;
+	return {
+		// Every bundle ships MARIMOHUB_INTEGRATIONS_DIR; asserted once below.
+		files: (body.files ?? [])
+			.filter(({ dirEnvVar }) => dirEnvVar !== 'MARIMOHUB_INTEGRATIONS_DIR')
+			.map(({ name, envVar, dirEnvVar }) =>
+				[name, envVar || undefined, dirEnvVar].filter(Boolean).join(' '),
+			),
+		tunnels: (body.tunnels ?? []).map(({ host, port }) => `${host}:${port}`),
+		hosts: (body.hosts ?? []).map(({ host, port }) => `${host}:${port}`),
+		mongodb: (body.mongodb ?? []).map(({ urlVar }) => urlVar),
+		aws: (body.aws ?? []).map(
+			({ services, endpoint }) => `${services.join('+')}@${endpoint || 'aws'}`,
+		),
+	};
+}
 
-describe('integrations delivered to an external kernel', () => {
+const none = { files: [], tunnels: [], hosts: [], mongodb: [], aws: [] };
+const googleAuth = ['oauth2.googleapis.com:443', 'www.googleapis.com:443'];
+
+describe('integrations delivered to an external kernel (environment v2)', () => {
 	it.each([
+		['postgres', {}, { ...none, tunnels: ['db.internal:5432'] }],
 		[
 			'postgres',
-			'db.internal',
-			5432,
-			['MARIMOHUB_PG_PROD_HOST', 'PGHOST'],
-			['MARIMOHUB_PG_PROD_PORT', 'PGPORT'],
-			['MARIMOHUB_PG_PROD_URL'],
+			{ ssl: { mode: 'verify-full', ca_bundle: 'PEM' } },
+			{ ...none, files: ['postgres/prod-ca.pem PGSSLROOTCERT'], tunnels: ['db.internal:5432'] },
 		],
+		['mysql', {}, { ...none, tunnels: ['mysql.internal:3306'] }],
 		[
 			'mysql',
-			'mysql.internal',
-			3306,
-			['MARIMOHUB_MYSQL_PROD_HOST'],
-			['MARIMOHUB_MYSQL_PROD_PORT'],
-			['MARIMOHUB_MYSQL_PROD_URL'],
+			{ ssl: { mode: 'verify_identity', ca_bundle: 'PEM' } },
+			{ ...none, files: ['mysql/prod-ca.pem'], tunnels: ['mysql.internal:3306'] },
 		],
-		[
-			'sqlserver',
-			'mssql.internal',
-			1433,
-			['MARIMOHUB_MSSQL_PROD_HOST'],
-			['MARIMOHUB_MSSQL_PROD_PORT'],
-			['MARIMOHUB_MSSQL_PROD_URL'],
-		],
+		['sqlserver', {}, { ...none, tunnels: ['mssql.internal:1433'] }],
 		[
 			'redshift',
-			'wg.123456789012.us-east-1.redshift-serverless.amazonaws.com',
-			5439,
-			['MARIMOHUB_REDSHIFT_PROD_HOST'],
-			['MARIMOHUB_REDSHIFT_PROD_PORT'],
-			['MARIMOHUB_REDSHIFT_PROD_URL'],
+			{},
+			{ ...none, tunnels: ['wg.123456789012.us-east-1.redshift-serverless.amazonaws.com:5439'] },
 		],
+		['clickhouse', {}, { ...none, tunnels: ['ch.internal:8443'] }],
 		[
-			'clickhouse',
-			'ch.internal',
-			8443,
-			['MARIMOHUB_CLICKHOUSE_PROD_HOST'],
-			['MARIMOHUB_CLICKHOUSE_PROD_PORT'],
-			['MARIMOHUB_CLICKHOUSE_PROD_URL'],
+			'trino',
+			{},
+			{
+				...none,
+				files: ['trino/prod.json MARIMOHUB_TRINO_PROD_CONFIG'],
+				tunnels: ['trino.internal:443'],
+			},
 		],
 		[
 			'trino',
-			'trino.internal',
-			443,
-			['MARIMOHUB_TRINO_PROD_HOST', 'TRINO_HOST'],
-			['MARIMOHUB_TRINO_PROD_PORT', 'TRINO_PORT'],
-			['MARIMOHUB_TRINO_PROD_URL'],
+			{ tls: { verification: 'custom_ca', ca_bundle: 'PEM' } },
+			{ ...none, files: ['trino/prod-ca.pem'], tunnels: ['trino.internal:443'] },
 		],
-		['pyspark', 'spark.internal', 15002, [], [], ['MARIMOHUB_PYSPARK_PROD_REMOTE', 'SPARK_REMOTE']],
 		[
-			'databricks',
-			'dbc-1234abcd-5678.cloud.databricks.com',
-			443,
-			['MARIMOHUB_DATABRICKS_PROD_HOST'],
-			[],
-			['MARIMOHUB_DATABRICKS_PROD_URL'],
+			'pyspark',
+			{},
+			{
+				...none,
+				files: ['pyspark/prod.json MARIMOHUB_PYSPARK_PROD_CONFIG'],
+				tunnels: ['spark.internal:15002'],
+			},
 		],
-	])(
-		'%s: tunnels its server through the variables that carry it',
-		(kind, host, port, hostVars, portVars, urlVars) => {
-			const result = deliver(render(kind));
-
-			expect(result.body.tunnels).toEqual([{ host, port, hostVars, portVars, urlVars }]);
-			expect(result.body.s3).toBeUndefined();
-			for (const name of [...hostVars, ...portVars, ...urlVars]) {
-				expect(envNames(result)).toContain(name);
-			}
-			// The hub's directory, manifest, and descriptor files have no place in the kernel.
-			expect(omittedNames(result)).toContain('MARIMOHUB_INTEGRATIONS_DIR');
-			expect(omittedNames(result)).toContain(`${INTEGRATIONS_DIR}/manifest.json`);
-		},
-	);
-
-	it('postgres with a pasted CA: the bundle becomes a file, and the URL that embeds its path is omitted', () => {
-		const result = deliver(render('postgres', { ssl: { mode: 'verify-full', ca_bundle: 'PEM' } }));
-
-		expect(result.body.files).toEqual([
+		['databricks', {}, { ...none, hosts: ['dbc-1234abcd-5678.cloud.databricks.com:443'] }],
+		['mongodb', {}, { ...none, mongodb: ['MARIMOHUB_MONGODB_PROD_URL'] }],
+		['mongodb', { scheme: 'mongodb' }, { ...none, mongodb: ['MARIMOHUB_MONGODB_PROD_URL'] }],
+		[
+			'mongodb',
+			{ tls: { mode: 'enabled', ca_bundle: 'PEM' } },
+			{ ...none, files: ['mongodb/prod-ca.pem'], mongodb: ['MARIMOHUB_MONGODB_PROD_URL'] },
+		],
+		['snowflake', {}, { ...none, hosts: ['*.snowflakecomputing.com:443'] }],
+		[
+			'snowflake',
+			{ auth: { method: 'key_pair', private_key: 'KEY' } },
 			{
-				name: 'postgres-prod-ca.pem',
-				contentBase64: Buffer.from('PEM').toString('base64'),
-				envVar: 'PGSSLROOTCERT',
+				...none,
+				files: ['snowflake/prod-key.pem MARIMOHUB_SNOWFLAKE_PROD_PRIVATE_KEY_PATH'],
+				hosts: ['*.snowflakecomputing.com:443'],
 			},
-		]);
-		expect(envNames(result)).not.toContain('MARIMOHUB_PG_PROD_URL');
-		expect(result.body.tunnels?.[0]).toMatchObject({
-			urlVars: [],
-			hostVars: ['MARIMOHUB_PG_PROD_HOST', 'PGHOST'],
-		});
-	});
-
-	it('trino and pyspark: their config files reach the kernel through their variables', () => {
-		expect(deliver(render('trino')).body.files).toEqual([
-			expect.objectContaining({ name: 'trino-prod.json', envVar: 'MARIMOHUB_TRINO_PROD_CONFIG' }),
-		]);
-		expect(deliver(render('pyspark')).body.files).toEqual([
-			expect.objectContaining({
-				name: 'pyspark-prod.json',
-				envVar: 'MARIMOHUB_PYSPARK_PROD_CONFIG',
-			}),
-		]);
-	});
-
-	it('mongodb+srv and snowflake: no tunnel can describe the target, so none is sent', () => {
-		for (const kind of ['mongodb', 'snowflake']) {
-			const result = deliver(render(kind));
-			expect(result.body.tunnels).toBeUndefined();
-			expect(result.omitted).toContainEqual(
-				expect.objectContaining({ kind: 'integration', name: 'prod' }),
-			);
-		}
-		expect(deliver(render('mongodb', { scheme: 'mongodb' })).body.tunnels).toHaveLength(1);
-	});
-
-	it('s3 with static keys: the service keeps the keys and the kernel gets none of them', () => {
-		const result = deliver(render('s3'));
-
-		expect(result.body.s3).toEqual([
+		],
+		[
+			'bigquery',
+			{ ambient_env: true },
 			{
-				endpoint: 'https://minio.internal:9000',
-				region: 'us-east-1',
-				accessKeyId: 'AKIAEXAMPLE',
-				secretAccessKey: 's3-secret',
-				endpointVar: 'AWS_ENDPOINT_URL_S3',
+				...none,
+				files: ['bigquery/prod-sa.json GOOGLE_APPLICATION_CREDENTIALS'],
+				hosts: ['bigquery.googleapis.com:443', 'bigquerystorage.googleapis.com:443', ...googleAuth],
 			},
-		]);
-		const env = result.body.env ?? {};
-		expect(JSON.stringify(env)).not.toMatch(/AKIAEXAMPLE|s3-secret/);
-		expect(env).toMatchObject({ AWS_REGION: 'us-east-1', MARIMOHUB_S3_PROD_BUCKET: 'lake' });
-		expect(result.body.files).toEqual([
-			expect.objectContaining({ name: 's3-prod-aws.conf', envVar: 'AWS_CONFIG_FILE' }),
-		]);
-		expect(omittedNames(result)).toContain('MARIMOHUB_S3_PROD_ENDPOINT_URL');
-	});
-
-	it('federated credentials win over an S3 integration, whose keys are still withheld', () => {
-		const items = [render('s3'), render('postgres', {}, 'warehouse')];
-		const bundle = bundleIntegrations(items, { kind: 'session', id: createSessionId() });
-		const wif = s3CredsToSessionEnv(
-			{ accessKeyId: 'WIFKEY', secretAccessKey: 'wif-secret', sessionToken: 'wif-token' },
-			'https://objects.example',
-			'us-east-2',
+		],
+		['athena', {}, { ...none, aws: ['athena+s3@aws'] }],
+		[
+			's3',
+			{},
+			{
+				...none,
+				files: ['s3/prod-aws.conf AWS_CONFIG_FILE'],
+				aws: ['s3@https://minio.internal:9000'],
+			},
+		],
+		[
+			'gcs',
+			{},
+			{
+				...none,
+				files: ['gcs/prod-sa.json GOOGLE_APPLICATION_CREDENTIALS'],
+				hosts: ['storage.googleapis.com:443', ...googleAuth],
+			},
+		],
+		[
+			'azure_blob',
+			{},
+			{
+				...none,
+				hosts: ['lakeaccount.blob.core.windows.net:443', 'lakeaccount.dfs.core.windows.net:443'],
+			},
+		],
+		[
+			'motherduck',
+			{},
+			{
+				...none,
+				hosts: ['*.motherduck.com:443', 'extensions.duckdb.org:443', 'extensions.duckdb.org:80'],
+			},
+		],
+		['wandb', {}, { ...none, hosts: ['api.wandb.ai:443'] }],
+		[
+			'huggingface',
+			{},
+			{ ...none, hosts: ['huggingface.co:443', '*.huggingface.co:443', '*.hf.co:443'] },
+		],
+		['custom_env', {}, none],
+		[
+			'iceberg_rest',
+			{},
+			{
+				...none,
+				files: [
+					'pyiceberg-home/.pyiceberg.yaml PYICEBERG_HOME',
+					'pyiceberg-home/manifest.json PYICEBERG_HOME',
+				],
+				hosts: ['catalog.internal:443', 'idp.internal:443'],
+			},
+		],
+		[
+			'iceberg_sql',
+			{},
+			{
+				...none,
+				files: [
+					'pyiceberg-home/.pyiceberg.yaml PYICEBERG_HOME',
+					'pyiceberg-home/manifest.json PYICEBERG_HOME',
+				],
+				tunnels: ['db.internal:5432'],
+			},
+		],
+		[
+			'iceberg_hive',
+			{},
+			{
+				...none,
+				files: [
+					'pyiceberg-home/.pyiceberg.yaml PYICEBERG_HOME',
+					'pyiceberg-home/manifest.json PYICEBERG_HOME',
+				],
+				tunnels: ['hive.internal:9083'],
+			},
+		],
+		[
+			'iceberg_glue',
+			{ credentials: { method: 'static', access_key_id: 'GLUEKEY', secret_access_key: 'g' } },
+			{
+				...none,
+				files: [
+					'pyiceberg-home/.pyiceberg.yaml PYICEBERG_HOME',
+					'pyiceberg-home/manifest.json PYICEBERG_HOME',
+				],
+				aws: ['glue@aws'],
+			},
+		],
+		[
+			'iceberg_dynamodb',
+			{
+				unified_credentials: { method: 'static', access_key_id: 'CLIENT', secret_access_key: 'c' },
+			},
+			{
+				...none,
+				files: [
+					'pyiceberg-home/.pyiceberg.yaml PYICEBERG_HOME',
+					'pyiceberg-home/manifest.json PYICEBERG_HOME',
+				],
+				aws: ['dynamodb+s3@aws'],
+			},
+		],
+		[
+			'iceberg_bigquery',
+			{},
+			{
+				...none,
+				files: [
+					'pyiceberg-home/.pyiceberg.yaml PYICEBERG_HOME',
+					'pyiceberg-home/manifest.json PYICEBERG_HOME',
+				],
+				hosts: ['bigquery.googleapis.com:443', 'bigquerystorage.googleapis.com:443', ...googleAuth],
+			},
+		],
+		['duckdb_http', {}, none],
+		['ducklake', {}, none],
+	])('%s %j', (kind, overrides, expected) => {
+		const result = deliver([render(kind, overrides)]);
+		expect(summary(result)).toEqual(expected);
+		// No delivered value points at the hub's own rendered paths.
+		expect(JSON.stringify(result.body.env ?? {})).not.toContain(INTEGRATIONS_DIR);
+		expect(JSON.stringify(result.body.env ?? {})).not.toContain(
+			encodeURIComponent(INTEGRATIONS_DIR),
 		);
+	});
 
-		const result = toKernelEnvironment({
-			vars: { ...bundle.vars, ...wif.vars },
-			files: bundle.files,
-			tunnels: bundle.tunnels ?? [],
-			s3: [...(bundle.s3 ?? []), ...wif.s3],
-			unrelayable: [],
-		});
+	it('ships the integration manifest for MARIMOHUB_INTEGRATIONS_DIR', () => {
+		const files = deliver([render('postgres')]).body.files ?? [];
+		expect(files.filter(({ dirEnvVar }) => dirEnvVar === 'MARIMOHUB_INTEGRATIONS_DIR')).toEqual([
+			expect.objectContaining({ name: 'marimohub-integrations-dir/manifest.json', envVar: '' }),
+		]);
+	});
 
-		expect(result.body.s3).toEqual([
+	it('names every kind of the registry in the table above', () => {
+		const covered = new Set([
+			'postgres',
+			'mysql',
+			'sqlserver',
+			'redshift',
+			'clickhouse',
+			'trino',
+			'pyspark',
+			'databricks',
+			'mongodb',
+			'snowflake',
+			'bigquery',
+			'athena',
+			's3',
+			'gcs',
+			'azure_blob',
+			'motherduck',
+			'wandb',
+			'huggingface',
+			'custom_env',
+			'iceberg_rest',
+			'iceberg_sql',
+			'iceberg_hive',
+			'iceberg_glue',
+			'iceberg_dynamodb',
+			'iceberg_bigquery',
+			'duckdb_http',
+			'ducklake',
+		]);
+		expect(
+			registry
+				.list()
+				.map(({ kind }) => kind)
+				.filter((kind) => !covered.has(kind)),
+		).toEqual([]);
+	});
+
+	it('puts a delivered CA or key file where a URL embeds its path', () => {
+		const postgres = deliver([
+			render('postgres', { ssl: { mode: 'verify-full', ca_bundle: 'PEM' } }),
+		]);
+		expect(postgres.body.env?.MARIMOHUB_PG_PROD_URL).toContain(
+			'sslrootcert=${KIRA_FILE:postgres/prod-ca.pem}',
+		);
+		const mongo = deliver([render('mongodb', { tls: { mode: 'enabled', ca_bundle: 'PEM' } })]);
+		expect(mongo.body.env?.MARIMOHUB_MONGODB_PROD_URL).toContain(
+			'tlsCAFile=${KIRA_FILE:mongodb/prod-ca.pem}',
+		);
+		const bigquery = deliver([render('bigquery')]);
+		expect(bigquery.body.env?.MARIMOHUB_BIGQUERY_PROD_URL).toContain(
+			'credentials_path=${KIRA_FILE:bigquery/prod-sa.json}',
+		);
+		expect(bigquery.body.files?.find(({ name }) => name === 'bigquery/prod-sa.json')?.envVar).toBe(
+			'MARIMOHUB_BIGQUERY_PROD_CREDENTIALS_PATH',
+		);
+		const trino = deliver([
+			render('trino', { tls: { verification: 'custom_ca', ca_bundle: 'PEM' } }),
+		]);
+		expect(trino.body.env?.MARIMOHUB_TRINO_PROD_URL).toContain('${KIRA_FILE:trino/prod-ca.pem}');
+	});
+
+	it('never puts AWS keys in env, and federated credentials win S3 with their expiry', () => {
+		const wif = s3CredsToSessionEnv(
 			{
-				endpoint: 'https://objects.example',
-				region: 'us-east-2',
 				accessKeyId: 'WIFKEY',
 				secretAccessKey: 'wif-secret',
 				sessionToken: 'wif-token',
-				endpointVar: 'AWS_ENDPOINT_URL_S3',
+				expiration: '2026-10-06T01:00:00Z',
 			},
-		]);
-		expect(JSON.stringify(result.body.env)).not.toMatch(/AKIAEXAMPLE|s3-secret|WIFKEY|wif-/);
-		expect(result.body.tunnels).toHaveLength(1);
+			'https://objects.example',
+			'us-east-2',
+		);
+		const result = deliver([render('s3'), render('athena', {}, 'queries')], wif);
+
+		expect(summary(result).aws).toEqual(['athena@aws', 's3@https://objects.example']);
+		expect(result.expiresAt).toBe('2026-10-06T01:00:00Z');
+		const env = JSON.stringify(result.body.env);
+		expect(env).not.toMatch(/AKIAEXAMPLE|s3-secret|AKIAATHENA|athena-secret|WIFKEY|wif-/);
+		expect(result.body.env?.MARIMOHUB_ATHENA_QUERIES_URL).toMatch(
+			/^awsathena\+rest:\/\/:@athena\./,
+		);
 	});
 
-	it('bigquery and gcs: key files reach the kernel through each variable that names them', () => {
-		const bigquery = deliver(render('bigquery', { ambient_env: true }));
-		expect(bigquery.body.files?.map(({ envVar }) => envVar)).toEqual([
-			'MARIMOHUB_BIGQUERY_PROD_CREDENTIALS_PATH',
-			'GOOGLE_APPLICATION_CREDENTIALS',
+	it('ships Iceberg YAML without the AWS keys the service keeps', () => {
+		const result = deliver([
+			render('iceberg_glue', {
+				credentials: { method: 'static', access_key_id: 'GLUEKEY', secret_access_key: 'g-secret' },
+			}),
 		]);
-		expect(omittedNames(bigquery)).toContain('MARIMOHUB_BIGQUERY_PROD_URL');
-		expect(deliver(render('gcs')).body.files?.map(({ envVar }) => envVar)).toContain(
-			'MARIMOHUB_GCS_PROD_CREDENTIALS_PATH',
-		);
+		const yaml = Buffer.from(result.body.files![0].contentBase64, 'base64').toString();
+		expect(yaml).toContain('type: glue');
+		expect(yaml).not.toMatch(/GLUEKEY|g-secret/);
 	});
 
 	it.each([
-		'iceberg_rest',
-		'iceberg_sql',
-		'iceberg_hive',
-		'iceberg_glue',
-		'iceberg_dynamodb',
-		'iceberg_bigquery',
-	])('%s: its directory-based PyIceberg configuration cannot be delivered', (kind) => {
-		const result = deliver(render(kind));
-		expect(result.body.files).toBeUndefined();
-		expect(omittedNames(result)).toEqual(
-			expect.arrayContaining(['PYICEBERG_HOME', `${INTEGRATIONS_DIR}/.pyiceberg.yaml`]),
+		['mongodb', { scheme: 'mongodb+srv' }, undefined],
+		['iceberg_rest', { auth: { method: 'sigv4', region: 'us-east-1' } }, /SigV4/],
+		['iceberg_sql', { storage: { scheme: 'hdfs', host: 'nn.internal' } }, /datanode/],
+		['athena', { auth: { method: 'ambient' } }, /ambient/],
+	])('%s %j: reports what cannot be relayed', (kind, overrides, reason) => {
+		const omitted = deliver([render(kind, overrides)]).omitted.filter(
+			({ kind: what }) => what === 'integration',
 		);
-	});
-
-	it.each(['athena', 'azure_blob', 'wandb', 'huggingface', 'motherduck', 'custom_env'])(
-		'%s: plain variables only, with no tunnel',
-		(kind) => {
-			const result = deliver(render(kind));
-			expect(envNames(result).length).toBeGreaterThan(0);
-			expect(result.body.tunnels).toBeUndefined();
-			expect(result.body.s3).toBeUndefined();
-		},
-	);
-
-	it.each(['duckdb_http', 'ducklake'])('%s: renders nothing for a kernel', (kind) => {
-		expect(deliver(render(kind)).body).toEqual({});
+		if (reason) expect(omitted[0]?.reason).toMatch(reason);
+		else expect(omitted).toEqual([]);
 	});
 });
