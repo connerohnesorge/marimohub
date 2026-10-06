@@ -376,7 +376,11 @@ describe('makeCompute fail-fast', () => {
 		);
 		expect(provider).toBeInstanceOf(ExternalKernelCompute);
 		const external = provider as ExternalKernelCompute;
-		expect(external.capabilities).toEqual({ multiPort: false, managedEnvironment: true });
+		expect(external.capabilities).toEqual({
+			multiPort: false,
+			managedEnvironment: true,
+			sessionEnvironment: true,
+		});
 		expect(external.baseUrl).toBe('http://kira.svc:8080/api/external-kernel/v1');
 		expect(external.workdir).toBe('/home/marimo/work');
 		expect(external.credentials.header).toBe('authorization');

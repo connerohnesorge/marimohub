@@ -15,12 +15,21 @@
  * caller's own token; no other user's token reaches any other route.
  *
  * The kernel image is the environment: the provider declares
- * `managedEnvironment`, so the hub sends no env vars, secrets, setup commands,
- * or kernel token, and it runs no commands. Command-shaped operations throw.
+ * `managedEnvironment`, so the hub writes no env vars, secrets, setup commands,
+ * or kernel token into it, and it runs no commands. Command-shaped operations
+ * throw. A session's integrations and workload identity go to the service's
+ * environment route instead (`sessionEnvironment`), which applies them to that
+ * workspace only.
  */
 import { base64Encode, mapWithConcurrency, WRITE_CONCURRENCY } from '@marimo-hub/compute-commons';
 import { MARIMO_PORT } from '@marimo-hub/core/constants';
-import { ForbiddenError, NotFoundError, UnavailableError } from '@marimo-hub/core/errors';
+import {
+	ForbiddenError,
+	NotFoundError,
+	UnavailableError,
+	ValidationError,
+} from '@marimo-hub/core/errors';
+import { logEvent } from '@marimo-hub/core/logs';
 import type { SandboxId, UserId } from '@marimo-hub/core/ids';
 import type {
 	BoundedReadOptions,
@@ -32,6 +41,7 @@ import type {
 	KernelProxyRequest,
 	KernelProxyTarget,
 	ListFilesOptions,
+	ManagedSessionEnvironment,
 	ListFilesResult,
 	MarimoLaunchSpec,
 	ReadFileResult,
@@ -43,10 +53,13 @@ import type {
 import { listFilesFailure, readFileFailure } from '@marimo-hub/core/ports/sandbox';
 import { EndUserCredentials } from './credentials';
 import type { EndUserCredential } from './credentials';
+import { toKernelEnvironment } from './environment';
 
 export { EndUserCredentials, readEndUserCredential } from './credentials';
 export type { EndUserCredential } from './credentials';
 export { EXTERNAL_KERNEL_BACKEND, ExternalKernelRouter } from './router';
+export { toKernelEnvironment } from './environment';
+export type { KernelEnvironment, Omission } from './environment';
 
 export interface ExternalKernelComputeOptions {
 	/** Base URL of the external kernel API, e.g. `http://kira.example/api/external-kernel/v1`. */
@@ -431,6 +444,43 @@ class ExternalKernelSandbox implements SandboxInstance {
 		this.fileKey = body.file;
 	}
 
+	/**
+	 * Replace this workspace's environment with what the session rendered. The
+	 * service applies it to this workspace only, never to the user's other
+	 * notebooks, and keeps S3 credentials out of the kernel.
+	 */
+	async applyEnvironment(environment: ManagedSessionEnvironment): Promise<void> {
+		const { body, omitted } = toKernelEnvironment(environment);
+		if (omitted.length > 0) {
+			logEvent(
+				{
+					level: 'warn',
+					event: 'external_kernel_environment_omitted',
+					sandbox_id: this.id,
+					omitted,
+				},
+				{ channel: 'warn' },
+			);
+		}
+		if (Object.keys(body).length === 0) return;
+		const response = await this.provider.call(`${this.workspaceUrl}/environment`, {
+			method: 'PUT',
+			credential: this.credential(),
+			action: 'setting the session environment',
+			body: new TextEncoder().encode(JSON.stringify(body)),
+			headers: { 'content-type': 'application/json' },
+			allow: [400],
+		});
+		if (response.status === 400) {
+			// The service's reason can quote a value, so only its code is surfaced.
+			const code = await errorCode(response);
+			throw new ValidationError(
+				`The external kernel service rejected this session's integration environment${code ? ` (${code})` : ''}.`,
+			);
+		}
+		await discard(response);
+	}
+
 	async exposePort(port: number): Promise<ExposePortResult> {
 		if (port !== MARIMO_PORT) throw unsupported(`expose port ${port}`);
 		if (!this.fileKey) throw new UnavailableError('The notebook was not opened before exposure.');
@@ -472,7 +522,11 @@ interface CallOptions {
 }
 
 export class ExternalKernelCompute implements SandboxProvider {
-	readonly capabilities = { multiPort: false, managedEnvironment: true } as const;
+	readonly capabilities = {
+		multiPort: false,
+		managedEnvironment: true,
+		sessionEnvironment: true,
+	} as const;
 	readonly baseUrl: string;
 	readonly workdir: string;
 	readonly credentials: EndUserCredentials;

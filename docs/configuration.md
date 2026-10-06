@@ -290,7 +290,7 @@ Native Kubernetes creates one keep-alive Pod and Service per session through `@k
 
 `MARIMOHUB_COMPUTE_BACKEND=external-kernel`
 
-Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, workload identity, integrations, per-notebook dependencies, jobs, apps, or surfaces. See [External kernel](compute.md#external-kernel).
+Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, per-notebook dependencies, jobs, apps, or surfaces; integrations and workload identity go through the service's environment route. See [External kernel](compute.md#external-kernel).
 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |

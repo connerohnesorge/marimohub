@@ -2,7 +2,12 @@ import { createServer } from 'node:http';
 import type { IncomingHttpHeaders, Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { ForbiddenError, NotFoundError, UnavailableError } from '@marimo-hub/core/errors';
+import {
+	ForbiddenError,
+	NotFoundError,
+	UnavailableError,
+	ValidationError,
+} from '@marimo-hub/core/errors';
 import type { NotebookId, ProjectId, SandboxId, UserId } from '@marimo-hub/core/ids';
 import type { EndUserPrincipal } from '@marimo-hub/core/ports/sandbox';
 import { ExternalKernelCompute } from './index';
@@ -39,6 +44,7 @@ class FakeKernelService {
 	readonly workspaces = new Set<string>();
 	readonly kernels = new Set([OWNER_EMAIL, ADMIN_EMAIL]);
 	readonly admins = new Set([ADMIN_EMAIL]);
+	readonly environments = new Map<string, unknown>();
 	forbidden = new Set<string>();
 	ownerMismatch = false;
 	private server?: Server;
@@ -147,6 +153,16 @@ class FakeKernelService {
 			const { notebook } = JSON.parse(body.toString()) as { notebook: string };
 			return reply.status(200, { file: `/home/kira/workspaces/${workspace}/${notebook}` });
 		}
+		if (method === 'PUT' && rest === '/environment') {
+			const environment = JSON.parse(body.toString()) as { env?: Record<string, string> };
+			if (environment.env?.REJECT) {
+				return reply.status(400, {
+					error: { code: 'invalid_environment', reason: `bad ${environment.env.REJECT}` },
+				});
+			}
+			this.environments.set(`${email}:${workspace}`, environment);
+			return reply.status(204);
+		}
 		if (method === 'DELETE' && rest === '') return reply.status(204);
 		return reply.status(404, { error: { code: 'not_found' } });
 	}
@@ -163,6 +179,7 @@ afterEach(async () => {
 	service.requests.length = 0;
 	service.files.clear();
 	service.workspaces.clear();
+	service.environments.clear();
 	service.forbidden.clear();
 	service.admins.clear();
 	service.admins.add(ADMIN_EMAIL);
@@ -414,7 +431,11 @@ describe('ExternalKernelCompute', () => {
 			await expect(sandbox.startProcess('marimo edit')).rejects.toThrow(/runs no commands/);
 		});
 
-		expect(provider.capabilities).toEqual({ multiPort: false, managedEnvironment: true });
+		expect(provider.capabilities).toEqual({
+			multiPort: false,
+			managedEnvironment: true,
+			sessionEnvironment: true,
+		});
 		expect(service.requests).toHaveLength(0);
 	});
 
@@ -509,6 +530,87 @@ describe('ExternalKernelCompute', () => {
 		await expect(
 			asOwner(() => provider.connectExisting('sb-ffffffffffffffff' as SandboxId, owned).ready!()),
 		).rejects.toBeInstanceOf(NotFoundError);
+	});
+
+	describe('applyEnvironment', () => {
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		const empty = { vars: {}, files: [], tunnels: [], s3: [], unrelayable: [] };
+
+		it("replaces this workspace's environment with the owner's token", async () => {
+			makeProvider();
+			await asOwner(() =>
+				provider.create(SANDBOX, owned).applyEnvironment!({
+					...empty,
+					vars: { PGHOST: 'db.internal', AWS_ACCESS_KEY_ID: 'AK' },
+					tunnels: [
+						{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
+					],
+					s3: [
+						{
+							endpoint: 'https://s3.us-east-2.amazonaws.com',
+							region: 'us-east-2',
+							accessKeyId: 'AK',
+							secretAccessKey: 'SK',
+							credentialVars: ['AWS_ACCESS_KEY_ID'],
+							endpointVars: [],
+						},
+					],
+				}),
+			);
+
+			expect(service.requests).toHaveLength(1);
+			expect(service.requests[0].method).toBe('PUT');
+			expect(service.requests[0].url).toBe(
+				`/api/external-kernel/v1/workspaces/${SANDBOX}/environment`,
+			);
+			expect(service.requests[0].headers.authorization).toBe(`Bearer ${ownerToken}`);
+			expect(service.requests[0].headers['content-type']).toBe('application/json');
+			expect(service.environments.get(`${OWNER_EMAIL}:${SANDBOX}`)).toEqual({
+				env: { PGHOST: 'db.internal' },
+				tunnels: [
+					{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
+				],
+				s3: [
+					{
+						endpoint: 'https://s3.us-east-2.amazonaws.com',
+						region: 'us-east-2',
+						accessKeyId: 'AK',
+						secretAccessKey: 'SK',
+						endpointVar: 'AWS_ENDPOINT_URL_S3',
+					},
+				],
+			});
+		});
+
+		it('sends nothing when nothing can be expressed', async () => {
+			makeProvider();
+			await asOwner(() =>
+				provider.create(SANDBOX, owned).applyEnvironment!({
+					...empty,
+					files: [{ path: '/tmp/marimohub-integrations/manifest.json', content: '{}' }],
+				}),
+			);
+			expect(service.requests).toEqual([]);
+		});
+
+		it("surfaces the service's refusal by code, never its reason", async () => {
+			makeProvider();
+			const applied = asOwner(() =>
+				provider.create(SANDBOX, owned).applyEnvironment!({ ...empty, vars: { REJECT: 's3cret' } }),
+			);
+			await expect(applied).rejects.toBeInstanceOf(ValidationError);
+			await expect(applied).rejects.toThrow(/\(invalid_environment\)\.$/);
+		});
+
+		it("never sends another user's environment to the owner's kernel", async () => {
+			makeProvider();
+			await expect(
+				provider.withEndUserRequest(browserRequest(adminToken), admin, () =>
+					provider.create(SANDBOX, owned).applyEnvironment!({ ...empty, vars: { A: '1' } }),
+				),
+			).rejects.toBeInstanceOf(ForbiddenError);
+			expect(service.requests).toEqual([]);
+		});
 	});
 
 	describe("another user's request on the owner's sandbox", () => {
