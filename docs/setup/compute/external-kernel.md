@@ -211,7 +211,8 @@ who may open it, exactly as for pooled apps.
 
 - The hub sends `POST /apps/sessions` with the viewer's own token;
   `X-External-Kernel-Owner` names the author (the user who saved the version).
-  The body is `session` (the hub's id, which the service must use), `app` (the
+  The body is `session` (the hub's sandbox id, which the service must use and
+  echo: `sb-` and 16 characters of `0-9a-z`, matching `^sb-[0-9a-z]{16}$`), `app` (the
   notebook id), `version`, `notebook`, `files` (`path`, `contentBase64`; the
   version's notebook and `pyproject.toml` over the workspace mirror, at most
   32 MiB), and `environment` (the viewer's integrations, in the workspace
