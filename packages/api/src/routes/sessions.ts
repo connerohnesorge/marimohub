@@ -1544,6 +1544,10 @@ export async function startNotebookSession(input: {
 			: undefined;
 	const sessionProvider = sessionCompute(compute, { compute_backend: sessionBackend });
 	const provisioner = new SandboxProvisioner(sessionProvider);
+	// A backend whose sandboxes belong to one user claims its editors exclusively,
+	// whatever the deployment's editor sharing; every other session keeps it.
+	const sessionSharing: EditorSandboxSharing =
+		sessionProvider.capabilities?.exclusiveEditors === true ? 'exclusive' : sharing;
 
 	let sandboxId = admission?.member.sandbox_id ?? createSandboxId();
 	const sessionId = admission?.member.session_id ?? createSessionId();
@@ -1603,7 +1607,7 @@ export async function startNotebookSession(input: {
 		const restoreFilesystemSnapshot =
 			!ephemeral && workspacePolicy.restoreFilesystemSnapshot
 				? await resolveRestoreSnapshot(sessionProvider, notebooks, pid, nid, {
-						sharing: mode === 'edit' ? sharing : 'shared',
+						sharing: mode === 'edit' ? sessionSharing : 'shared',
 						userId: user.id,
 					})
 				: undefined;
@@ -1664,7 +1668,7 @@ export async function startNotebookSession(input: {
 						ephemeral,
 						mode,
 						source_version_id: sourceVersionId,
-						editor_sandbox_sharing: mode === 'edit' ? sharing : undefined,
+						editor_sandbox_sharing: mode === 'edit' ? sessionSharing : undefined,
 						authorization_expires_at: authorizationExpiresAt,
 					});
 				};
@@ -1699,7 +1703,7 @@ export async function startNotebookSession(input: {
 						pid,
 						nid,
 						session!.session_id,
-						sharing,
+						sessionSharing,
 						user.id,
 					);
 					if (!result.claimed && result.claim.session_id) {
@@ -1965,7 +1969,13 @@ export async function startNotebookSession(input: {
 					);
 					return;
 				}
-				const result = await sessions.claimEditor(pid, nid, session!.session_id, sharing, user.id);
+				const result = await sessions.claimEditor(
+					pid,
+					nid,
+					session!.session_id,
+					sessionSharing,
+					user.id,
+				);
 				if (!result.claimed && result.claim.session_id) {
 					throw new EditorClaimLostError(result.claim.session_id);
 				}
@@ -2024,7 +2034,8 @@ export async function startNotebookSession(input: {
 				const winner = await revalidateEditorReuse(
 					await tightenAuthorizationDeadline(winnerCandidate),
 				);
-				if (sharing === 'exclusive' && winner.user_id !== user.id) {
+				const winnerSharing = winner.editor_sandbox_sharing ?? sessionSharing;
+				if (winnerSharing === 'exclusive' && winner.user_id !== user.id) {
 					throw new EditSessionOwnedError(`Editing is currently owned by ${winner.user_id}`);
 				}
 				const winnerGrants = await grants(winner);
@@ -2032,8 +2043,8 @@ export async function startNotebookSession(input: {
 					...toSessionResponse(winner, winnerGrants),
 					reused: true,
 					editor_session: {
-						sharing,
-						access: sharing === 'shared' ? ('shared' as const) : ('owner' as const),
+						sharing: winnerSharing,
+						access: winnerSharing === 'shared' ? ('shared' as const) : ('owner' as const),
 					},
 				};
 			}
@@ -2133,10 +2144,10 @@ export async function startNotebookSession(input: {
 		...(mode === 'edit'
 			? {
 					editor_session: {
-						sharing,
+						sharing: sessionSharing,
 						access: ephemeral
 							? ('temporary' as const)
-							: sharing === 'shared'
+							: sessionSharing === 'shared'
 								? ('shared' as const)
 								: ('owner' as const),
 					},

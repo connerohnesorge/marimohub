@@ -32,12 +32,18 @@ describe('createFromEnv external-kernel compute', () => {
 		MARIMOHUB_SANDBOX_EXPOSURE: 'proxy',
 		MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED: 'true',
 		MARIMOHUB_AUTH_SESSION_SECRET: 'a-test-signing-secret-at-least-32-bytes-long!!',
-		MARIMOHUB_EDITOR_SANDBOX_SHARING: 'exclusive',
 	};
 
-	it('requires exclusive editor sandboxes', () => {
-		expect(() => createFromEnv({ ...env, MARIMOHUB_EDITOR_SANDBOX_SHARING: 'shared' })).toThrow(
-			/requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive/,
+	it("keeps the deployment's editor sharing; external-kernel sessions claim exclusively", () => {
+		const deps = createFromEnv({
+			...env,
+			MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: 'kubernetes',
+			MARIMOHUB_COMPUTE_IMAGE: 'img',
+		});
+		expect(deps.policy.editorSandboxSharing).toBe('shared');
+		expect(deps.compute.capabilities?.exclusiveEditors).toBeUndefined();
+		expect(deps.compute.routing?.backend('external-kernel').capabilities?.exclusiveEditors).toBe(
+			true,
 		);
 	});
 
@@ -50,7 +56,6 @@ describe('createFromEnv external-kernel compute', () => {
 		});
 		expect(deps.compute.capabilities?.managedEnvironment).toBe(true);
 		expect(deps.sandbox.automaticThumbnails).toBe(false);
-		expect(deps.policy.editorSandboxSharing).toBe('exclusive');
 	});
 });
 

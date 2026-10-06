@@ -435,6 +435,7 @@ describe('ExternalKernelCompute', () => {
 			multiPort: false,
 			managedEnvironment: true,
 			sessionEnvironment: true,
+			exclusiveEditors: true,
 		});
 		expect(service.requests).toHaveLength(0);
 	});

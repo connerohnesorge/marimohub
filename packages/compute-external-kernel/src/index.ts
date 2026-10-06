@@ -526,6 +526,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 		multiPort: false,
 		managedEnvironment: true,
 		sessionEnvironment: true,
+		exclusiveEditors: true,
 	} as const;
 	readonly baseUrl: string;
 	readonly workdir: string;

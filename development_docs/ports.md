@@ -74,6 +74,10 @@ authenticated `/api/v1` request, so the provider can read the caller's token.
 `proxy`-exposure kernel request, HTTP and WebSocket, after the hub has
 authorized it. `compute-external-kernel` implements all of these.
 
+A provider whose sandboxes each belong to one user declares
+`capabilities.exclusiveEditors`; the session route then claims its edit
+sessions exclusively, whatever the deployment's editor sharing.
+
 A provider can front more than one backend with `routing`.
 `routing.selectEditBackend(owner)` runs inside the owner's request at each edit
 session start and names the backend, or returns `undefined` for the default;

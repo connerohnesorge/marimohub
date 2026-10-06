@@ -640,7 +640,6 @@ export function createFromEnv(
 	const sessionLifetime = parseSessionLifetime(env);
 	const sandboxImages = resolveSandboxImages(env);
 	const computeProfiles = parseComputeProfiles(env.MARIMOHUB_COMPUTE_PROFILES);
-	const computeBackendValue = computeBackend(env) ?? 'unset';
 	// Profiles, images, warm pools, and previews belong to the backend that runs
 	// everything except routed edit sessions.
 	const defaultBackendValue = defaultComputeBackend(env) ?? 'unset';
@@ -656,18 +655,6 @@ export function createFromEnv(
 		env.MARIMOHUB_COMPUTE_PROFILE_OVERRIDE,
 	);
 	const editorSandboxSharing = parseEditorSandboxSharing(env);
-	if (computeBackendValue === 'external-kernel' && editorSandboxSharing !== 'exclusive') {
-		// A shared editor sandbox would put one user's kernel in front of another.
-		throw new ConfigError(
-			'The external-kernel backend requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive',
-			{
-				variable: 'MARIMOHUB_EDITOR_SANDBOX_SHARING',
-				remediation:
-					'Set MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive so each session runs in the personal kernel of its owner.',
-				docs: 'docs/setup/compute/external-kernel.md',
-			},
-		);
-	}
 	const userHome = makeSandboxUserHome(env, editorSandboxSharing);
 	const profileNotice = unsupportedBackendNotice(
 		defaultBackendValue,

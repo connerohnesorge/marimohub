@@ -380,6 +380,7 @@ describe('makeCompute fail-fast', () => {
 			multiPort: false,
 			managedEnvironment: true,
 			sessionEnvironment: true,
+			exclusiveEditors: true,
 		});
 		expect(external.baseUrl).toBe('http://kira.svc:8080/api/external-kernel/v1');
 		expect(external.workdir).toBe('/home/marimo/work');

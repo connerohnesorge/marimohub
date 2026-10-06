@@ -439,6 +439,11 @@ export interface SandboxProvider {
 		 * `SandboxInstance.applyEnvironment`. AI and the kernel token stay withheld.
 		 */
 		sessionEnvironment?: boolean;
+		/**
+		 * Each sandbox belongs to the one user it was started for, so its edit
+		 * sessions are claimed exclusively whatever the deployment's editor sharing.
+		 */
+		exclusiveEditors?: boolean;
 	};
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance;
 	/** Attach without creating; a missing or stopped sandbox must fail on first use. */

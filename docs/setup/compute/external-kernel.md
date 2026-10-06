@@ -20,12 +20,14 @@ MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER=x-pantheon-bearer
 MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES=x-pantheon-
 MARIMOHUB_SANDBOX_EXPOSURE=proxy
 MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED=true
-MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive
 ```
 
-Configuration fails unless exposure is `proxy` and editor sandboxes are
-`exclusive`. Each session runs in its owner's kernel, so another user cannot
-attach to it. Without a fallback backend, do not set `MARIMOHUB_COMPUTE_IMAGE`;
+Configuration fails unless exposure is `proxy`. Each session runs in its
+owner's kernel, so the hub claims every external-kernel editor exclusively,
+whatever `MARIMOHUB_EDITOR_SANDBOX_SHARING` says: another editor sees the
+notebook as owned and can start a temporary sandbox. Sessions on the fallback
+backend keep the deployment's editor sharing; a user with a kernel who opens a
+notebook that someone already edits in a shared fallback sandbox joins it. Without a fallback backend, do not set `MARIMOHUB_COMPUTE_IMAGE`;
 the external service owns the kernel image. `MARIMOHUB_COMPUTE_WORKDIR` (default
 `/workspace`) only names the hub-side root that maps to each workspace.
 
