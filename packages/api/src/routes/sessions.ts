@@ -103,6 +103,7 @@ import {
 	SessionResponseSchema,
 	SurfaceResponseSchema,
 	sessionRetirer,
+	stopForeignManagedSandbox,
 	SuccessResponseSchema,
 	toComputeResourcesResponse,
 } from '../shared';
@@ -769,7 +770,11 @@ async function admittedSessionNotebooks(
 	return admitted;
 }
 
-async function retireSelectedSession(deps: ApiDeps, selected: Session): Promise<void> {
+async function retireSelectedSession(
+	deps: ApiDeps,
+	selected: Session,
+	opts: { sandboxStopped?: boolean } = {},
+): Promise<void> {
 	const { sessions } = deps.services;
 	const { project_id: pid, notebook_id: nid, session_id: sid } = selected;
 	// Only the winner of the terminating transition performs teardown.
@@ -783,8 +788,16 @@ async function retireSelectedSession(deps: ApiDeps, selected: Session): Promise<
 			);
 	} finally {
 		// Reconciliation can recover the pool from the terminal session if invalidation fails.
-		await sessionRetirer(deps).retire(session, { teardown: transitioned });
+		await sessionRetirer(deps).retire(session, {
+			teardown: transitioned,
+			sandboxStopped: opts.sandboxStopped,
+		});
 	}
+}
+
+/** A managed-environment kernel belongs to the session owner: nobody else can capture it. */
+function runsInPersonalKernel(deps: ApiDeps, session: Session): boolean {
+	return sessionCompute(deps.compute, session).capabilities?.managedEnvironment === true;
 }
 
 function withoutConnectionUrls(response: ReturnType<typeof toSessionResponse>) {
@@ -976,7 +989,11 @@ app.openapi(getEditorSession, async (c) => {
 				sharing,
 				holder: holderView,
 				can_take_over:
-					sharing === 'exclusive' && !!holder && holder.user_id !== user.id && !claim?.transfer,
+					sharing === 'exclusive' &&
+					!!holder &&
+					holder.user_id !== user.id &&
+					!claim?.transfer &&
+					!runsInPersonalKernel(deps, holder),
 				...(claim?.transfer ? { transfer: { status: claim.transfer.phase } } : {}),
 			},
 		},
@@ -1119,6 +1136,12 @@ app.openapi(takeoverEditorSession, async (c) => {
 		if (holder.notebook_id !== nid || holder.user_id === user.id || holder.ephemeral) {
 			await deps.services.sessions.cancelRequestedTakeover(pid, nid, body.takeover_id);
 			throw new ConflictError('The selected session cannot be taken over');
+		}
+		if (runsInPersonalKernel(deps, holder)) {
+			await deps.services.sessions.cancelRequestedTakeover(pid, nid, body.takeover_id);
+			throw new ForbiddenError(
+				'The current editor runs in their own personal kernel, which nobody else can take over. Ask them to close it, or have an administrator stop the session.',
+			);
 		}
 		const activity = await inspectEditorActivity(deps, holder);
 		observer.tag('activity', activity.state);
@@ -2164,7 +2187,8 @@ app.openapi(deleteSession, async (c) => {
 	// their own ephemeral session (role re-checked; see assertSessionControl).
 	await assertSessionControl(project, existing, user, deps, labels);
 
-	await retireSelectedSession(deps, existing);
+	const sandboxStopped = await stopForeignManagedSandbox(deps, existing, user);
+	await retireSelectedSession(deps, existing, { sandboxStopped });
 
 	return c.json({ success: true }, 200);
 });

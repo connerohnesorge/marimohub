@@ -63,8 +63,9 @@ Header stripping applies to kernel traffic on both backends.
   The service must verify the token on every request and serve only that user's
   kernel.
 - Every request also carries `X-External-Kernel-Owner`, the lowercased hub email
-  of the session owner. The service refuses a token whose email differs with
-  `403 owner_mismatch`, which the hub reports as a refusal.
+  of the session owner (on the admin stop route, of the caller). The service
+  refuses a token whose email differs with `403 owner_mismatch`, which the hub
+  reports as a refusal.
 - The hub refuses a token that is not a JWT, that has expired, or whose `email`
   claim differs from the signed-in hub user. It does not verify signatures; the
   service does.
@@ -73,10 +74,20 @@ Header stripping applies to kernel traffic on both backends.
   token in process memory, keyed by hub user id, and drops it at its `exp`. It
   never persists the token. Tokens of users who never start a kernel are not
   kept.
-- A request from someone else, such as an admin stopping the session, never
-  lends its own token to the owner's kernel. The owner's cached token is used,
-  or the operation fails. A token whose email differs from the signed-in user
-  is refused, never replaced by a cached one.
+- A request from anyone but the owner (an `/api/v1` request or an MCP tool
+  call) never reaches the owner's kernel. The hub refuses it before sending
+  anything, and it never uses the owner's cached token on that caller's
+  behalf. A token whose email differs from the signed-in user is refused,
+  never replaced by a cached one.
+- Stopping another user's session (`DELETE` on the session or the MCP
+  `stop_session` tool, which project managers and super admins may use on an
+  exclusive editor) calls `POST /admin/kernels/stop` with the caller's own
+  token. The service accepts it only from its administrators; a refusal leaves
+  the session running. The hub captures nothing from the session first, so
+  edits after its last periodic capture are not saved by the hub. The route
+  names the owner by the hub email in the owner's identity record.
+- Nobody can take over an editor that runs in a personal kernel; the hub does
+  not offer it and refuses the request.
 - A proxied browser request always uses the requesting user's own token from
   that request. The hub refuses a request from anyone but the session owner
   before it reaches the service, and never substitutes a cached token.
@@ -120,7 +131,8 @@ Header stripping applies to kernel traffic on both backends.
 The hub is a client of these endpoints, relative to
 `MARIMOHUB_COMPUTE_EXTERNAL_URL`. `{workspaceId}` is the hub sandbox id. Paths
 are relative to the workspace and never contain `..`. Every request carries
-`Authorization: Bearer <user JWT>` and `X-External-Kernel-Owner: <owner email>`;
+`Authorization: Bearer <user JWT>` and `X-External-Kernel-Owner: <owner email>`
+(the admin stop route carries the caller's token and email instead);
 any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch"}}`
 (token email differs from the owner), or `403` (not allowed).
 
@@ -132,6 +144,7 @@ any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch
 | `GET /workspaces/{workspaceId}/list?path=<rel>`                               | `200 {"entries":[{"path":"<workspace-relative path>","type":"file"\|"directory","size":<n>}]}` for one level; `404` when the workspace or directory does not exist |
 | `POST /workspaces/{workspaceId}/open` `{"notebook","projectId","notebookId"}` | `200 {"file":"<marimo file key>"}`                                                                                                                                 |
 | `DELETE /workspaces/{workspaceId}`                                            | `2xx` or `404`                                                                                                                                                     |
+| `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`        | `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller.                 |
 | `* /workspaces/{workspaceId}/proxy/{path}`                                    | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                   |
 
 The hub stores the file key in the session's origin URL and adds

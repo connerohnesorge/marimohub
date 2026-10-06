@@ -71,7 +71,8 @@ export class SessionRetirer {
 	 * mark is best-effort: a lost CAS leaves the record `terminating` for the
 	 * stale reaper to expire, which beats failing a stop whose sandbox is
 	 * already gone. `markTerminated: false` is for callers whose record is
-	 * already terminal (reconciliation).
+	 * already terminal (reconciliation). `sandboxStopped` is for a caller that
+	 * already stopped the sandbox itself: nothing is captured or destroyed.
 	 */
 	async retire(
 		session: Session,
@@ -80,16 +81,18 @@ export class SessionRetirer {
 			markTerminated?: boolean;
 			captureBeforeDestroy?: boolean;
 			thumbnailDeadlineAt?: number;
+			sandboxStopped?: boolean;
 		} = {},
 	): Promise<void> {
 		const sandboxDestroyed =
-			opts.teardown === false
+			opts.sandboxStopped === true ||
+			(opts.teardown === false
 				? !session.sandbox_id
 				: await this.teardownSandbox(
 						session,
 						opts.captureBeforeDestroy ?? true,
 						opts.thumbnailDeadlineAt,
-					);
+					));
 		if (opts.markTerminated !== false) {
 			await this.deps.sessions
 				.markTerminated(session.project_id, session.session_id)
@@ -97,7 +100,7 @@ export class SessionRetirer {
 		}
 		await this.deps.sessions.releaseAppFor(session);
 		if (sandboxDestroyed) {
-			if (opts.teardown !== false && session.sandbox_id) {
+			if ((opts.teardown !== false || opts.sandboxStopped) && session.sandbox_id) {
 				await this.deps.sessions
 					.markSandboxReclaimed(session.project_id, session.session_id, new Date().toISOString())
 					.catch(() => {});

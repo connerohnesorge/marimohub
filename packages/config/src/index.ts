@@ -689,6 +689,7 @@ export function createFromEnv(
 		sandboxExposureMode: exposure.mode,
 		surfaces,
 		libraries: options?.libraries,
+		ownerEmail: async (userId) => (await services.identities.get(userId))?.email,
 	});
 	if (surfaces?.opencode && exposure.mode === 'proxy') {
 		throw new ConfigError('OpenCode does not support proxy sandbox exposure', {

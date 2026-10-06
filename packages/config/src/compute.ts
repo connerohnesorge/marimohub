@@ -1,5 +1,10 @@
 import { Millis, Seconds } from '@marimo-hub/core';
-import type { SandboxExposureMode, SandboxProvider, WarmPoolSupport } from '@marimo-hub/core';
+import type {
+	SandboxExposureMode,
+	SandboxProvider,
+	UserId,
+	WarmPoolSupport,
+} from '@marimo-hub/core';
 import type { SandboxConfig } from '@marimo-hub/api';
 import { LocalCompute } from '@marimo-hub/compute-local';
 import { ModalCompute } from '@marimo-hub/compute-modal';
@@ -167,6 +172,8 @@ export interface ComputeOptions {
 	/** Enabled secondary surfaces; backends that reserve ports at create time read theirs here. */
 	surfaces?: SandboxConfig['surfaces'];
 	libraries?: LoadedAdapterLibraries;
+	/** A user's hub email, which the external-kernel admin stop route names. */
+	ownerEmail?: (userId: UserId) => Promise<string | undefined>;
 }
 
 /**
@@ -813,6 +820,7 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 					tokenHeader,
 					stripHeaderPrefixes: sandboxStripHeaders(env).prefixes,
 					workdir: env.MARIMOHUB_COMPUTE_WORKDIR,
+					ownerEmail: opts?.ownerEmail,
 				});
 			} catch (cause) {
 				throw new ConfigError(

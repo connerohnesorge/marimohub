@@ -32,6 +32,7 @@ import {
 	assertSessionNotebookVisible,
 	loadAuthorizedNotebook,
 	sessionRetirer,
+	stopForeignManagedSandbox,
 } from '../shared';
 import { authorizeSessionStart } from '../routes/sessionStart';
 
@@ -423,11 +424,12 @@ export function createMcpServer(
 				const existing = await deps.services.sessions.getSession(project.id, sessionId);
 				const labels = await assertSessionNotebookVisible(deps, project, existing, principal);
 				await assertSessionControl(project, existing, principal, deps, labels);
+				const sandboxStopped = await stopForeignManagedSandbox(deps, existing, principal);
 				const { session, transitioned } = await deps.services.sessions.beginTerminating(
 					project.id,
 					sessionId,
 				);
-				await sessionRetirer(deps).retire(session, { teardown: transitioned });
+				await sessionRetirer(deps).retire(session, { teardown: transitioned, sandboxStopped });
 				const stopped = await deps.services.sessions.getSession(project.id, sessionId);
 				return result({
 					project_id: project.id,

@@ -10,7 +10,9 @@
  * Every call authenticates with the end user's own bearer token alone, and names
  * the kernel owner so the service can refuse a token for anyone else. The hub
  * holds no service credential, so it can only reach a kernel while its owner's
- * token is available (see `EndUserCredentials`).
+ * token is available (see `EndUserCredentials`). The one exception is stopping
+ * another user's session, which goes to the service's admin stop route with the
+ * caller's own token; no other user's token reaches any other route.
  *
  * The kernel image is the environment: the provider declares
  * `managedEnvironment`, so the hub sends no env vars, secrets, setup commands,
@@ -56,6 +58,11 @@ export interface ExternalKernelComputeOptions {
 	workdir?: string;
 	requestTimeoutMs?: number;
 	now?: () => number;
+	/**
+	 * The hub email of a kernel owner, which the admin stop route names. Without
+	 * it, nobody but the owner can stop the owner's sessions.
+	 */
+	ownerEmail?: (owner: UserId) => Promise<string | undefined>;
 }
 
 export const DEFAULT_TOKEN_HEADER = 'x-pantheon-bearer';
@@ -432,7 +439,17 @@ class ExternalKernelSandbox implements SandboxInstance {
 		return { url: `${this.workspaceUrl}/proxy/?file=${encodeURIComponent(this.fileKey)}` };
 	}
 
+	/**
+	 * The owner, or background work with the owner's cached token, closes the
+	 * workspace. Anyone else's request goes to the admin stop route with that
+	 * caller's own token, which the service accepts only from its admins.
+	 */
 	async destroy(): Promise<void> {
+		const requester = this.provider.credentials.foreignRequester(this.owner);
+		if (requester) {
+			await this.provider.stopForAdmin(requester, this.owner!, this.id);
+			return;
+		}
 		const response = await this.provider.call(this.workspaceUrl, {
 			method: 'DELETE',
 			credential: this.credential(),
@@ -461,6 +478,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 	readonly credentials: EndUserCredentials;
 	private readonly stripHeaderPrefixes: readonly string[];
 	private readonly requestTimeoutMs: number;
+	private readonly ownerEmail?: (owner: UserId) => Promise<string | undefined>;
 
 	constructor(options: ExternalKernelComputeOptions) {
 		const base = new URL(options.baseUrl);
@@ -482,6 +500,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 			(prefix) => prefix.toLowerCase(),
 		);
 		this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+		this.ownerEmail = options.ownerEmail;
 	}
 
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance {
@@ -524,6 +543,34 @@ export class ExternalKernelCompute implements SandboxProvider {
 			return false;
 		}
 		throw await serviceError(response, 'checking for a personal kernel');
+	}
+
+	/**
+	 * Close `owner`'s hub session in `workspace` for an administrator, through the
+	 * only route that accepts a token other than the owner's. It runs no code in
+	 * the kernel and reads nothing from it.
+	 */
+	async stopForAdmin(admin: EndUserCredential, owner: UserId, workspace: SandboxId): Promise<void> {
+		const email = (await this.ownerEmail?.(owner))?.trim().toLowerCase();
+		if (!email) {
+			throw new UnavailableError(
+				"The hub cannot name this kernel's owner to the external kernel service, so only the owner can stop this session.",
+			);
+		}
+		const query = new URLSearchParams({ owner: email, workspace });
+		const response = await this.call(`${this.baseUrl}/admin/kernels/stop?${query}`, {
+			method: 'POST',
+			credential: admin,
+			action: "stopping another user's session",
+			allow: [403],
+		});
+		if (response.status === 403) {
+			await discard(response);
+			throw new ForbiddenError(
+				"The external kernel service does not let you stop another user's session; only its administrators can (HTTP 403).",
+			);
+		}
+		await discard(response);
 	}
 
 	withEndUserRequest<T>(
