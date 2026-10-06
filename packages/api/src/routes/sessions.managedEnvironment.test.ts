@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServices } from '@marimo-hub/core';
+import { createIntegrationId, createServices } from '@marimo-hub/core';
 import type {
+	ManagedSessionEnvironment,
 	MarimoLaunchSpec,
 	NotebookId,
 	ProjectId,
@@ -115,5 +116,97 @@ describe('Session start on a managed-environment compute provider', () => {
 		expect(instance.exec).not.toHaveBeenCalled();
 		expect(launches).toHaveLength(1);
 		expect(launches[0]).toMatchObject({ workdir: '/workspace', notebookFile: 'notebook.py' });
+	});
+
+	it('delivers integrations and federated credentials, never the AI or kernel token', async () => {
+		const { instance, calls, launches } = managedCompute();
+		const delivered: ManagedSessionEnvironment[] = [];
+		const delivering: SandboxInstance = {
+			...instance,
+			applyEnvironment: async (environment) => {
+				delivered.push(environment);
+			},
+		};
+		const compute = fakeComputeFrom(delivering, {
+			capabilities: { multiPort: false, managedEnvironment: true, sessionEnvironment: true },
+		});
+		const exchange = vi.fn(async () => ({
+			accessKeyId: 'CWAK',
+			secretAccessKey: 'sk',
+			sessionToken: 'tok',
+		}));
+		const tunnel = {
+			host: 'db.internal',
+			port: 5432,
+			hostVars: ['MARIMOHUB_PG_DB_HOST'],
+			portVars: [],
+			urlVars: [],
+		};
+		const pin = { id: createIntegrationId(), name: 'db', kind: 'postgres', version: 3 };
+		const resolveForSession = vi.fn(async () => ({
+			files: [],
+			vars: { MARIMOHUB_PG_DB_HOST: 'db.internal' },
+			attachments: [pin],
+			warnings: [],
+			tunnels: [tunnel],
+		}));
+		const deps = {
+			ai: {
+				upstreamBaseUrl: 'https://provider.example/v1',
+				upstreamApiKey: 'real-upstream-key',
+				model: 'gpt-test',
+				signingSecret: 'test-signing-secret',
+			},
+			wif: {
+				issuer: { mint: async () => 'jwt.value', jwks: async () => ({ keys: [] }) },
+				issuerUrl: 'https://hub.example.com',
+				target: {
+					broker: { exchange },
+					audience: 'object-storage',
+					storage: { endpoint: 'https://objects.example', region: 'us-east-1' },
+				},
+			},
+			integrations: { resolveForSession },
+			sandbox: {
+				bucket: { name: 'test', endpoint: '' },
+				hostname: 'localhost',
+				workdir: '/workspace',
+				persistWorkspace: 'source',
+				auth: 'on',
+			},
+		} as unknown as Partial<ApiDeps>;
+		const request = createTestApi({ bucket, userId: ACTOR, compute, deps }).request;
+
+		const data = await expectOk<Session>(
+			await request('POST', `/projects/${pid}/notebooks/${nid}/sessions`),
+		);
+
+		expect(data.status).toBe('running');
+		expect(resolveForSession).toHaveBeenCalledOnce();
+		expect(exchange).toHaveBeenCalledOnce();
+		expect(delivered).toHaveLength(1);
+		const [environment] = delivered;
+		expect(environment.vars).toEqual({
+			MARIMOHUB_PG_DB_HOST: 'db.internal',
+			AWS_ACCESS_KEY_ID: 'CWAK',
+			AWS_SECRET_ACCESS_KEY: 'sk',
+			AWS_SESSION_TOKEN: 'tok',
+			AWS_ENDPOINT_URL_S3: 'https://objects.example',
+			AWS_REGION: 'us-east-1',
+		});
+		expect(environment.tunnels).toEqual([tunnel]);
+		expect(environment.s3).toMatchObject([
+			{ endpoint: 'https://objects.example', accessKeyId: 'CWAK', sessionToken: 'tok' },
+		]);
+		// No marimo config (AI token) and no kernel token in either channel.
+		expect(environment.files).toEqual([]);
+		const stored = await createServices(bucket).sessions.getSession(
+			pid,
+			data.session_id as SessionId,
+		);
+		expect(stored.kernel_auth_token).toBeUndefined();
+		expect(stored.integrations).toEqual([pin]);
+		expect(calls.setEnvVars).toEqual([]);
+		expect(launches).toHaveLength(1);
 	});
 });

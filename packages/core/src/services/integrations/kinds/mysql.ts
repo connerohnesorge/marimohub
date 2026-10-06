@@ -98,6 +98,7 @@ export const mysql = defineIntegration({
 							MYSQL_PASSWORD: config.password,
 						}
 					: {},
+			discoveryTunnel: { hostVars: ['MYSQL_HOST'], portVars: ['MYSQL_TCP_PORT'] },
 			warnings:
 				config.ambient_env && config.ssl.mode !== 'disabled'
 					? [

@@ -8,12 +8,14 @@ import { z } from 'zod';
 import { ValidationError } from '../../../errors';
 import type { QueryReadinessCheck } from '../../../ports/integrations';
 import type { DuckDBHttpAccess } from '../data-preview/programs';
+import { awsS3Endpoint, DEFAULT_S3_REGION } from '../../identity/s3CredsEnv';
 import { defineIntegration, HOSTNAME_REGEX } from '../sdk';
 import { zSecret } from '../secretFields';
 import {
 	AMBIENT_ENV_DESCRIPTION,
 	AWS_REGION_REGEX,
 	awsStaticCredentials,
+	connectionVar,
 	GCS_BUCKET_REGEX,
 	httpUrlField,
 	isInsecureHttpUrl,
@@ -203,7 +205,7 @@ export const s3 = defineIntegration({
 						'[default]\ns3 =\n    addressing_style = path\n',
 					)
 				: undefined;
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'S3',
 			dir: 's3',
 			instanceName,
@@ -233,6 +235,31 @@ export const s3 = defineIntegration({
 			files,
 			manifestExtra: { bucket: config.bucket, auth_method: config.auth.method },
 		});
+		if (!staticAuth) return output;
+		const field = (name: string) => connectionVar('S3', instanceName, name);
+		const region = config.region ?? DEFAULT_S3_REGION;
+		return {
+			...output,
+			s3: {
+				endpoint: config.endpoint_url ?? awsS3Endpoint(region),
+				region,
+				accessKeyId: staticAuth.access_key_id,
+				secretAccessKey: staticAuth.secret_access_key,
+				...(staticAuth.session_token ? { sessionToken: staticAuth.session_token } : {}),
+				credentialVars: [
+					field('ACCESS_KEY_ID'),
+					field('SECRET_ACCESS_KEY'),
+					field('SESSION_TOKEN'),
+					...(config.ambient_env
+						? ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']
+						: []),
+				],
+				endpointVars: [
+					...(config.ambient_env ? ['AWS_ENDPOINT_URL_S3'] : []),
+					field('ENDPOINT_URL'),
+				],
+			},
+		};
 	},
 });
 

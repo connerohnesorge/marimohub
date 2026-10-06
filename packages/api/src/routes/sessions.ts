@@ -80,7 +80,7 @@ import {
 	scheduleProjectAlert,
 } from '../notifications';
 import type { ApiDeps, SandboxConfig } from '../context';
-import { mergeSessionEnv, resolveFederatedVars, resolveIntegrationRender } from '../sandboxEnv';
+import { mergeSessionEnv, resolveFederatedEnv, resolveIntegrationRender } from '../sandboxEnv';
 import {
 	assertProjectRole,
 	assertSessionAccess,
@@ -1548,9 +1548,11 @@ export async function startNotebookSession(input: {
 	let sandboxId = admission?.member.sandbox_id ?? createSandboxId();
 	const sessionId = admission?.member.session_id ?? createSessionId();
 	let warmClaim: WarmPoolClaim | undefined;
-	// A managed-environment kernel takes no hub-injected credential of any kind,
-	// so none is minted for it: no kernel token, AI token, WIF exchange, or render.
+	// A managed-environment kernel takes no kernel token or AI token. It gets
+	// integrations and workload identity only from a provider that delivers them.
 	const managedEnvironment = sessionProvider.capabilities?.managedEnvironment === true;
+	const withholdSessionEnv =
+		managedEnvironment && sessionProvider.capabilities?.sessionEnvironment !== true;
 	const kernelAuthToken =
 		sandbox.auth === 'on' && !managedEnvironment ? createKernelAuthToken() : undefined;
 
@@ -1722,8 +1724,8 @@ export async function startNotebookSession(input: {
 					};
 					// WIF + integrations share `sandboxEnv.ts` with the job runner, so the
 					// two injection paths cannot drift. Never for a viewer sandbox.
-					const resolveWifVars = () =>
-						resolveFederatedVars(deps, {
+					const resolveWifEnv = () =>
+						resolveFederatedEnv(deps, {
 							project,
 							workload: { kind: 'session', id: session!.session_id },
 							restricted: restrictedViewerCredentials,
@@ -1804,16 +1806,16 @@ export async function startNotebookSession(input: {
 							},
 						});
 
-					if (managedEnvironment) observer.tag('session_env_withheld', true);
+					if (withholdSessionEnv) observer.tag('session_env_withheld', true);
 					const { provision } = await all({
-						wifVars: () => (managedEnvironment ? undefined : resolveWifVars()),
+						wifEnv: () => (withholdSessionEnv ? undefined : resolveWifEnv()),
 						marimoEnv: () => (managedEnvironment ? undefined : resolveMarimoConfigEnv()),
-						integrationEnv: () => (managedEnvironment ? undefined : resolveIntegrationEnv()),
+						integrationEnv: () => (withholdSessionEnv ? undefined : resolveIntegrationEnv()),
 						async sessionEnv(): Promise<SessionEnv | undefined> {
-							const wifVars = await this.$.wifVars;
+							const wifEnv = await this.$.wifEnv;
 							const marimoEnv = await this.$.marimoEnv;
 							const integrationEnv = await this.$.integrationEnv;
-							let env: SessionEnv | undefined = wifVars ? { vars: wifVars } : undefined;
+							let env: SessionEnv | undefined = wifEnv;
 							if (marimoEnv) env = mergeSessionEnv(env, marimoEnv);
 							// Integration values are defaults; WIF and marimo configuration win collisions.
 							if (integrationEnv) env = mergeSessionEnv(integrationEnv, env ?? {});

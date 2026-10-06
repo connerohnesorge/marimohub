@@ -2,7 +2,14 @@
 // captured into a notebook version.
 import { ValidationError } from '../../errors';
 import { hasControlCharacter, isRecord } from '../../internal/validation';
-import type { IntegrationVersionPin, SessionRender, WorkloadRef } from '../../ports/integrations';
+import type {
+	IntegrationVersionPin,
+	SessionRender,
+	SessionS3Access,
+	SessionTunnel,
+	SessionUnrelayable,
+	WorkloadRef,
+} from '../../ports/integrations';
 import type { RenderOutput } from './sdk';
 import { CODE_EXECUTION_ENV, SHELL_BASICS_ENV } from './environmentName';
 import { stringify } from 'yaml';
@@ -138,13 +145,67 @@ export function bundleIntegrations(
 		path: `${INTEGRATIONS_DIR}/manifest.json`,
 		content: `${JSON.stringify(manifest, null, '\t')}\n`,
 	});
+	const network = bundleNetwork(rendered, vars, varOwner);
 
 	return {
 		files,
 		vars,
 		attachments: rendered.map(({ id, name, kind, version }) => ({ id, name, kind, version })),
 		warnings,
+		...(network.tunnels.length > 0 ? { tunnels: network.tunnels } : {}),
+		...(network.s3.length > 0 ? { s3: network.s3 } : {}),
+		...(network.unrelayable.length > 0 ? { unrelayable: network.unrelayable } : {}),
 	};
+}
+
+/**
+ * Keep only the declared variables that made it into the bundle: a discovery
+ * variable another instance claimed no longer carries this instance's target.
+ */
+function bundleNetwork(
+	rendered: RenderedIntegration[],
+	vars: Record<string, string>,
+	varOwner: Map<string, string>,
+): { tunnels: SessionTunnel[]; s3: SessionS3Access[]; unrelayable: SessionUnrelayable[] } {
+	const tunnels: SessionTunnel[] = [];
+	const s3: SessionS3Access[] = [];
+	const unrelayable: SessionUnrelayable[] = [];
+	for (const item of rendered) {
+		const owned = (name: string) => varOwner.get(name) === item.name;
+		for (const tunnel of item.output.tunnels ?? []) {
+			if (
+				!tunnel.host ||
+				!Number.isInteger(tunnel.port) ||
+				tunnel.port < 1 ||
+				tunnel.port > 65535
+			) {
+				throw new ValidationError(`Integration "${item.name}" declared an invalid tunnel target.`);
+			}
+			const declared: SessionTunnel = {
+				host: tunnel.host,
+				port: tunnel.port,
+				hostVars: tunnel.hostVars.filter(owned),
+				portVars: tunnel.portVars.filter(owned),
+				urlVars: tunnel.urlVars.filter(owned),
+			};
+			if (declared.hostVars.length + declared.portVars.length + declared.urlVars.length > 0) {
+				tunnels.push(declared);
+			}
+		}
+		if (item.output.s3) {
+			// Withholding a credential variable must not depend on who owns it.
+			const present = (name: string) => Object.hasOwn(vars, name);
+			s3.push({
+				...item.output.s3,
+				credentialVars: item.output.s3.credentialVars.filter(present),
+				endpointVars: item.output.s3.endpointVars.filter(owned),
+			});
+		}
+		if (item.output.unrelayable) {
+			unrelayable.push({ integration: item.name, reason: item.output.unrelayable });
+		}
+	}
+	return { tunnels, s3, unrelayable };
 }
 
 function assertValidEnvValue(key: string, value: string, instance: string): void {

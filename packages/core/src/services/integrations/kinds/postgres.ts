@@ -301,6 +301,15 @@ export const postgres = defineIntegration({
 				: {},
 			files,
 			manifestExtra: { host: config.host, database: config.database },
+			tunnels: [
+				{
+					host: config.host,
+					port: config.port,
+					hostVars: [`MARIMOHUB_PG_${seg}_HOST`, 'PGHOST'],
+					portVars: [`MARIMOHUB_PG_${seg}_PORT`, 'PGPORT'],
+					urlVars: [`MARIMOHUB_PG_${seg}_URL`],
+				},
+			],
 		};
 	},
 });

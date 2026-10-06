@@ -185,9 +185,11 @@ export type {
 export { SECRET_MARK, zSecret } from './integrations/secretFields';
 export {
 	assertValidIntegrationName,
+	bundleIntegrations,
 	INTEGRATIONS_DIR,
 	INTEGRATIONS_DIR_ENV,
 } from './integrations/bundle';
+export type { RenderedIntegration } from './integrations/bundle';
 export {
 	athena,
 	azureBlob,
@@ -366,10 +368,16 @@ export type {
 } from './runtime/preflight';
 export { WorkloadIdentityIssuer } from './identity/WorkloadIdentityIssuer';
 export type { WifClaims, JwksKey } from './identity/WorkloadIdentityIssuer';
-export { s3CredsToEnv } from './identity/s3CredsEnv';
+export {
+	awsS3Endpoint,
+	DEFAULT_S3_REGION,
+	s3CredsToEnv,
+	s3CredsToSessionEnv,
+} from './identity/s3CredsEnv';
 export {
 	exchangeFederatedStorageCredentials,
 	exchangeFederatedStorageEnv,
+	exchangeFederatedStorageSessionEnv,
 	projectSubject,
 } from './identity/federation';
 export {

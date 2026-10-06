@@ -319,6 +319,45 @@ export interface IntegrationVersionPin {
 	version: number;
 }
 
+/**
+ * A TCP destination that session variables connect to, naming the variables that
+ * carry it, so a backend that relays kernel traffic can point them at the relay.
+ */
+export interface SessionTunnel {
+	/** DNS name or IP literal, without brackets. */
+	host: string;
+	port: number;
+	/** Variables whose value is exactly `host`. */
+	hostVars: string[];
+	/** Variables whose value is exactly `port`. */
+	portVars: string[];
+	/** Variables whose value is a URL whose authority ends in `host:port`. */
+	urlVars: string[];
+}
+
+/**
+ * S3 credentials that session variables carry, naming those variables, so a
+ * backend that keeps credentials out of the kernel can withhold them.
+ */
+export interface SessionS3Access {
+	/** S3 API endpoint the credentials sign for, an http(s) origin. */
+	endpoint: string;
+	region: string;
+	accessKeyId: string;
+	secretAccessKey: string;
+	sessionToken?: string;
+	/** Every variable that holds one of the credentials. */
+	credentialVars: string[];
+	/** Variables that hold the endpoint, preferred first. */
+	endpointVars: string[];
+}
+
+/** An integration that connects somewhere no `SessionTunnel` can describe. */
+export interface SessionUnrelayable {
+	integration: string;
+	reason: string;
+}
+
 /** Files, variables, and audit pins produced for session provisioning. */
 export interface SessionRender {
 	files: { path: string; content: string }[];
@@ -327,4 +366,9 @@ export interface SessionRender {
 	attachments: IntegrationVersionPin[];
 	/** User-safe notices about best-effort integration features. */
 	warnings: string[];
+	/** TCP destinations `vars` connect to (see `SessionTunnel`). */
+	tunnels?: SessionTunnel[];
+	/** S3 credentials `vars` carry, in ascending precedence (see `SessionS3Access`). */
+	s3?: SessionS3Access[];
+	unrelayable?: SessionUnrelayable[];
 }

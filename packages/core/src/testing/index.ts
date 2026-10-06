@@ -10,3 +10,4 @@ export * from './fixtures';
 export * from './time';
 export * from './resourceSecurity';
 export * from './workspaceFixtures';
+export { SAMPLE_CONFIGS } from '../services/integrations/kinds/sampleConfigs';

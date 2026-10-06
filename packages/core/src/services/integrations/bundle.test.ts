@@ -252,3 +252,79 @@ describe('data-source discovery env', () => {
 		expect(parsed.warnings).toEqual(['Automatic discovery is unavailable.']);
 	});
 });
+
+describe('network declarations', () => {
+	it('keeps only the declared variables each instance still owns', () => {
+		const result = bundle([
+			rendered('alpha', {
+				env: { ALPHA_HOST: 'a.internal', ALPHA_URL: 'pg://a.internal:5432/x' },
+				discoveryEnv: { PGHOST: 'a.internal' },
+				tunnels: [
+					{
+						host: 'a.internal',
+						port: 5432,
+						hostVars: ['ALPHA_HOST', 'PGHOST'],
+						portVars: ['ALPHA_PORT'],
+						urlVars: ['ALPHA_URL'],
+					},
+				],
+			}),
+			rendered('beta', {
+				env: { BETA_HOST: 'b.internal' },
+				discoveryEnv: { PGHOST: 'b.internal' },
+				tunnels: [
+					{ host: 'b.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
+				],
+			}),
+		]);
+
+		// alpha wins discovery by name order; beta's only variable went to alpha.
+		expect(result.tunnels).toEqual([
+			{
+				host: 'a.internal',
+				port: 5432,
+				hostVars: ['ALPHA_HOST', 'PGHOST'],
+				portVars: [],
+				urlVars: ['ALPHA_URL'],
+			},
+		]);
+	});
+
+	it('names every present credential variable and records unrelayable targets', () => {
+		const access = {
+			endpoint: 'https://minio.internal:9000',
+			region: 'us-east-1',
+			accessKeyId: 'AK',
+			secretAccessKey: 'SK',
+			credentialVars: ['S3_KEY', 'S3_SECRET', 'S3_TOKEN'],
+			endpointVars: ['S3_ENDPOINT', 'MISSING'],
+		};
+		const result = bundle([
+			rendered('lake', {
+				env: { S3_KEY: 'AK', S3_SECRET: 'SK', S3_ENDPOINT: 'https://minio.internal:9000' },
+				s3: access,
+			}),
+			rendered('mongo', { env: { MONGO_URL: 'mongodb+srv://cluster' }, unrelayable: 'srv' }),
+		]);
+
+		expect(result.s3).toEqual([
+			{ ...access, credentialVars: ['S3_KEY', 'S3_SECRET'], endpointVars: ['S3_ENDPOINT'] },
+		]);
+		expect(result.unrelayable).toEqual([{ integration: 'mongo', reason: 'srv' }]);
+	});
+
+	it('rejects an invalid tunnel target and omits empty declarations', () => {
+		expect(() =>
+			bundle([
+				rendered('bad', {
+					env: { X: '1' },
+					tunnels: [{ host: 'h', port: 70000, hostVars: [], portVars: ['X'], urlVars: [] }],
+				}),
+			]),
+		).toThrow(/invalid tunnel target/);
+		const plain = bundle([rendered('plain', { env: { X: '1' } })]);
+		expect(plain).not.toHaveProperty('tunnels');
+		expect(plain).not.toHaveProperty('s3');
+		expect(plain).not.toHaveProperty('unrelayable');
+	});
+});

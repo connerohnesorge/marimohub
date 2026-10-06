@@ -3876,3 +3876,116 @@ describe('render purity', () => {
 		}
 	});
 });
+
+describe('network declarations', () => {
+	it.each([
+		[
+			postgres,
+			'db.internal',
+			5432,
+			['MARIMOHUB_PG_PROD_HOST', 'PGHOST'],
+			['MARIMOHUB_PG_PROD_PORT', 'PGPORT'],
+			['MARIMOHUB_PG_PROD_URL'],
+		],
+		[
+			mysql,
+			'mysql.internal',
+			3306,
+			['MARIMOHUB_MYSQL_PROD_HOST', 'MYSQL_HOST'],
+			['MARIMOHUB_MYSQL_PROD_PORT', 'MYSQL_TCP_PORT'],
+			['MARIMOHUB_MYSQL_PROD_URL'],
+		],
+		[
+			sqlserver,
+			'mssql.internal',
+			1433,
+			['MARIMOHUB_MSSQL_PROD_HOST'],
+			['MARIMOHUB_MSSQL_PROD_PORT'],
+			['MARIMOHUB_MSSQL_PROD_URL'],
+		],
+		[
+			trino,
+			'trino.internal',
+			443,
+			['MARIMOHUB_TRINO_PROD_HOST', 'TRINO_HOST'],
+			['MARIMOHUB_TRINO_PROD_PORT', 'TRINO_PORT'],
+			['MARIMOHUB_TRINO_PROD_URL'],
+		],
+		[pyspark, 'spark.internal', 15002, [], [], ['MARIMOHUB_PYSPARK_PROD_REMOTE', 'SPARK_REMOTE']],
+		[
+			databricks,
+			'dbc-1234abcd-5678.cloud.databricks.com',
+			443,
+			['MARIMOHUB_DATABRICKS_PROD_HOST'],
+			[],
+			['MARIMOHUB_DATABRICKS_PROD_URL'],
+		],
+	] as const)(
+		'%#: declares the server each client dials and the variables that carry it',
+		(def, host, port, hostVars, portVars, urlVars) => {
+			const output = renderFixture(def as IntegrationDefinition);
+			expect(output.tunnels).toEqual([{ host, port, hostVars, portVars, urlVars }]);
+			const env = { ...output.env, ...output.discoveryEnv };
+			for (const name of hostVars.filter((n) => n in env)) expect(env[name]).toBe(host);
+			for (const name of portVars.filter((n) => n in env)) expect(env[name]).toBe(String(port));
+			for (const name of urlVars) expect(env[name]).toContain(`${host}:${port}`);
+		},
+	);
+
+	it('declares a plain mongodb host but not a DNS-seeded mongodb+srv cluster', () => {
+		const plain = renderFixture(mongodb, { scheme: 'mongodb', port: 27018 });
+		expect(plain.tunnels).toEqual([
+			{
+				host: 'cluster0.abcde.mongodb.net',
+				port: 27018,
+				hostVars: ['MARIMOHUB_MONGODB_PROD_HOST'],
+				portVars: ['MARIMOHUB_MONGODB_PROD_PORT'],
+				urlVars: ['MARIMOHUB_MONGODB_PROD_URL'],
+			},
+		]);
+		const srv = renderFixture(mongodb);
+		expect(srv.tunnels).toBeUndefined();
+		expect(srv.unrelayable).toMatch(/DNS SRV/);
+	});
+
+	it('marks Snowflake unrelayable: its host comes from the account identifier', () => {
+		const output = renderFixture(snowflake);
+		expect(output.tunnels).toBeUndefined();
+		expect(output.unrelayable).toMatch(/account identifier/);
+	});
+
+	it('declares static S3 credentials and every variable that carries them', () => {
+		const output = renderFixture(s3);
+		expect(output.s3).toEqual({
+			endpoint: 'https://minio.internal:9000',
+			region: 'us-east-1',
+			accessKeyId: 'AKIAEXAMPLE',
+			secretAccessKey: 's3-secret',
+			credentialVars: [
+				'MARIMOHUB_S3_PROD_ACCESS_KEY_ID',
+				'MARIMOHUB_S3_PROD_SECRET_ACCESS_KEY',
+				'MARIMOHUB_S3_PROD_SESSION_TOKEN',
+				'AWS_ACCESS_KEY_ID',
+				'AWS_SECRET_ACCESS_KEY',
+				'AWS_SESSION_TOKEN',
+			],
+			endpointVars: ['AWS_ENDPOINT_URL_S3', 'MARIMOHUB_S3_PROD_ENDPOINT_URL'],
+		});
+		const aws = renderFixture(s3, {
+			endpoint_url: undefined,
+			region: 'cn-north-1',
+			ambient_env: false,
+		});
+		expect(aws.s3).toMatchObject({
+			endpoint: 'https://s3.cn-north-1.amazonaws.com.cn',
+			region: 'cn-north-1',
+			credentialVars: [
+				'MARIMOHUB_S3_PROD_ACCESS_KEY_ID',
+				'MARIMOHUB_S3_PROD_SECRET_ACCESS_KEY',
+				'MARIMOHUB_S3_PROD_SESSION_TOKEN',
+			],
+			endpointVars: ['MARIMOHUB_S3_PROD_ENDPOINT_URL'],
+		});
+		expect(renderFixture(s3, { auth: { method: 'ambient' } }).s3).toBeUndefined();
+	});
+});

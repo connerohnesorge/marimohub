@@ -1,4 +1,8 @@
-import { exchangeFederatedStorageEnv, UnavailableError, ValidationError } from '@marimo-hub/core';
+import {
+	exchangeFederatedStorageSessionEnv,
+	UnavailableError,
+	ValidationError,
+} from '@marimo-hub/core';
 import type {
 	Project,
 	ProjectId,
@@ -18,11 +22,15 @@ import { errorMetadata, logEvent } from './log';
  * same resolved secrets an app session would carry.
  */
 
+/** `add` wins variable collisions, and its S3 credentials take precedence. */
 export function mergeSessionEnv(base: SessionEnv | undefined, add: SessionEnv): SessionEnv {
 	return {
 		files: [...(base?.files ?? []), ...(add.files ?? [])],
 		vars: { ...base?.vars, ...add.vars },
 		defaults: { ...base?.defaults, ...add.defaults },
+		tunnels: [...(base?.tunnels ?? []), ...(add.tunnels ?? [])],
+		s3: [...(base?.s3 ?? []), ...(add.s3 ?? [])],
+		unrelayable: [...(base?.unrelayable ?? []), ...(add.unrelayable ?? [])],
 	};
 }
 
@@ -38,13 +46,13 @@ export interface FederatedVarsOptions {
  * WIF: best-effort project-scoped federated S3 creds. A federation/policy gap
  * yields no creds, never a failed sandbox. The JWT and creds are never logged.
  */
-export async function resolveFederatedVars(
+export async function resolveFederatedEnv(
 	deps: Pick<ApiDeps, 'wif'>,
 	options: FederatedVarsOptions,
-): Promise<Record<string, string> | undefined> {
+): Promise<SessionEnv | undefined> {
 	if (!(deps.wif && options.project.federation?.enabled && !options.restricted)) return;
 	try {
-		return await exchangeFederatedStorageEnv(
+		return await exchangeFederatedStorageSessionEnv(
 			deps.wif.issuer,
 			deps.wif.issuerUrl,
 			deps.wif.target,
@@ -105,8 +113,8 @@ export async function resolveJobSandboxEnv(
 	const userId = run.triggered_by ?? job.created_by;
 	const identity = await deps.services.identities.get(userId).catch(() => null);
 	const fields = { project_id: run.project_id, job_id: run.job_id, run_id: run.run_id };
-	const [wifVars, render] = await Promise.all([
-		resolveFederatedVars(deps, {
+	const [wifEnv, render] = await Promise.all([
+		resolveFederatedEnv(deps, {
 			project,
 			workload: { kind: 'job-run', id: run.run_id },
 			restricted: false,
@@ -142,7 +150,6 @@ export async function resolveJobSandboxEnv(
 				}),
 		}),
 	]);
-	let env: SessionEnv | undefined = wifVars ? { vars: wifVars } : undefined;
-	if (render) env = mergeSessionEnv(render, env ?? {});
-	return env;
+	if (render) return mergeSessionEnv(render, wifEnv ?? {});
+	return wifEnv;
 }

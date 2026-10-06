@@ -57,9 +57,13 @@ A provider whose kernels are managed elsewhere can declare
 `capabilities.managedEnvironment: true`. The hub then injects nothing into the
 sandbox: no env vars, credential files, kernel auth token, notebook bridge,
 setup commands, or Git commands. The session route does not mint AI tokens,
-workload identity credentials, or integration renders for it. Its instances
-must implement `launchMarimo(spec)`, which receives the notebook, mode, port,
-and startup budget as data instead of a shell command. `ensureDirectories`
+workload identity credentials, or integration renders for it, unless the
+provider also declares `capabilities.sessionEnvironment`: then it renders
+integrations and workload identity as for any backend and hands them, with the
+declared `tunnels` and `s3` credential sets, to `SandboxInstance.applyEnvironment`
+before launch. Its instances must implement `launchMarimo(spec)`, which
+receives the notebook, mode, port, and startup budget as data instead of a
+shell command. `ensureDirectories`
 replaces `mkdir -p` through `exec` when present. Headless job preparation is
 refused.
 

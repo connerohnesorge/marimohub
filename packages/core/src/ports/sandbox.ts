@@ -2,6 +2,7 @@ import type { NotebookId, ProjectId, SandboxId, UserId } from '../ids';
 import type { SessionMode } from '../constants';
 import type { Millis } from '../duration';
 import type { Timings } from '../timing';
+import type { SessionS3Access, SessionTunnel, SessionUnrelayable } from './integrations';
 
 export type ExecResult =
 	| { success: true; stdout: string; stderr: string }
@@ -204,6 +205,20 @@ export interface MarimoLaunchSpec {
 	timeoutMs: number;
 }
 
+/**
+ * Everything a session renders for its kernel, for a managed-environment
+ * provider that delivers it itself instead of the hub writing into the sandbox.
+ */
+export interface ManagedSessionEnvironment {
+	vars: Record<string, string>;
+	/** Absolute sandbox paths; variables may name them. */
+	files: { path: string; content: string }[];
+	tunnels: SessionTunnel[];
+	/** In ascending precedence: a later set wins where only one can apply. */
+	s3: SessionS3Access[];
+	unrelayable: SessionUnrelayable[];
+}
+
 export interface SandboxInstance {
 	/** Whether `mountBucket` is a real backend capability rather than a copy fallback signal. */
 	readonly supportsBucketMount?: boolean;
@@ -257,6 +272,12 @@ export interface SandboxInstance {
 	 * `capabilities.managedEnvironment`, whose kernels cannot run hub commands.
 	 */
 	launchMarimo?(spec: MarimoLaunchSpec): Promise<void>;
+	/**
+	 * Deliver the session's integration values and federated credentials before
+	 * `launchMarimo`. Required when the provider declares
+	 * `capabilities.sessionEnvironment`. Throws when it cannot deliver them.
+	 */
+	applyEnvironment?(environment: ManagedSessionEnvironment): Promise<void>;
 	/**
 	 * Create directories without a shell command; callers otherwise run `mkdir -p`
 	 * through `exec`. A backend without directory entries may treat it as a no-op.
@@ -412,6 +433,12 @@ export interface SandboxProvider {
 		 * bridge, and no Git commands; marimo starts through `launchMarimo`.
 		 */
 		managedEnvironment?: boolean;
+		/**
+		 * With `managedEnvironment`: sessions still render integrations and
+		 * workload identity, and the provider receives them through
+		 * `SandboxInstance.applyEnvironment`. AI and the kernel token stay withheld.
+		 */
+		sessionEnvironment?: boolean;
 	};
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance;
 	/** Attach without creating; a missing or stopped sandbox must fail on first use. */
