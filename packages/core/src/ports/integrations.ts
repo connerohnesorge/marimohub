@@ -396,6 +396,8 @@ export interface SessionAwsAccess {
 /** An integration that connects somewhere no network declaration can describe. */
 export interface SessionUnrelayable {
 	integration: string;
+	/** The integration's kind, e.g. `athena`. */
+	kind: string;
 	reason: string;
 }
 

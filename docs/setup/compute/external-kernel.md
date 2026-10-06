@@ -162,16 +162,27 @@ service applies it to that workspace only, never to the user's other notebooks.
   lifetime, the owner's next heartbeat renders the environment again and sends
   it again. An editor that is closed gets no refresh, so its credentials lapse.
 
-These cannot be relayed and are reported instead: Athena or Glue/DynamoDB with
-ambient AWS credentials, AWS profile or role credentials, S3 remote signing,
-SigV4-signed Iceberg REST catalogs, Iceberg REST catalogs with custom TLS files
-or a Google service account file, Iceberg HDFS storage, Kerberos Hive
-metastores, Azure service principals outside the known clouds, and Iceberg
-catalogs whose storage the catalog names only at run time. DuckDB HTTP and
-DuckLake render nothing for kernels on any backend.
+These integrations cannot be relayed: Athena or Glue/DynamoDB with ambient AWS
+credentials, AWS profile or role credentials, S3 remote signing, SigV4-signed
+Iceberg REST catalogs, Iceberg REST catalogs with custom TLS files or a Google
+service account file, Iceberg HDFS storage, Kerberos Hive metastores, Iceberg
+catalogs whose URI names no host and port, Azure service principals outside the
+known clouds, and Iceberg catalogs whose storage the catalog names only at run
+time. A session, app session, or job run in a personal kernel that would need
+one fails, naming each one and its kind:
 
-Each left-out item is logged as `external_kernel_environment_omitted` by name
-and reason, never by value. A `400 invalid_environment` fails the session start.
+> The integration "queries" (kind athena) is not available on your Kira kernel
+> yet. Remove it from this project, or ask an admin to move you back to the
+> hub's own kernels.
+
+The user is not moved to the fallback backend. A refused job run is recorded as
+failed with that message; the service gets `422` from `run-spec` and must not
+report the firing itself. DuckDB HTTP and DuckLake render nothing for kernels on
+any backend.
+
+A single variable or file that cannot be sent is left out and logged as
+`external_kernel_environment_omitted` by name and reason, never by value. A
+`400 invalid_environment` fails the session start.
 
 #### Saving and ending sessions
 

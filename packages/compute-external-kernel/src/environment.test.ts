@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionAwsAccess, SessionNetwork } from '@marimo-hub/core/ports/integrations';
 import type { ManagedSessionEnvironment } from '@marimo-hub/core/ports/sandbox';
-import { toKernelEnvironment } from './environment';
+import { ValidationError } from '@marimo-hub/core/errors';
+import { refuseUndeliverable, toKernelEnvironment } from './environment';
+import type { Omission } from './environment';
 
 const ROOT = '/tmp/marimohub-integrations';
 
@@ -362,9 +364,59 @@ describe('toKernelEnvironment', () => {
 		expect(
 			toKernelEnvironment(
 				environment({
-					network: { unrelayable: [{ integration: 'lake', reason: 'hdfs datanodes' }] },
+					network: {
+						unrelayable: [{ integration: 'lake', kind: 'iceberg_rest', reason: 'hdfs datanodes' }],
+					},
 				}),
 			).omitted,
-		).toEqual([{ kind: 'integration', name: 'lake', reason: 'hdfs datanodes' }]);
+		).toEqual([
+			{
+				kind: 'integration',
+				name: 'lake',
+				reason: 'hdfs datanodes',
+				integrationKind: 'iceberg_rest',
+			},
+		]);
+	});
+
+	describe('refuseUndeliverable', () => {
+		const omit = (name: string, kind: string): Omission => ({
+			kind: 'integration',
+			name,
+			reason: 'unrelayable',
+			integrationKind: kind,
+		});
+
+		it('names an integration the kernel cannot serve, and its kind', () => {
+			expect(() => refuseUndeliverable([omit('warehouse', 'snowflake')])).toThrow(
+				new ValidationError(
+					'The integration "warehouse" (kind snowflake) is not available on your Kira kernel yet. Remove it from this project, or ask an admin to move you back to the hub\'s own kernels.',
+				),
+			);
+		});
+
+		it('names every one of several', () => {
+			const refuse = () =>
+				refuseUndeliverable([omit('queries', 'athena'), omit('lake', 'iceberg_rest')]);
+			expect(refuse).toThrow(ValidationError);
+			expect(refuse).toThrow(
+				'The integrations "queries" (kind athena) and "lake" (kind iceberg_rest) are not available on your Kira kernel yet. Remove them from this project, or ask an admin to move you back to the hub\'s own kernels.',
+			);
+		});
+
+		it('lets supported integrations through, and only logs omitted values', () => {
+			const { omitted } = toKernelEnvironment(
+				environment({
+					vars: { PGHOST: 'db.internal', 'BAD-NAME': 'x' },
+					network: {
+						tunnels: [
+							{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
+						],
+					},
+				}),
+			);
+			expect(omitted.map(({ kind }) => kind)).toEqual(['variable']);
+			expect(() => refuseUndeliverable(omitted)).not.toThrow();
+		});
 	});
 });

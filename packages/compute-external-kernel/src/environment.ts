@@ -17,6 +17,7 @@ import type {
 	SessionTunnel,
 	SessionTunnelCredential,
 } from '@marimo-hub/core/ports/integrations';
+import { ValidationError } from '@marimo-hub/core/errors';
 import type { ManagedSessionEnvironment } from '@marimo-hub/core/ports/sandbox';
 
 /**
@@ -80,6 +81,8 @@ export interface Omission {
 	kind: 'variable' | 'file' | 'tunnel' | 'host' | 'mongodb' | 'aws' | 'integration';
 	name: string;
 	reason: string;
+	/** For a whole `integration`: its kind. */
+	integrationKind?: string;
 }
 
 // The service's limits, mirrored so a session fails here with a reason instead
@@ -176,8 +179,8 @@ export function toKernelEnvironment(
 		if (vars.delete(name)) omitted.push({ kind: 'variable', name, reason });
 	};
 
-	for (const { integration, reason } of network.unrelayable) {
-		omitted.push({ kind: 'integration', name: integration, reason });
+	for (const { integration, kind, reason } of network.unrelayable) {
+		omitted.push({ kind: 'integration', name: integration, reason, integrationKind: kind });
 	}
 
 	// Credentials never ride in the environment, whichever set the service keeps.
@@ -226,6 +229,27 @@ export function toKernelEnvironment(
 	const expiries = aws.flatMap(({ expiresAt }) => (expiresAt ? [expiresAt] : []));
 	const expiresAt = expiries.sort((a, b) => Date.parse(a) - Date.parse(b))[0];
 	return { body, omitted, ...(expiresAt ? { expiresAt } : {}) };
+}
+
+/**
+ * Fail when a whole integration cannot reach the kernel, naming each one and
+ * its kind. A session without it would start and then fail on first use, with
+ * nothing telling the user why. Omitted values (a variable, a file) only log.
+ */
+export function refuseUndeliverable(omitted: readonly Omission[]): void {
+	const missing = omitted.flatMap(({ kind, name, integrationKind }) =>
+		kind === 'integration' ? [`"${name}" (kind ${integrationKind ?? 'unknown'})`] : [],
+	);
+	if (missing.length === 0) return;
+	const listed =
+		missing.length === 1
+			? missing[0]
+			: `${missing.slice(0, -1).join(', ')}${missing.length > 2 ? ',' : ''} and ${missing.at(-1)}`;
+	const [subject, object] =
+		missing.length === 1 ? ['The integration', 'it'] : ['The integrations', 'them'];
+	throw new ValidationError(
+		`${subject} ${listed} ${missing.length === 1 ? 'is' : 'are'} not available on your Kira kernel yet. Remove ${object} from this project, or ask an admin to move you back to the hub's own kernels.`,
+	);
 }
 
 /** A later credential set wins every service it names; an earlier one keeps the rest. */

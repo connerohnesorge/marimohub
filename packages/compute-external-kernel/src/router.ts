@@ -12,7 +12,7 @@ import type {
 	SandboxProvider,
 	SandboxRouting,
 } from '@marimo-hub/core/ports/sandbox';
-import { RESERVED_PATHS, toKernelEnvironment } from './environment';
+import { refuseUndeliverable, RESERVED_PATHS, toKernelEnvironment } from './environment';
 import type { ExternalKernelCompute } from './index';
 
 /** The name sessions on the external kernel record as their `compute_backend`. */
@@ -126,6 +126,7 @@ export class ExternalKernelRouter implements SandboxProvider {
 						{ channel: 'warn' },
 					);
 				}
+				refuseUndeliverable(omitted);
 				return body;
 			},
 		};
