@@ -81,6 +81,7 @@ import {
 	scheduleProjectAlert,
 } from '../notifications';
 import type { ApiDeps, SandboxConfig } from '../context';
+import { isKernelApp, startKernelApp } from '../kernelApps';
 import { mergeSessionEnv, resolveFederatedEnv, resolveIntegrationRender } from '../sandboxEnv';
 import {
 	attendOwnerSession,
@@ -1443,6 +1444,39 @@ export async function startNotebookSession(input: {
 	if (mode === 'app' && !sourceVersionId)
 		throw new ConflictError('The app has no committed version');
 
+	if (mode === 'app' && !body?.replace_app_session_id) {
+		const kernelApp = await startKernelApp(deps, {
+			project,
+			notebookId: nid,
+			viewer: user,
+			versionId: sourceVersionId!,
+			restricted: restrictedViewerCredentials,
+			ephemeral,
+			authorizationExpiresAt,
+			appBaseUrl,
+		});
+		if (kernelApp) {
+			await appendAudit({ ...request, userId: user.id }, 'app.start', () =>
+				deps.services.events.append({
+					event: 'app.start',
+					actor: user.id,
+					project_id: pid,
+					notebook_id: nid,
+					session_id: kernelApp.session_id,
+				}),
+			);
+			return {
+				...toSessionResponse(kernelApp, await grants(kernelApp)),
+				reused: false,
+				// Each visit has its own session; leaving the page closes it.
+				app_assignment: {
+					visit_id: body?.app_visit_id ?? 'api',
+					generation: kernelApp.sandbox_id!,
+				},
+			};
+		}
+	}
+
 	let replacementTarget: Session | undefined;
 	if (body?.replace_app_session_id) {
 		const target = await sessions.getSession(pid, body.replace_app_session_id);
@@ -2273,6 +2307,7 @@ app.openapi(heartbeatSession, async (c) => {
 
 	if (
 		sessionMode(existing) === 'app' &&
+		!isKernelApp(deps, existing) &&
 		(existing.status === 'running' || existing.status === 'starting')
 	) {
 		const pool = new AppPoolService(deps.bucket, sessions, deps.policy.appPool, deps.metrics);
@@ -2322,6 +2357,16 @@ app.openapi(leaveAppVisit, async (c) => {
 		throw new NotFoundError('App session not found');
 	const labels = await assertSessionNotebookVisible(deps, project, session, user);
 	await assertSessionAccess(project, session, user, deps, labels);
+	if (isKernelApp(deps, session)) {
+		// Only the viewer who opened it can close it, with their own token.
+		if (session.user_id === user.id) {
+			const claimed = await deps.services.sessions.beginTerminating(pid, sid);
+			if (claimed.transitioned) {
+				await sessionRetirer(deps).retire(session, { teardown: true });
+			}
+		}
+		return c.json({ success: true as const }, 200);
+	}
 	await new AppPoolService(
 		deps.bucket,
 		deps.services.sessions,

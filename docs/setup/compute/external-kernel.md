@@ -58,8 +58,10 @@ request's own token. It does not cache the answer.
   never falls back on an error.
 
 The session records which backend it runs on, and every later operation on it
-(capture, teardown, proxying, surfaces) uses that backend. Apps, jobs, warm
-pools, data previews, compute profiles, and images always use the fallback.
+(capture, teardown, proxying, surfaces) uses that backend. Apps and scheduled
+jobs follow their author (see [Apps](#apps) and [Scheduled jobs](#scheduled-jobs)).
+Warm pools, data previews, compute profiles, and images always use the
+fallback.
 Header stripping applies to kernel traffic on both backends.
 
 #### Security model
@@ -193,6 +195,34 @@ What changes compared with other backends:
 - Connection counts are unknown (the service runs no commands), so a session is
   extended at its deadline while its heartbeat is fresh.
 
+#### Apps
+
+When a viewer opens an app whose version was saved by an author with a
+personal kernel, the app runs in the author's runtime in the kernel service,
+one session per visit, never in a hub app pool. The hub's access checks decide
+who may open it, exactly as for pooled apps.
+
+- The hub sends `POST /apps/sessions` with the viewer's own token;
+  `X-External-Kernel-Owner` names the author (the user who saved the version).
+  The body is `session` (the hub's id, which the service must use), `app` (the
+  notebook id), `version`, `notebook`, `files` (`path`, `contentBase64`; the
+  version's notebook and `pyproject.toml` over the workspace mirror, at most
+  32 MiB), and `environment` (the viewer's integrations, in the workspace
+  environment format). `404 no_kernel` sends the app to the hub's pool; any
+  other failure fails the start.
+- Authors who are not enrolled, and notebooks synced from Git, always use the
+  hub's pool without contacting the service.
+- The browser reaches it through the hub's proxy, which forwards to
+  `/apps/sessions/{session}/proxy/{path}` with the viewer's token. Only that
+  viewer's requests are forwarded.
+- Leaving the page sends the hub the visit's leave request, which closes the
+  session with `DELETE /apps/sessions/{session}` and the viewer's token. If
+  anyone else stops it (an admin, or deleting the notebook), the hub stops
+  serving it at once and closes it at the viewer's next request; a session
+  whose viewer never returns is left to the service's own idle policy.
+- Credentials in an app session are not sent again; they lapse at their
+  expiry.
+
 #### Scheduled jobs
 
 A scheduled job of a notebook stored in the hub runs in its author's personal
@@ -267,6 +297,9 @@ any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch
 | `DELETE /workspaces/{workspaceId}`                                                              | `2xx` or `404`                                                                                                                                                                                                                  |
 | `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`                          | Saves the open notebooks into the workspace, then closes them; runs no cell. `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller. |
 | `* /workspaces/{workspaceId}/proxy/{path}`                                                      | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                                                                                |
+| `POST /apps/sessions` `{"session","app","version","notebook","files","environment"}`            | `2xx {"session":"<the hub's id>"}`; `404 {"error":{"code":"no_kernel"}}` when the author has no kernel (see [Apps](#apps))                                                                                                      |
+| `* /apps/sessions/{session}/proxy/{path}`                                                       | HTTP and WebSocket proxy to the app, for the viewer who opened it                                                                                                                                                               |
+| `DELETE /apps/sessions/{session}`                                                               | `2xx` or `404`                                                                                                                                                                                                                  |
 | `PUT /jobs/{jobKey}` `{"schedule","timezone","enabled"}`                                        | `2xx`; registers or replaces the author's scheduled job (see [Scheduled jobs](#scheduled-jobs))                                                                                                                                 |
 | `DELETE /jobs/{jobKey}`                                                                         | `2xx` or `404`                                                                                                                                                                                                                  |
 

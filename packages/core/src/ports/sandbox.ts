@@ -434,6 +434,32 @@ export interface KernelJobs {
 	environment(env: ManagedSessionEnvironment): unknown;
 }
 
+/** One viewer's session of an app, to run in its author's own kernel runtime. */
+export interface KernelAppStart {
+	/** The hub's id for the session; the service names the session after it. */
+	sandboxId: SandboxId;
+	authorEmail: string;
+	app: NotebookId;
+	version: string;
+	/** The notebook to run, relative to the file tree. */
+	notebook: string;
+	files: readonly { path: string; content: Uint8Array }[];
+	environment: ManagedSessionEnvironment;
+}
+
+/**
+ * Runs apps in their author's own kernel runtime, one session per viewer and
+ * with the viewer's own credential. The sessions it starts are served by
+ * `routing.backend(backend)`.
+ */
+export interface KernelApps {
+	readonly backend: string;
+	/** False sends the author's apps to the hub without asking the kernel service. */
+	mayRunAppsOf(authorEmail: string): boolean;
+	/** Starts the session inside the viewer's request; undefined when the author has no kernel. */
+	start(input: KernelAppStart): Promise<{ originUrl: string } | undefined>;
+}
+
 export interface SandboxProvider {
 	/** Opt-in requires strict reconnect and idempotent destruction by the original sandbox ID. */
 	readonly warmPool?: WarmPoolSupport;
@@ -441,6 +467,8 @@ export interface SandboxProvider {
 	readonly routing?: SandboxRouting;
 	/** Present when authors' scheduled jobs can run in their own kernels. */
 	readonly kernelJobs?: KernelJobs;
+	/** Present when apps can run in their author's own kernel runtime. */
+	readonly kernelApps?: KernelApps;
 	readonly capabilities?: {
 		multiPort: boolean;
 		/** Applies resources.cpu and resources.memoryBytes from compute profiles. */

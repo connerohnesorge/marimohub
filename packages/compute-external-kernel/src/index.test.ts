@@ -46,6 +46,8 @@ class FakeKernelService {
 	readonly admins = new Set([ADMIN_EMAIL]);
 	readonly environments = new Map<string, unknown>();
 	readonly jobs = new Map<string, unknown>();
+	/** App sessions by id: who opened them and what was sent. */
+	readonly apps = new Map<string, { viewer: string; author: string; body: unknown }>();
 	forbidden = new Set<string>();
 	ownerMismatch = false;
 	private server?: Server;
@@ -99,6 +101,9 @@ class FakeKernelService {
 					.email
 			: undefined;
 		if (!email) return reply.status(401, { error: { code: 'unauthorized' } });
+		const path0 = url.pathname.replace('/api/external-kernel/v1', '');
+		if (path0.startsWith('/apps/sessions'))
+			return this.handleApp(method, path0, email, headers, body, reply);
 		if (this.ownerMismatch || headers['x-external-kernel-owner'] !== email.toLowerCase()) {
 			return reply.status(403, { error: { code: 'owner_mismatch' } });
 		}
@@ -177,6 +182,33 @@ class FakeKernelService {
 		if (method === 'DELETE' && rest === '') return reply.status(204);
 		return reply.status(404, { error: { code: 'not_found' } });
 	}
+
+	/** Viewer routes: the token is any user's; on start, the owner header names the author. */
+	private handleApp(
+		method: string,
+		path: string,
+		email: string,
+		headers: IncomingHttpHeaders,
+		body: Buffer,
+		reply: { status: (code: number, json?: unknown) => void },
+	): void {
+		if (method === 'POST' && path === '/apps/sessions') {
+			const author = String(headers['x-external-kernel-owner'] ?? '');
+			if (!this.kernels.has(author)) return reply.status(404, { error: { code: 'no_kernel' } });
+			const parsed = JSON.parse(body.toString()) as { session: string };
+			this.apps.set(parsed.session, { viewer: email, author, body: parsed });
+			return reply.status(201, { session: parsed.session });
+		}
+		const id = /^\/apps\/sessions\/([^/]+)$/.exec(path)?.[1];
+		const app = id ? this.apps.get(id) : undefined;
+		if (method === 'DELETE' && id) {
+			if (!app) return reply.status(404, { error: { code: 'not_found' } });
+			if (app.viewer !== email) return reply.status(403, { error: { code: 'forbidden' } });
+			this.apps.delete(id);
+			return reply.status(204);
+		}
+		return reply.status(404, { error: { code: 'not_found' } });
+	}
 }
 
 const service = new FakeKernelService();
@@ -191,6 +223,7 @@ afterEach(() => {
 	service.workspaces.clear();
 	service.environments.clear();
 	service.jobs.clear();
+	service.apps.clear();
 	service.forbidden.clear();
 	service.admins.clear();
 	service.admins.add(ADMIN_EMAIL);
@@ -659,6 +692,85 @@ describe('ExternalKernelCompute', () => {
 				),
 			).rejects.toBeInstanceOf(ForbiddenError);
 			expect(service.requests).toEqual([]);
+		});
+	});
+
+	describe('app sessions', () => {
+		const viewerToken = jwt({ email: ADMIN_EMAIL, exp: NOW / 1000 + 3600 });
+		const asViewer = <T>(fn: () => Promise<T>) =>
+			provider.withEndUserRequest(browserRequest(viewerToken), admin, fn);
+		const start = () =>
+			provider.startApp({
+				sandboxId: SANDBOX,
+				authorEmail: ` ${OWNER_EMAIL.toUpperCase()} `,
+				app: 'nb-0123456789abcdef' as never,
+				version: 'v1',
+				notebook: 'notebook.py',
+				files: [{ path: 'notebook.py', content: new TextEncoder().encode('import marimo') }],
+				environment: {
+					vars: { A: '1', AWS_SECRET_ACCESS_KEY: 'SK' },
+					files: [],
+					network: {
+						tunnels: [],
+						hosts: [],
+						mongodb: [],
+						aws: [
+							{
+								services: ['s3'],
+								region: 'us-east-1',
+								accessKeyId: 'AK',
+								secretAccessKey: 'SK',
+								credentialVars: ['AWS_SECRET_ACCESS_KEY'],
+								endpointVars: [],
+							},
+						],
+						relayEnv: {},
+						relayFiles: [],
+						unrelayable: [],
+					},
+				},
+			});
+
+		it("starts in the author's runtime with the viewer's token, and only the viewer closes it", async () => {
+			makeProvider();
+
+			const started = await asViewer(start);
+
+			expect(started).toEqual({
+				originUrl: `${service.baseUrl}/apps/sessions/${SANDBOX}/proxy/`,
+			});
+			const [post] = service.requests;
+			expect(post.headers.authorization).toBe(`Bearer ${viewerToken}`);
+			expect(post.headers['x-external-kernel-owner']).toBe(OWNER_EMAIL);
+			const body = JSON.parse(post.body) as {
+				session: string;
+				files: { path: string; contentBase64: string }[];
+				environment: { env: Record<string, string>; aws: unknown[] };
+			};
+			expect(body.session).toBe(SANDBOX);
+			expect(Buffer.from(body.files[0].contentBase64, 'base64').toString()).toBe('import marimo');
+			expect(body.environment.env).toEqual({ A: '1' });
+			expect(body.environment.aws).toHaveLength(1);
+
+			const session = provider.appSession(SANDBOX, {
+				owner: { projectId: PROJECT, userId: ADMIN },
+			});
+			await expect(asOwner(() => session.destroy())).rejects.toBeInstanceOf(ForbiddenError);
+			await asViewer(() => session.destroy());
+			expect(service.apps.size).toBe(0);
+			await expect(asViewer(() => session.readFile('/workspace/notebook.py'))).rejects.toThrow(
+				/app session/,
+			);
+		});
+
+		it("is undefined when the author has no kernel, so the hub's pool serves the app", async () => {
+			makeProvider();
+			service.kernels.delete(OWNER_EMAIL);
+			try {
+				await expect(asViewer(start)).resolves.toBeUndefined();
+			} finally {
+				service.kernels.add(OWNER_EMAIL);
+			}
 		});
 	});
 

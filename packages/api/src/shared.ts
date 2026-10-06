@@ -59,6 +59,7 @@ import type {
 	JobRun,
 	UserId,
 } from '@marimo-hub/core';
+import { isKernelApp } from './kernelApps';
 import type { ApiDeps, HonoEnv } from './context';
 import { describeError, logEvent } from './log';
 
@@ -659,9 +660,16 @@ export async function stopForeignManagedSession(
 	if (session.status !== 'running' && session.status !== 'starting') return false;
 	const provider = sessionCompute(deps.compute, session);
 	if (provider.capabilities?.managedEnvironment !== true) return false;
-	await provider.create(session.sandbox_id, { owner: sessionOwner(session) }).destroy();
 	const { sessions } = deps.services;
 	const { project_id: pid, session_id: sid } = session;
+	if (isKernelApp(deps, session)) {
+		// Only its viewer's token closes it. Ending the record stops the hub serving
+		// it; the viewer's next request closes it in the kernel service.
+		const { session: terminating } = await sessions.beginTerminating(pid, sid);
+		await sessionRetirer(deps).retire(terminating, { teardown: false });
+		return true;
+	}
+	await provider.create(session.sandbox_id, { owner: sessionOwner(session) }).destroy();
 	await sessions.markAdminStopped(pid, sid, new Date().toISOString());
 	const { session: terminating } = await sessions.beginTerminating(pid, sid);
 	await sessionRetirer(deps).retire(terminating, { teardown: false });

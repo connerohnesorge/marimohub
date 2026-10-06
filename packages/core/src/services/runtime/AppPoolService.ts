@@ -431,7 +431,9 @@ export class AppPoolService {
 				!!session &&
 				session.project_id === projectId &&
 				session.notebook_id === notebookId &&
-				sessionMode(session) === 'app',
+				sessionMode(session) === 'app' &&
+				// An app session on a routed backend belongs to one visit, never a pool.
+				session.compute_backend === undefined,
 		);
 		return this.store.mutate(projectId, notebookId, (pool) => {
 			for (const member of pool.members) {

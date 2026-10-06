@@ -38,6 +38,7 @@ import type {
 	ExecResult,
 	ExposePortResult,
 	FileInfo,
+	KernelAppStart,
 	KernelJobSchedule,
 	KernelProxyRequest,
 	KernelProxyTarget,
@@ -58,7 +59,12 @@ import { toKernelEnvironment } from './environment';
 
 export { EndUserCredentials, readEndUserCredential } from './credentials';
 export type { EndUserCredential } from './credentials';
-export { EXTERNAL_KERNEL_BACKEND, ExternalKernelRouter } from './router';
+export {
+	EXTERNAL_KERNEL_APP_BACKEND,
+	EXTERNAL_KERNEL_BACKEND,
+	ExternalKernelApps,
+	ExternalKernelRouter,
+} from './router';
 export { toKernelEnvironment } from './environment';
 export type { KernelEnvironment, Omission } from './environment';
 
@@ -174,9 +180,12 @@ class ExternalKernelSandbox implements SandboxInstance {
 		private readonly id: SandboxId,
 		private readonly owner: UserId | undefined,
 		private readonly attachOnly: boolean,
+		/** An app session: the service serves it, and only closing it is the hub's to do. */
+		private readonly app = false,
 	) {}
 
 	private get workspaceUrl(): string {
+		if (this.app) throw unsupported('reach the files of an app session');
 		return `${this.provider.baseUrl}/workspaces/${encodeURIComponent(this.id)}`;
 	}
 
@@ -502,6 +511,20 @@ class ExternalKernelSandbox implements SandboxInstance {
 	 * only from its admins.
 	 */
 	async destroy(): Promise<void> {
+		if (this.app) {
+			// Only its viewer's token can close an app session.
+			const response = await this.provider.call(
+				`${this.provider.baseUrl}/apps/sessions/${encodeURIComponent(this.id)}`,
+				{
+					method: 'DELETE',
+					credential: this.credential(),
+					action: 'closing the app session',
+					allow: [404],
+				},
+			);
+			await discard(response);
+			return;
+		}
 		const requester = this.provider.credentials.foreignRequester(this.owner);
 		if (requester) {
 			await this.provider.stopForAdmin(requester, this.owner!, this.id);
@@ -520,6 +543,8 @@ class ExternalKernelSandbox implements SandboxInstance {
 interface CallOptions {
 	method?: string;
 	credential: EndUserCredential;
+	/** `X-External-Kernel-Owner` when it is not the credential's own email (an app's author). */
+	ownerEmail?: string;
 	action: string;
 	body?: Uint8Array<ArrayBuffer>;
 	headers?: Record<string, string>;
@@ -569,6 +594,73 @@ export class ExternalKernelCompute implements SandboxProvider {
 
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance {
 		return this.instance(id, options, false);
+	}
+
+	/** The handle of an app session started by `startApp`. */
+	appSession(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance {
+		if (!WORKSPACE_ID.test(id)) throw new Error(`Invalid app session id: ${id}`);
+		return new ExternalKernelSandbox(this, id, options?.owner?.userId, false, true);
+	}
+
+	/**
+	 * Start one viewer's app session in the author's runtime, with the viewer's
+	 * own token; the owner header names the author. The service names the session
+	 * after the hub's sandbox id. Undefined when the author has no kernel.
+	 */
+	async startApp(input: KernelAppStart): Promise<{ originUrl: string } | undefined> {
+		if (!WORKSPACE_ID.test(input.sandboxId)) {
+			throw new Error(`Invalid app session id: ${input.sandboxId}`);
+		}
+		const { body: environment, omitted } = toKernelEnvironment(input.environment);
+		if (omitted.length > 0) {
+			logEvent(
+				{
+					level: 'warn',
+					event: 'external_kernel_environment_omitted',
+					sandbox_id: input.sandboxId,
+					omitted,
+				},
+				{ channel: 'warn' },
+			);
+		}
+		const response = await this.call(`${this.baseUrl}/apps/sessions`, {
+			method: 'POST',
+			credential: this.credentials.forOwner(undefined),
+			ownerEmail: input.authorEmail.trim().toLowerCase(),
+			action: 'starting an app session',
+			body: new TextEncoder().encode(
+				JSON.stringify({
+					session: input.sandboxId,
+					app: input.app,
+					version: input.version,
+					notebook: input.notebook,
+					files: input.files.map(({ path, content }) => ({
+						path,
+						contentBase64: base64Encode(content),
+					})),
+					environment,
+				}),
+			),
+			headers: { 'content-type': 'application/json' },
+			allow: [404],
+			timeoutMs: DEFAULT_OPEN_TIMEOUT_MS,
+		});
+		if (response.status === 404) {
+			if ((await errorCode(response.clone())) === 'no_kernel') {
+				await discard(response);
+				return undefined;
+			}
+			throw await serviceError(response, 'starting an app session');
+		}
+		const answer = (await response.json().catch(() => null)) as { session?: unknown } | null;
+		if (answer?.session !== input.sandboxId) {
+			throw new UnavailableError(
+				"The external kernel service did not start the app session under the hub's id.",
+			);
+		}
+		return {
+			originUrl: `${this.baseUrl}/apps/sessions/${encodeURIComponent(input.sandboxId)}/proxy/`,
+		};
 	}
 
 	connectExisting(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance {
@@ -691,6 +783,17 @@ export class ExternalKernelCompute implements SandboxProvider {
 		if (`${origin.origin}${origin.pathname}` !== prefix || !fileKey) {
 			throw new UnavailableError('This session is not routed to the configured external kernel.');
 		}
+		const { target, headers } = this.proxyTarget(prefix, input);
+		// One server serves many notebooks; marimo picks the notebook by `file`.
+		if (!target.searchParams.has('file')) target.searchParams.set('file', fileKey);
+		return { url: target.toString(), headers };
+	}
+
+	/**
+	 * `input`'s kernel path under `prefix`, with the caller's own token in place
+	 * of every hub credential.
+	 */
+	proxyTarget(prefix: string, input: KernelProxyRequest): { target: URL; headers: Headers } {
 		const query = input.kernelPath.indexOf('?');
 		const path = query === -1 ? input.kernelPath : input.kernelPath.slice(0, query);
 		const target = new URL(prefix);
@@ -699,9 +802,6 @@ export class ExternalKernelCompute implements SandboxProvider {
 		if (!`${target.origin}${target.pathname}`.startsWith(prefix)) {
 			throw new ForbiddenError('Invalid kernel path');
 		}
-		// One server serves many notebooks; marimo picks the notebook by `file`.
-		if (!target.searchParams.has('file')) target.searchParams.set('file', fileKey);
-
 		const credential = this.credentials.forRequest(input.request, input.principal);
 		const headers = new Headers(input.headers);
 		const stripped = [...headers.keys()].filter(
@@ -714,7 +814,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 		for (const name of stripped) headers.delete(name);
 		headers.set('authorization', `Bearer ${credential.token}`);
 		headers.set(OWNER_HEADER, credential.email);
-		return { url: target.toString(), headers };
+		return { target, headers };
 	}
 
 	async call(url: string, options: CallOptions): Promise<Response> {
@@ -725,7 +825,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 				headers: {
 					...options.headers,
 					authorization: `Bearer ${options.credential.token}`,
-					[OWNER_HEADER]: options.credential.email,
+					[OWNER_HEADER]: options.ownerEmail ?? options.credential.email,
 				},
 				body: options.body,
 				redirect: 'manual',
