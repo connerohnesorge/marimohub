@@ -317,7 +317,9 @@ describe('network declarations', () => {
 		]);
 		expect(result.network?.hosts).toEqual([{ host: 'storage.googleapis.com' }]);
 		expect(result.network?.relayEnv).toEqual({ LAKE_URL: 'keyless' });
-		expect(result.network?.unrelayable).toEqual([{ integration: 'mongo', reason: 'srv' }]);
+		expect(result.network?.unrelayable).toEqual([
+			{ integration: 'mongo', kind: 'synthetic', reason: 'srv' },
+		]);
 	});
 
 	it('renders the PyIceberg YAML without the properties a relay drops', () => {

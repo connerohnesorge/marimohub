@@ -226,7 +226,11 @@ function bundleNetwork(
 		}
 		if (output.relayYamlKeys?.length) yamlKeys.set(item.name, new Set(output.relayYamlKeys));
 		if (output.unrelayable) {
-			network.unrelayable.push({ integration: item.name, reason: output.unrelayable });
+			network.unrelayable.push({
+				integration: item.name,
+				kind: item.kind,
+				reason: output.unrelayable,
+			});
 		}
 		declared ||=
 			Object.keys(relayEnv).length > 0 ||

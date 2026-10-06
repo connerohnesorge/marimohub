@@ -237,7 +237,7 @@ describe('SandboxProvisioner with a managed-environment provider', () => {
 						endpointVars: [],
 					},
 				],
-				unrelayable: [{ integration: 'mongo', reason: 'srv' }],
+				unrelayable: [{ integration: 'mongo', kind: 'mongodb', reason: 'srv' }],
 			};
 
 			await new SandboxProvisioner(provider).provision(
