@@ -290,12 +290,13 @@ Native Kubernetes creates one keep-alive Pod and Service per session through `@k
 
 `MARIMOHUB_COMPUTE_BACKEND=external-kernel`
 
-Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, workload identity, integrations, per-notebook dependencies, jobs, apps, or surfaces. See [External kernel](compute.md#external-kernel).
+Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, per-notebook dependencies, jobs, apps, or surfaces; integrations and workload identity go through the service's environment route. See [External kernel](compute.md#external-kernel).
 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
 | `MARIMOHUB_COMPUTE_EXTERNAL_URL` | Base URL of the external kernel API, reachable from the hub. | Yes | — | `http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1` |
 | `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER` | Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there. | — | `x-pantheon-bearer` | — |
+| `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND` | Backend that runs edit sessions for users the external service answers `404 no_kernel` for, and every app, job, warm pool, and preview. It is configured with its own variables, exactly as if it were `MARIMOHUB_COMPUTE_BACKEND`. Any other answer from the service fails the session start; it never falls back. Unset: every edit session needs a personal kernel. | — | — | `kubernetes` |
 
 ### Local (dev only)
 

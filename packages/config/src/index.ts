@@ -75,7 +75,13 @@ import {
 	projectCreationRestricted,
 } from './auth';
 import { buildConfigSummary } from './configSummary';
-import { computeBackend, makeCompute, resolveSandboxImages, sandboxStripHeaders } from './compute';
+import {
+	computeBackend,
+	defaultComputeBackend,
+	makeCompute,
+	resolveSandboxImages,
+	sandboxStripHeaders,
+} from './compute';
 import {
 	parseComputeProfileOverride,
 	parseComputeProfiles,
@@ -635,10 +641,13 @@ export function createFromEnv(
 	const sandboxImages = resolveSandboxImages(env);
 	const computeProfiles = parseComputeProfiles(env.MARIMOHUB_COMPUTE_PROFILES);
 	const computeBackendValue = computeBackend(env) ?? 'unset';
+	// Profiles, images, warm pools, and previews belong to the backend that runs
+	// everything except routed edit sessions.
+	const defaultBackendValue = defaultComputeBackend(env) ?? 'unset';
 	const computeCapabilities = options?.libraries?.compute?.capabilities;
-	const profilesSupported = supportsComputeProfiles(computeBackendValue, computeCapabilities);
+	const profilesSupported = supportsComputeProfiles(defaultBackendValue, computeCapabilities);
 	const appliedComputeProfiles = profilesForBackend(
-		computeBackendValue,
+		defaultBackendValue,
 		computeProfiles,
 		computeCapabilities,
 	);
@@ -661,14 +670,14 @@ export function createFromEnv(
 	}
 	const userHome = makeSandboxUserHome(env, editorSandboxSharing);
 	const profileNotice = unsupportedBackendNotice(
-		computeBackendValue,
+		defaultBackendValue,
 		computeProfiles,
 		computeProfileOverride,
 		computeCapabilities,
 	);
-	if (profileNotice && !warnedUnsupportedProfileBackends.has(computeBackendValue)) {
+	if (profileNotice && !warnedUnsupportedProfileBackends.has(defaultBackendValue)) {
 		console.warn(profileNotice);
-		warnedUnsupportedProfileBackends.add(computeBackendValue);
+		warnedUnsupportedProfileBackends.add(defaultBackendValue);
 	}
 	const services = createServices(bucket, metrics, { tracing: options?.tracing });
 	const projectAlerts = makeProjectAlerts(env, bucket, metrics);
@@ -680,6 +689,7 @@ export function createFromEnv(
 		sandboxExposureMode: exposure.mode,
 		surfaces,
 		libraries: options?.libraries,
+		ownerEmail: async (userId) => (await services.identities.get(userId))?.email,
 	});
 	if (surfaces?.opencode && exposure.mode === 'proxy') {
 		throw new ConfigError('OpenCode does not support proxy sandbox exposure', {
@@ -688,12 +698,12 @@ export function createFromEnv(
 	}
 	if (surfaces && compute.capabilities?.multiPort !== true) {
 		throw new ConfigError(
-			`The ${computeBackendValue} compute backend cannot expose secondary sandbox surfaces`,
+			`The ${defaultBackendValue} compute backend cannot expose secondary sandbox surfaces`,
 			{ variable: 'MARIMOHUB_SURFACES' },
 		);
 	}
 	const warmPool = parseWarmPoolConfig(env, {
-		backend: computeBackendValue,
+		backend: defaultBackendValue,
 		compute,
 		images: sandboxImages,
 		profiles: profilesSupported ? appliedComputeProfiles : parseComputeProfiles(undefined),
@@ -714,7 +724,7 @@ export function createFromEnv(
 	const dataPreview = dataPreviewFromEnv(
 		env,
 		compute,
-		computeBackendValue,
+		defaultBackendValue,
 		duckdbHttpSessionFactory,
 		metrics,
 	);
@@ -766,7 +776,7 @@ export function createFromEnv(
 			automaticThumbnails: parseBool(
 				env,
 				'MARIMOHUB_AUTOMATIC_THUMBNAILS',
-				computeBackendValue !== 'external-kernel',
+				defaultBackendValue !== 'external-kernel',
 			),
 			sessionLifetime,
 			images: sandboxImages,

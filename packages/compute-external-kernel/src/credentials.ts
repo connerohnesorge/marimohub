@@ -80,7 +80,8 @@ export function readEndUserCredential(
  * The only credentials this adapter ever sends: each user's own token, taken
  * from their requests. A token stays in memory, keyed by hub user id, solely so
  * background work on that user's sandboxes (capture, idle teardown) can run
- * while it is unexpired. It is never persisted and is dropped at `exp`.
+ * while it is unexpired. It is never persisted and is dropped at `exp`, and it
+ * is never used while a request from anyone else is in progress.
  */
 export class EndUserCredentials {
 	private readonly context = new AsyncLocalStorage<RequestContext>();
@@ -113,14 +114,20 @@ export class EndUserCredentials {
 	}
 
 	/**
-	 * The credential for an operation on `owner`'s sandbox. The current request's
-	 * token is used only when that request is the owner's own; anyone else's call
-	 * (an admin stopping the session, a sweep) falls back to the owner's cached
-	 * token, because no other credential can reach the owner's kernel.
+	 * The credential for an operation on `owner`'s sandbox: the owner's token from
+	 * the owner's own request, or, with no request in progress (a background
+	 * sweep), the owner's cached token. A request from anyone else is refused
+	 * before anything is sent: their token cannot reach the owner's kernel, and
+	 * the owner's cached token is never lent to them.
 	 */
 	forOwner(owner: UserId | undefined): EndUserCredential {
 		const context = this.context.getStore();
 		const userId = owner ?? context?.userId;
+		if (context && userId && context.userId !== userId) {
+			throw new ForbiddenError(
+				"This session runs in another user's personal kernel; only its owner can reach it.",
+			);
+		}
 		let rejection: Rejection | undefined;
 		if (context && context.userId === userId) {
 			if ('credential' in context.read) {
@@ -137,6 +144,21 @@ export class EndUserCredentials {
 			}
 		}
 		return (userId ? this.lookup(userId) : undefined) ?? this.unavailable(rejection);
+	}
+
+	/**
+	 * The caller's own credential when a request from someone other than `owner`
+	 * is in progress; undefined for the owner's own request and for background
+	 * work. Only the service's admin route accepts it for another user's kernel.
+	 */
+	foreignRequester(owner: UserId | undefined): EndUserCredential | undefined {
+		const context = this.context.getStore();
+		if (!context || !owner || context.userId === owner) return;
+		if ('rejection' in context.read) return this.unavailable(context.read.rejection);
+		if (context.read.credential.expiresAt - EXPIRY_SKEW_MS <= this.now()) {
+			return this.unavailable('expired');
+		}
+		return context.read.credential;
 	}
 
 	clear(): void {

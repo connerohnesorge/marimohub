@@ -10,7 +10,7 @@ import type {
 import type { JobRunContext } from '@marimo-hub/core/jobs';
 import { ACTOR, makeProject, uid } from '@marimo-hub/core/testing';
 import type { MemoryBucket } from '@marimo-hub/core/testing';
-import { resolveFederatedVars, resolveIntegrationRender, resolveJobSandboxEnv } from './sandboxEnv';
+import { resolveFederatedEnv, resolveIntegrationRender, resolveJobSandboxEnv } from './sandboxEnv';
 import { createInitializedBucket, makeTestDeps } from './testing';
 import type { ApiDeps } from './context';
 
@@ -69,12 +69,12 @@ function integrations(render: SessionRender | (() => Promise<SessionRender | und
 	};
 }
 
-describe('resolveFederatedVars', () => {
+describe('resolveFederatedEnv', () => {
 	it('yields nothing without WIF, without a federation opt-in, or for a restricted sandbox', async () => {
 		const federated = makeProject({ federation: { enabled: true } });
 		const { config } = wif();
 		expect(
-			await resolveFederatedVars(
+			await resolveFederatedEnv(
 				{},
 				{
 					project: federated,
@@ -84,7 +84,7 @@ describe('resolveFederatedVars', () => {
 			),
 		).toBeUndefined();
 		expect(
-			await resolveFederatedVars(
+			await resolveFederatedEnv(
 				{ wif: config },
 				{
 					project: makeProject(),
@@ -94,7 +94,7 @@ describe('resolveFederatedVars', () => {
 			),
 		).toBeUndefined();
 		expect(
-			await resolveFederatedVars(
+			await resolveFederatedEnv(
 				{ wif: config },
 				{
 					project: federated,
@@ -105,10 +105,10 @@ describe('resolveFederatedVars', () => {
 		).toBeUndefined();
 	});
 
-	it('maps exchanged credentials onto S3 env vars', async () => {
+	it('maps exchanged credentials onto S3 env vars and declares the ones that carry them', async () => {
 		const { config } = wif();
 		expect(
-			await resolveFederatedVars(
+			await resolveFederatedEnv(
 				{ wif: config },
 				{
 					project: makeProject({ federation: { enabled: true } }),
@@ -117,10 +117,22 @@ describe('resolveFederatedVars', () => {
 				},
 			),
 		).toEqual({
-			AWS_ACCESS_KEY_ID: 'AK',
-			AWS_SECRET_ACCESS_KEY: 'SK',
-			AWS_ENDPOINT_URL_S3: 'https://s3.example',
-			AWS_REGION: 'eu',
+			vars: {
+				AWS_ACCESS_KEY_ID: 'AK',
+				AWS_SECRET_ACCESS_KEY: 'SK',
+				AWS_ENDPOINT_URL_S3: 'https://s3.example',
+				AWS_REGION: 'eu',
+			},
+			s3: [
+				{
+					endpoint: 'https://s3.example',
+					region: 'eu',
+					accessKeyId: 'AK',
+					secretAccessKey: 'SK',
+					credentialVars: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
+					endpointVars: ['AWS_ENDPOINT_URL_S3'],
+				},
+			],
 		});
 	});
 
@@ -133,7 +145,7 @@ describe('resolveFederatedVars', () => {
 		);
 		const onError = vi.fn();
 		expect(
-			await resolveFederatedVars(
+			await resolveFederatedEnv(
 				{ wif: config },
 				{
 					project: makeProject({ federation: { enabled: true } }),
@@ -249,7 +261,7 @@ describe('resolveJobSandboxEnv', () => {
 			{ ...deps, wif: config, integrations: service },
 			context(),
 		);
-		expect(env).toEqual({
+		expect(env).toMatchObject({
 			files: [{ path: '/creds', content: 'x' }],
 			vars: {
 				PGHOST: 'db',
@@ -260,6 +272,7 @@ describe('resolveJobSandboxEnv', () => {
 			},
 			defaults: {},
 		});
+		expect(env?.s3?.map(({ accessKeyId }) => accessKeyId)).toEqual(['AK']);
 	});
 
 	it('attributes the render to the manual triggerer, else the job author, with their email', async () => {

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineIntegration } from '../sdk';
 import { zSecret } from '../secretFields';
-import { connectionUrl, hostField, renderConnection } from './common';
+import { connectionUrl, connectionVar, hostField, renderConnection } from './common';
 import { databricksBrowse, testDatabricksMetadata } from './databricksBrowse';
 
 const HTTP_PATH_REGEX = /^\/[A-Za-z0-9._\-/]+$/;
@@ -74,7 +74,7 @@ export const databricks = defineIntegration({
 						},
 					})
 				: undefined;
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'DATABRICKS',
 			dir: 'databricks',
 			instanceName,
@@ -92,6 +92,19 @@ export const databricks = defineIntegration({
 			descriptor: { auth_method: config.auth.method, server_hostname: config.host },
 			manifestExtra: { host: config.host, auth_method: config.auth.method },
 		});
+		const field = (name: string) => connectionVar('DATABRICKS', instanceName, name);
+		return {
+			...output,
+			tunnels: [
+				{
+					host: config.host,
+					port: 443,
+					hostVars: [field('HOST')],
+					portVars: [],
+					urlVars: [field('URL')],
+				},
+			],
+		};
 	},
 
 	testConnection: testDatabricksMetadata,

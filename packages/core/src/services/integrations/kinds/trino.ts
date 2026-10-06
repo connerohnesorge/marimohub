@@ -383,6 +383,15 @@ export const trino = defineIntegration({
 				: [],
 			files,
 			manifestExtra: { host: config.host, auth_method: config.auth.method },
+			tunnels: [
+				{
+					host: config.host,
+					port: config.port,
+					hostVars: [`${prefix}_HOST`, 'TRINO_HOST'],
+					portVars: [`${prefix}_PORT`, 'TRINO_PORT'],
+					urlVars: [`${prefix}_URL`],
+				},
+			],
 		};
 	},
 

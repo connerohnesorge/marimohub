@@ -211,6 +211,15 @@ export const pyspark = defineIntegration({
 				port: config.port,
 				auth_method: config.auth.method,
 			},
+			tunnels: [
+				{
+					host: config.host,
+					port: config.port,
+					hostVars: [],
+					portVars: [],
+					urlVars: [`${prefix}_REMOTE`, 'SPARK_REMOTE'],
+				},
+			],
 		};
 	},
 });

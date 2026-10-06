@@ -16,6 +16,7 @@ import {
 	sessionMode,
 	NotFoundError,
 	ProxyExposure,
+	sessionCompute,
 	UnavailableError,
 	verifyProxyToken,
 } from '@marimo-hub/core';
@@ -23,6 +24,7 @@ import type {
 	KernelProxyRequest,
 	KernelProxyTarget,
 	ResourceSecurityLabels,
+	SandboxProvider,
 } from '@marimo-hub/core';
 import type { ApiDeps, HonoEnv } from './context';
 import { errorMetadataChain, logEvent } from './log';
@@ -51,6 +53,8 @@ export type ProxyDecision =
 			authorizationDeadline?: number;
 			/** Kernel (not surface) traffic: what a provider needs to shape the upstream. */
 			kernel?: Omit<KernelProxyRequest, 'request' | 'headers'>;
+			/** The session's routed backend; absent for the default backend. */
+			computeBackend?: string;
 	  };
 
 const PROXY_PREFIX = /^\/proxy\/([^/]+)/;
@@ -292,6 +296,7 @@ export async function authorizeProxyRequest(
 					},
 				}
 			: {}),
+		...(session.compute_backend ? { computeBackend: session.compute_backend } : {}),
 		...(kernelMatch && session.kernel_auth_token
 			? { kernelAuthToken: session.kernel_auth_token }
 			: {}),
@@ -388,10 +393,20 @@ function responseHeaders(headers: Headers): Headers {
 	return out;
 }
 
+/** The session's provider hook that shapes a kernel request's upstream, if it has one. */
+export function kernelProxyResolver(
+	deps: Pick<ApiDeps, 'compute'>,
+	decision: Extract<ProxyDecision, { kind: 'forward' }>,
+): SandboxProvider['resolveKernelProxyTarget'] {
+	if (!decision.kernel) return;
+	const provider = sessionCompute(deps.compute, { compute_backend: decision.computeBackend });
+	return provider.resolveKernelProxyTarget?.bind(provider);
+}
+
 /**
- * Let the compute provider shape a kernel request's upstream when it routes
- * kernels itself; otherwise keep the hub's default target. Shared by the HTTP
- * and WebSocket forwarders.
+ * Let the session's compute provider shape a kernel request's upstream when it
+ * routes kernels itself; otherwise keep the hub's default target. Shared by the
+ * HTTP and WebSocket forwarders.
  */
 export async function resolveKernelUpstream(
 	deps: Pick<ApiDeps, 'compute'>,
@@ -399,7 +414,7 @@ export async function resolveKernelUpstream(
 	decision: Extract<ProxyDecision, { kind: 'forward' }>,
 	target: KernelProxyTarget,
 ): Promise<KernelProxyTarget> {
-	const resolve = deps.compute.resolveKernelProxyTarget?.bind(deps.compute);
+	const resolve = kernelProxyResolver(deps, decision);
 	if (!resolve || !decision.kernel) return target;
 	return resolve({ ...decision.kernel, request, headers: target.headers });
 }

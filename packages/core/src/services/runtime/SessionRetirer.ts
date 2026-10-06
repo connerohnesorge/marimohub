@@ -1,7 +1,7 @@
 import { captureThumbnail } from './captureThumbnail';
 import type { Bucket } from '../../ports/bucket';
 import type { SandboxProvider } from '../../ports/sandbox';
-import { sessionOwner } from './sessionOwner';
+import { sessionCompute, sessionOwner } from './sessionOwner';
 import { readStored, VersionSchema } from '../../schema';
 import type { GitSource, Session } from '../../schema';
 import { paths } from '../../paths';
@@ -71,7 +71,8 @@ export class SessionRetirer {
 	 * mark is best-effort: a lost CAS leaves the record `terminating` for the
 	 * stale reaper to expire, which beats failing a stop whose sandbox is
 	 * already gone. `markTerminated: false` is for callers whose record is
-	 * already terminal (reconciliation).
+	 * already terminal (reconciliation). `sandboxStopped` is for a caller that
+	 * already stopped the sandbox itself: nothing is captured or destroyed.
 	 */
 	async retire(
 		session: Session,
@@ -80,16 +81,18 @@ export class SessionRetirer {
 			markTerminated?: boolean;
 			captureBeforeDestroy?: boolean;
 			thumbnailDeadlineAt?: number;
+			sandboxStopped?: boolean;
 		} = {},
 	): Promise<void> {
 		const sandboxDestroyed =
-			opts.teardown === false
+			opts.sandboxStopped === true ||
+			(opts.teardown === false
 				? !session.sandbox_id
 				: await this.teardownSandbox(
 						session,
 						opts.captureBeforeDestroy ?? true,
 						opts.thumbnailDeadlineAt,
-					);
+					));
 		if (opts.markTerminated !== false) {
 			await this.deps.sessions
 				.markTerminated(session.project_id, session.session_id)
@@ -97,7 +100,7 @@ export class SessionRetirer {
 		}
 		await this.deps.sessions.releaseAppFor(session);
 		if (sandboxDestroyed) {
-			if (opts.teardown !== false && session.sandbox_id) {
+			if ((opts.teardown !== false || opts.sandboxStopped) && session.sandbox_id) {
 				await this.deps.sessions
 					.markSandboxReclaimed(session.project_id, session.session_id, new Date().toISOString())
 					.catch(() => {});
@@ -225,7 +228,7 @@ export class SessionRetirer {
 		} = { assertLease: async () => {}, advanceLease: async () => {} },
 	): Promise<void> {
 		if (!session.sandbox_id || session.sandbox_reclaimed_at) return;
-		const sandbox = this.deps.compute.create(session.sandbox_id, { owner: sessionOwner(session) });
+		const sandbox = this.sandboxFor(session, session.sandbox_id);
 		await this.stopSecondarySurfaces(sandbox, session);
 		if (!session.takeover_capture_completed_at) {
 			const persisted = await this.provisioner.captureSession(
@@ -276,9 +279,7 @@ export class SessionRetirer {
 			if (!(await this.teardownSandbox(session, true, thumbnailDeadlineAt))) return false;
 		} else if (session.sandbox_id) {
 			try {
-				await this.deps.compute
-					.create(session.sandbox_id, { owner: sessionOwner(session) })
-					.destroy();
+				await this.sandboxFor(session, session.sandbox_id).destroy();
 			} catch {
 				return false;
 			}
@@ -301,7 +302,7 @@ export class SessionRetirer {
 		thumbnailDeadlineAt?: number,
 	): Promise<boolean> {
 		if (!session.sandbox_id) return true;
-		const sandbox = this.deps.compute.create(session.sandbox_id, { owner: sessionOwner(session) });
+		const sandbox = this.sandboxFor(session, session.sandbox_id);
 		let canCapture = captureBeforeDestroy;
 		try {
 			await this.stopSecondarySurfaces(sandbox, session);
@@ -370,7 +371,13 @@ export class SessionRetirer {
 		session: Session,
 		thumbnailDeadlineAt?: number,
 	): Promise<void> {
-		if (this.deps.automaticThumbnails !== false && session.sandbox_id) {
+		const compute = sessionCompute(this.deps.compute, session);
+		// Thumbnails render by running a command, which a managed kernel refuses.
+		if (
+			this.deps.automaticThumbnails !== false &&
+			session.sandbox_id &&
+			compute.capabilities?.managedEnvironment !== true
+		) {
 			await captureThumbnail(
 				sandbox,
 				this.deps.notebooks,
@@ -382,7 +389,7 @@ export class SessionRetirer {
 			);
 		}
 		await captureFilesystemSnapshot(
-			this.deps.compute,
+			compute,
 			this.deps.notebooks,
 			sandbox,
 			session.project_id,
@@ -393,6 +400,12 @@ export class SessionRetirer {
 				owner_user_id: session.user_id,
 			},
 		);
+	}
+
+	private sandboxFor(session: Session, sandboxId: NonNullable<Session['sandbox_id']>) {
+		return sessionCompute(this.deps.compute, session).create(sandboxId, {
+			owner: sessionOwner(session),
+		});
 	}
 
 	/**

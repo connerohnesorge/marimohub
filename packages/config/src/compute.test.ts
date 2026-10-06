@@ -8,11 +8,12 @@ import { LocalCompute } from '@marimo-hub/compute-local';
 import { DockerCompute } from '@marimo-hub/compute-container/docker';
 import { PodmanCompute } from '@marimo-hub/compute-container/podman';
 import { CoreWeaveCompute } from '@marimo-hub/compute-coreweave';
-import { ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
+import { ExternalKernelCompute, ExternalKernelRouter } from '@marimo-hub/compute-external-kernel';
 import { FargateCompute } from '@marimo-hub/compute-fargate';
 import { KubernetesCompute } from '@marimo-hub/compute-kubernetes';
 import type { KubernetesPodTemplate } from '@marimo-hub/compute-kubernetes';
 import {
+	defaultComputeBackend,
 	makeCompute,
 	resolveLifetimeBackstop,
 	resolveSandboxImages,
@@ -375,7 +376,11 @@ describe('makeCompute fail-fast', () => {
 		);
 		expect(provider).toBeInstanceOf(ExternalKernelCompute);
 		const external = provider as ExternalKernelCompute;
-		expect(external.capabilities).toEqual({ multiPort: false, managedEnvironment: true });
+		expect(external.capabilities).toEqual({
+			multiPort: false,
+			managedEnvironment: true,
+			sessionEnvironment: true,
+		});
 		expect(external.baseUrl).toBe('http://kira.svc:8080/api/external-kernel/v1');
 		expect(external.workdir).toBe('/home/marimo/work');
 		expect(external.credentials.header).toBe('authorization');
@@ -408,6 +413,65 @@ describe('makeCompute fail-fast', () => {
 				{ sandboxExposureMode: 'proxy' },
 			),
 		).toThrow(/MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER/);
+	});
+
+	it('routes users without a personal kernel to a fallback backend configured like any other', () => {
+		const env = {
+			MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+			MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1',
+			MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: 'Kubernetes',
+			MARIMOHUB_COMPUTE_IMAGE: 'ghcr.io/example/marimo:1, ghcr.io/example/marimo:2',
+		};
+		const provider = makeCompute(env, { sandboxExposureMode: 'proxy' });
+
+		expect(provider).toBeInstanceOf(ExternalKernelRouter);
+		const router = provider as ExternalKernelRouter;
+		expect(router.external).toBeInstanceOf(ExternalKernelCompute);
+		expect(router.fallback).toBeInstanceOf(KubernetesCompute);
+		expect(router.routing.backend(undefined)).toBe(router.fallback);
+		expect(router.routing.backend('external-kernel')).toBe(router.external);
+		expect(router.capabilities).toBe(router.fallback.capabilities);
+		expect(router.warmPool).toBe(router.fallback.warmPool);
+		expect(defaultComputeBackend(env)).toBe('kubernetes');
+		expect(resolveSandboxImages(env)).toEqual([
+			'ghcr.io/example/marimo:1',
+			'ghcr.io/example/marimo:2',
+		]);
+		expect(defaultComputeBackend({ ...env, MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: '' })).toBe(
+			'external-kernel',
+		);
+	});
+
+	it('rejects a fallback that cannot run sessions', () => {
+		const env = {
+			MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+			MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1',
+		};
+		for (const fallback of ['external-kernel', 'none', 'noop', 'cloudflare', 'nope']) {
+			const error = getConfigError(() =>
+				makeCompute(
+					{ ...env, MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: fallback },
+					{ sandboxExposureMode: 'proxy' },
+				),
+			);
+			expect(error.opts.variable).toBe('MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND');
+		}
+		// The fallback's own requirements still apply.
+		expect(() =>
+			makeCompute(
+				{ ...env, MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: 'modal' },
+				{ sandboxExposureMode: 'proxy' },
+			),
+		).toThrow(/MARIMOHUB_COMPUTE_MODAL_TOKEN_ID/);
+	});
+
+	it('ignores the fallback setting on other backends', () => {
+		const env = {
+			MARIMOHUB_COMPUTE_BACKEND: 'kubernetes',
+			MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: 'modal',
+		};
+		expect(makeCompute(env)).toBeInstanceOf(KubernetesCompute);
+		expect(defaultComputeBackend(env)).toBe('kubernetes');
 	});
 
 	it('strips gateway identity headers from kernel traffic on every backend by default', () => {

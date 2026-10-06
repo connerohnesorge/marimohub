@@ -18,7 +18,7 @@ import type { ApiDeps } from '@marimo-hub/api';
 import { isAnthropicBedrockModel } from '@marimo-hub/core';
 import type { CheckOutcome, PreflightCheck } from '@marimo-hub/core';
 import { authBackend, oidcLoginPolicySelected } from './auth';
-import { computeBackend } from './compute';
+import { defaultComputeBackend } from './compute';
 import type { Env } from './env';
 import {
 	checkSandboxHostIsolation,
@@ -161,7 +161,7 @@ function checkIsolation(env: Env, deps: ApiDeps): CheckOutcome {
 
 function checkSandboxConfig(env: Env, deps: ApiDeps): CheckOutcome {
 	const mode = deps.sandbox.exposure?.mode ?? 'subdomain';
-	const backend = computeBackend(env) ?? 'unset';
+	const backend = defaultComputeBackend(env) ?? 'unset';
 	const issues: string[] = [];
 	if (
 		mode === 'subdomain' &&
@@ -207,7 +207,7 @@ async function checkWif(deps: ApiDeps): Promise<CheckOutcome> {
 }
 
 async function checkCompute(env: Env, deps: ApiDeps): Promise<CheckOutcome> {
-	const backend = computeBackend(env) ?? 'unset';
+	const backend = defaultComputeBackend(env) ?? 'unset';
 	// Optional, duck-typed: adapters may expose a cheap reachability probe. We never
 	// invent a heavy vendor call here — if none is exposed, credentials are validated
 	// lazily on the first session.
@@ -258,7 +258,7 @@ function computeRemediation(backend: string, message: string): string {
  */
 async function checkObjectStorageWif(env: Env): Promise<CheckOutcome> {
 	const buckets = env.MARIMOHUB_COMPUTE_COREWEAVE_OBJECT_STORAGE_BUCKETS;
-	if (computeBackend(env) !== 'coreweave' || !buckets) {
+	if (defaultComputeBackend(env) !== 'coreweave' || !buckets) {
 		return { status: 'skipped', message: 'sandbox-native object storage not configured' };
 	}
 	const base = (env.MARIMOHUB_COMPUTE_COREWEAVE_BASE_URL ?? 'https://api.cwsandbox.com').replace(

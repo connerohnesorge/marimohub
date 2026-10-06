@@ -1,8 +1,10 @@
 import { EXTERNAL_TOKEN_SCOPE_PRESETS } from '@marimo-hub/core/token-grants';
 import { initializeForSubject } from '../shared';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { mcpAuthRouter, StreamableHTTPTransport } from '@hono/mcp';
+import type { AuthenticatedPrincipal } from '@marimo-hub/core';
 import type { ApiDeps, HonoEnv } from '../context';
 import { authenticateMcpRequest } from './auth';
 import { createOAuthProvider } from './oauthProvider';
@@ -124,6 +126,16 @@ export function createMcpApp(deps: ApiDeps): Hono<HonoEnv> {
 	app.all('/mcp', async (c) => {
 		const authenticated = await authenticateMcpRequest(c, deps);
 		if (authenticated instanceof Response) return authenticated;
+		// Same request scope as `/api/v1`, so a provider acting with end-user
+		// credentials sees this caller, not background work, during tool calls.
+		const withEndUser = deps.compute.withEndUserRequest?.bind(deps.compute);
+		const principal = { userId: authenticated.id, email: authenticated.email };
+		return withEndUser
+			? withEndUser(c.req.raw, principal, () => serveMcp(c, authenticated))
+			: serveMcp(c, authenticated);
+	});
+
+	async function serveMcp(c: Context<HonoEnv>, authenticated: AuthenticatedPrincipal) {
 		await initializeForSubject(deps, authenticated);
 		const disconnected = new AbortController();
 		const server = createMcpServer(deps, authenticated, {
@@ -157,7 +169,7 @@ export function createMcpApp(deps: ApiDeps): Hono<HonoEnv> {
 			},
 		});
 		return new Response(body, response);
-	});
+	}
 
 	return app;
 }

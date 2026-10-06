@@ -21,6 +21,7 @@ import { logOperationalError } from '../../operationalLog';
 import type {
 	ComputeResources,
 	ExecResult,
+	ManagedSessionEnvironment,
 	SandboxLaunchResult,
 	SandboxUserHome,
 	SandboxInstance,
@@ -36,6 +37,7 @@ import type { MarimoLaunchMode, MarimoLaunchPlan, MarimoLaunchStrategyName } fro
 import { assertValidKernelAuthToken, KERNEL_AUTH_TOKEN_FILE } from './kernelAuth';
 import { shellQuote } from './shell';
 import type { NotebookService } from '../content/NotebookService';
+import type { SessionS3Access, SessionTunnel, SessionUnrelayable } from '../../ports/integrations';
 import { captureWorkspace, readSessionArtifacts, restoreWorkspace } from './sandboxFiles';
 import type { WorkspaceRestoreStats } from './sandboxFiles';
 import { restorePackedWorkspace } from './packedWorkspaceRestore';
@@ -182,6 +184,15 @@ export interface SessionEnv {
 	 */
 	defaults?: Record<string, string>;
 	files?: { path: string; content: string }[];
+	/**
+	 * What `vars` connect to and which of them carry S3 credentials. Only a
+	 * provider that delivers the environment itself reads these; every other
+	 * backend gets the same values through `vars`.
+	 */
+	tunnels?: SessionTunnel[];
+	/** In ascending precedence. */
+	s3?: SessionS3Access[];
+	unrelayable?: SessionUnrelayable[];
 }
 
 export interface ProvisionOptions {
@@ -789,15 +800,20 @@ export class SandboxProvisioner {
 				});
 				return loaded;
 			});
-		// A managed-environment kernel must receive nothing the hub would inject:
-		// no env vars, credential files, setup commands, or bridge launcher.
+		// A managed-environment kernel receives nothing the hub would write into it:
+		// no env vars, credential files, setup commands, or bridge launcher. A
+		// provider that delivers the session environment itself gets it instead.
 		const managed = this.managedEnvironment;
 		const injectSessionEnv = async () => {
-			if (managed) {
+			if (managed && this.provider.capabilities?.sessionEnvironment !== true) {
 				await Promise.resolve(options.sessionEnv).catch(() => {});
 				return;
 			}
-			await withSandboxSpan(sw, 'inject', (time) => this.injectSessionEnv(sandbox, options, time));
+			await withSandboxSpan(sw, 'inject', (time) =>
+				managed
+					? this.deliverSessionEnv(sandbox, options, time)
+					: this.injectSessionEnv(sandbox, options, time),
+			);
 		};
 		const setupEnvironment = () => this.setupEnvironment(sandbox, options, mountPath, sw, managed);
 		const uploadBridge = async () =>
@@ -1143,6 +1159,33 @@ export class SandboxProvisioner {
 				]);
 			} catch (err) {
 				throw provisionFailure('injecting session credentials', err);
+			}
+		});
+	}
+
+	private async deliverSessionEnv(
+		sandbox: SandboxInstance,
+		options: ProvisionOptions,
+		time: TimeSandboxPhase,
+	): Promise<void> {
+		const sessionEnv = await options.sessionEnv;
+		const environment: ManagedSessionEnvironment = {
+			vars: { ...sessionEnv?.defaults, ...sessionEnv?.vars },
+			files: sessionEnv?.files ?? [],
+			tunnels: sessionEnv?.tunnels ?? [],
+			s3: sessionEnv?.s3 ?? [],
+			unrelayable: sessionEnv?.unrelayable ?? [],
+		};
+		if (Object.keys(environment.vars).length === 0 && environment.files.length === 0) return;
+		const applyEnvironment = sandbox.applyEnvironment?.bind(sandbox);
+		await time(async () => {
+			try {
+				if (!applyEnvironment) throw new Error('the sandbox does not accept a session environment');
+				await applyEnvironment(environment);
+			} catch (err) {
+				// The provider's own refusal (an invalid environment, a denied user) is actionable.
+				if (err instanceof DomainError) throw err;
+				throw provisionFailure('delivering the session environment', err);
 			}
 		});
 	}

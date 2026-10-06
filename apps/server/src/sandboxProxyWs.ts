@@ -12,6 +12,7 @@ import type { Duplex } from 'node:stream';
 import {
 	authorizeProxyRequest,
 	isCredentialHeader,
+	kernelProxyResolver,
 	resolveKernelUpstream,
 	UNSAFE_RESPONSE_HEADERS,
 } from '@marimo-hub/api';
@@ -113,7 +114,7 @@ export function attachSandboxProxyUpgrade(server: UpgradeServer, deps: ApiDeps):
 						: {}),
 				};
 				let target = defaultTarget;
-				if (decision.kernel && deps.compute.resolveKernelProxyTarget) {
+				if (kernelProxyResolver(deps, decision)) {
 					const resolved = await resolveKernelUpstream(deps, request, decision, {
 						url: decision.targetUrl,
 						headers: toFetchHeaders(headers),

@@ -844,6 +844,15 @@ export const SessionSchema = z.looseObject({
 	connections_checked_at: z.iso.datetime().optional(),
 	runtime: RuntimeSchema.optional(),
 	sandbox_id: SandboxIdSchema.optional(),
+	/**
+	 * The backend a routing compute provider chose for this session's sandbox
+	 * (`SandboxRouting.selectEditBackend`). Absent = the provider's default
+	 * backend, which is also every record that predates routing. Immutable.
+	 */
+	compute_backend: z
+		.string()
+		.regex(/^[a-z0-9][a-z0-9-]{0,62}$/)
+		.optional(),
 	/** Plaintext, session-scoped credential for marimo. Never expose it as a response field. */
 	kernel_auth_token: z.string().regex(KERNEL_AUTH_TOKEN_PATTERN).optional(),
 	sandbox_url: z.string().optional(),

@@ -53,6 +53,7 @@ import {
 	SandboxProvisioner,
 	SESSION_MODES,
 	SessionId,
+	sessionCompute,
 	sessionMode,
 	sessionOwner,
 	sessionWorkspaceDir,
@@ -79,7 +80,7 @@ import {
 	scheduleProjectAlert,
 } from '../notifications';
 import type { ApiDeps, SandboxConfig } from '../context';
-import { mergeSessionEnv, resolveFederatedVars, resolveIntegrationRender } from '../sandboxEnv';
+import { mergeSessionEnv, resolveFederatedEnv, resolveIntegrationRender } from '../sandboxEnv';
 import {
 	assertProjectRole,
 	assertSessionAccess,
@@ -102,6 +103,7 @@ import {
 	SessionResponseSchema,
 	SurfaceResponseSchema,
 	sessionRetirer,
+	stopForeignManagedSandbox,
 	SuccessResponseSchema,
 	toComputeResourcesResponse,
 } from '../shared';
@@ -768,7 +770,11 @@ async function admittedSessionNotebooks(
 	return admitted;
 }
 
-async function retireSelectedSession(deps: ApiDeps, selected: Session): Promise<void> {
+async function retireSelectedSession(
+	deps: ApiDeps,
+	selected: Session,
+	opts: { sandboxStopped?: boolean } = {},
+): Promise<void> {
 	const { sessions } = deps.services;
 	const { project_id: pid, notebook_id: nid, session_id: sid } = selected;
 	// Only the winner of the terminating transition performs teardown.
@@ -782,8 +788,16 @@ async function retireSelectedSession(deps: ApiDeps, selected: Session): Promise<
 			);
 	} finally {
 		// Reconciliation can recover the pool from the terminal session if invalidation fails.
-		await sessionRetirer(deps).retire(session, { teardown: transitioned });
+		await sessionRetirer(deps).retire(session, {
+			teardown: transitioned,
+			sandboxStopped: opts.sandboxStopped,
+		});
 	}
+}
+
+/** A managed-environment kernel belongs to the session owner: nobody else can capture it. */
+function runsInPersonalKernel(deps: ApiDeps, session: Session): boolean {
+	return sessionCompute(deps.compute, session).capabilities?.managedEnvironment === true;
 }
 
 function withoutConnectionUrls(response: ReturnType<typeof toSessionResponse>) {
@@ -914,7 +928,9 @@ async function inspectEditorActivity(deps: ApiDeps, session: Session) {
 	}
 	const basePath = kernelBasePathFromUrl(session.sandbox_url);
 	const active = await kernelActiveConnections(
-		deps.compute.create(session.sandbox_id, { owner: sessionOwner(session) }),
+		sessionCompute(deps.compute, session).create(session.sandbox_id, {
+			owner: sessionOwner(session),
+		}),
 		basePath,
 	);
 	const checkedAt = new Date().toISOString();
@@ -973,7 +989,11 @@ app.openapi(getEditorSession, async (c) => {
 				sharing,
 				holder: holderView,
 				can_take_over:
-					sharing === 'exclusive' && !!holder && holder.user_id !== user.id && !claim?.transfer,
+					sharing === 'exclusive' &&
+					!!holder &&
+					holder.user_id !== user.id &&
+					!claim?.transfer &&
+					!runsInPersonalKernel(deps, holder),
 				...(claim?.transfer ? { transfer: { status: claim.transfer.phase } } : {}),
 			},
 		},
@@ -1116,6 +1136,12 @@ app.openapi(takeoverEditorSession, async (c) => {
 		if (holder.notebook_id !== nid || holder.user_id === user.id || holder.ephemeral) {
 			await deps.services.sessions.cancelRequestedTakeover(pid, nid, body.takeover_id);
 			throw new ConflictError('The selected session cannot be taken over');
+		}
+		if (runsInPersonalKernel(deps, holder)) {
+			await deps.services.sessions.cancelRequestedTakeover(pid, nid, body.takeover_id);
+			throw new ForbiddenError(
+				'The current editor runs in their own personal kernel, which nobody else can take over. Ask them to close it, or have an administrator stop the session.',
+			);
 		}
 		const activity = await inspectEditorActivity(deps, holder);
 		observer.tag('activity', activity.state);
@@ -1387,8 +1413,6 @@ export async function startNotebookSession(input: {
 		sandbox.computeProfileOverride === 'editors' && profileOverrideEligible,
 		() => logStoredConfigFallback('compute_profile'),
 	);
-	const provisioner = new SandboxProvisioner(compute);
-
 	const editorReuse =
 		mode === 'edit'
 			? await sessions.findReusableEditor(pid, nid, user.id, sharing, ephemeral)
@@ -1512,12 +1536,23 @@ export async function startNotebookSession(input: {
 		? (await sessions.findReusableEditor(pid, nid, user.id, 'exclusive', true)).session
 		: undefined;
 
+	// Chosen with the caller's own credential before anything is recorded. A
+	// failed choice fails the start; it never falls through to another backend.
+	const sessionBackend =
+		mode === 'edit' && compute.routing
+			? await compute.routing.selectEditBackend({ userId: user.id, email: user.email })
+			: undefined;
+	const sessionProvider = sessionCompute(compute, { compute_backend: sessionBackend });
+	const provisioner = new SandboxProvisioner(sessionProvider);
+
 	let sandboxId = admission?.member.sandbox_id ?? createSandboxId();
 	const sessionId = admission?.member.session_id ?? createSessionId();
 	let warmClaim: WarmPoolClaim | undefined;
-	// A managed-environment kernel takes no hub-injected credential of any kind,
-	// so none is minted for it: no kernel token, AI token, WIF exchange, or render.
-	const managedEnvironment = compute.capabilities?.managedEnvironment === true;
+	// A managed-environment kernel takes no kernel token or AI token. It gets
+	// integrations and workload identity only from a provider that delivers them.
+	const managedEnvironment = sessionProvider.capabilities?.managedEnvironment === true;
+	const withholdSessionEnv =
+		managedEnvironment && sessionProvider.capabilities?.sessionEnvironment !== true;
 	const kernelAuthToken =
 		sandbox.auth === 'on' && !managedEnvironment ? createKernelAuthToken() : undefined;
 
@@ -1556,6 +1591,7 @@ export async function startNotebookSession(input: {
 		notebook_id: nid,
 		user_id: user.id,
 		mode,
+		...(sessionBackend ? { compute_backend: sessionBackend } : {}),
 	});
 	try {
 		if (replacementTarget) {
@@ -1566,7 +1602,7 @@ export async function startNotebookSession(input: {
 		}
 		const restoreFilesystemSnapshot =
 			!ephemeral && workspacePolicy.restoreFilesystemSnapshot
-				? await resolveRestoreSnapshot(compute, notebooks, pid, nid, {
+				? await resolveRestoreSnapshot(sessionProvider, notebooks, pid, nid, {
 						sharing: mode === 'edit' ? sharing : 'shared',
 						userId: user.id,
 					})
@@ -1586,6 +1622,8 @@ export async function startNotebookSession(input: {
 				enforceSessionCap(deps, mode, pid, user.id, temporaryToRetire?.session_id),
 			)
 			.step('warm_sandbox', async () => {
+				// Warm sandboxes belong to the default backend.
+				if (sessionBackend) return;
 				warmClaim = await deps.warmPool?.claim({
 					profile: requestedComputeProfile.name,
 					image,
@@ -1618,6 +1656,7 @@ export async function startNotebookSession(input: {
 						project_id: pid,
 						user_id: user.id,
 						sandbox_id: sandboxId,
+						compute_backend: sessionBackend,
 						kernel_auth_token: kernelAuthToken,
 						compute_profile: appliedComputeProfile.name,
 						compute_resources: appliedComputeProfile.resources,
@@ -1685,8 +1724,8 @@ export async function startNotebookSession(input: {
 					};
 					// WIF + integrations share `sandboxEnv.ts` with the job runner, so the
 					// two injection paths cannot drift. Never for a viewer sandbox.
-					const resolveWifVars = () =>
-						resolveFederatedVars(deps, {
+					const resolveWifEnv = () =>
+						resolveFederatedEnv(deps, {
 							project,
 							workload: { kind: 'session', id: session!.session_id },
 							restricted: restrictedViewerCredentials,
@@ -1767,16 +1806,16 @@ export async function startNotebookSession(input: {
 							},
 						});
 
-					if (managedEnvironment) observer.tag('session_env_withheld', true);
+					if (withholdSessionEnv) observer.tag('session_env_withheld', true);
 					const { provision } = await all({
-						wifVars: () => (managedEnvironment ? undefined : resolveWifVars()),
+						wifEnv: () => (withholdSessionEnv ? undefined : resolveWifEnv()),
 						marimoEnv: () => (managedEnvironment ? undefined : resolveMarimoConfigEnv()),
-						integrationEnv: () => (managedEnvironment ? undefined : resolveIntegrationEnv()),
+						integrationEnv: () => (withholdSessionEnv ? undefined : resolveIntegrationEnv()),
 						async sessionEnv(): Promise<SessionEnv | undefined> {
-							const wifVars = await this.$.wifVars;
+							const wifEnv = await this.$.wifEnv;
 							const marimoEnv = await this.$.marimoEnv;
 							const integrationEnv = await this.$.integrationEnv;
-							let env: SessionEnv | undefined = wifVars ? { vars: wifVars } : undefined;
+							let env: SessionEnv | undefined = wifEnv;
 							if (marimoEnv) env = mergeSessionEnv(env, marimoEnv);
 							// Integration values are defaults; WIF and marimo configuration win collisions.
 							if (integrationEnv) env = mergeSessionEnv(integrationEnv, env ?? {});
@@ -1892,7 +1931,9 @@ export async function startNotebookSession(input: {
 				},
 				compensate: async () => {
 					if (warmClaim) return;
-					await compute.create(sandboxId, { owner: { projectId: pid, userId: user.id } }).destroy();
+					await sessionProvider
+						.create(sandboxId, { owner: { projectId: pid, userId: user.id } })
+						.destroy();
 					await recordSandboxCleanup();
 				},
 			})
@@ -2053,7 +2094,9 @@ export async function startNotebookSession(input: {
 		const config = sandbox.surfaces?.[id];
 		return config && (config.start === 'eager' || requestedSurfaces.includes(id));
 	});
-	if (mode === 'edit' && surfaceGrant && eagerSurfaces.length > 0 && updated) {
+	// A routed backend without a second port would only log a failure per start.
+	const eagerSupported = !sessionBackend || sessionProvider.capabilities?.multiPort === true;
+	if (mode === 'edit' && surfaceGrant && eagerSurfaces.length > 0 && updated && eagerSupported) {
 		updated = await beginSessionSurfaces({
 			deps,
 			session: updated,
@@ -2146,7 +2189,8 @@ app.openapi(deleteSession, async (c) => {
 	// their own ephemeral session (role re-checked; see assertSessionControl).
 	await assertSessionControl(project, existing, user, deps, labels);
 
-	await retireSelectedSession(deps, existing);
+	const sandboxStopped = await stopForeignManagedSandbox(deps, existing, user);
+	await retireSelectedSession(deps, existing, { sandboxStopped });
 
 	return c.json({ success: true }, 200);
 });

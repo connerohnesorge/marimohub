@@ -7,7 +7,7 @@
 import type { ProjectId } from '../../ids';
 import type { FederationTarget, TempS3Creds } from '../../ports/credentialBroker';
 import type { WorkloadRef } from '../../ports/integrations';
-import { s3CredsToEnv } from './s3CredsEnv';
+import { s3CredsToEnv, s3CredsToSessionEnv } from './s3CredsEnv';
 import type { WorkloadIdentityIssuer } from './WorkloadIdentityIssuer';
 
 /**
@@ -41,6 +41,24 @@ export async function exchangeFederatedStorageEnv(
 		workload,
 	);
 	return s3CredsToEnv(creds, target.storage.endpoint, target.storage.region);
+}
+
+/** {@link exchangeFederatedStorageEnv} with the credential declaration a session carries. */
+export async function exchangeFederatedStorageSessionEnv(
+	issuer: WorkloadIdentityIssuer,
+	issuerUrl: string,
+	target: FederationTarget,
+	projectId: ProjectId,
+	workload: WorkloadRef,
+): Promise<ReturnType<typeof s3CredsToSessionEnv>> {
+	const creds = await exchangeFederatedStorageCredentials(
+		issuer,
+		issuerUrl,
+		target,
+		projectId,
+		workload,
+	);
+	return s3CredsToSessionEnv(creds, target.storage.endpoint, target.storage.region);
 }
 
 export async function exchangeFederatedStorageCredentials(

@@ -1,0 +1,88 @@
+import type { SandboxId } from '@marimo-hub/core/ids';
+import type {
+	CreateSandboxOptions,
+	EndUserPrincipal,
+	SandboxInstance,
+	SandboxProvider,
+	SandboxRouting,
+} from '@marimo-hub/core/ports/sandbox';
+import type { ExternalKernelCompute } from './index';
+
+/** The name sessions on the external kernel record as their `compute_backend`. */
+export const EXTERNAL_KERNEL_BACKEND = 'external-kernel';
+
+/**
+ * Sends each edit session to its owner's personal kernel when the owner has
+ * one, and everything else to a regular backend: edit sessions of users with
+ * no kernel, apps, jobs, warm pools, and previews.
+ *
+ * The choice is made per session start with the owner's own token and is not
+ * cached. Only the service's `404 no_kernel` selects the fallback; a refused,
+ * missing, or expired token, or an unreachable service, fails the start.
+ */
+export class ExternalKernelRouter implements SandboxProvider {
+	readonly routing: SandboxRouting;
+
+	constructor(
+		readonly external: ExternalKernelCompute,
+		readonly fallback: SandboxProvider,
+	) {
+		this.routing = {
+			selectEditBackend: async (owner: EndUserPrincipal) =>
+				(await this.external.hasKernel(owner.userId)) ? EXTERNAL_KERNEL_BACKEND : undefined,
+			backend: (name) => {
+				if (name === undefined) return this.fallback;
+				if (name === EXTERNAL_KERNEL_BACKEND) return this.external;
+				throw new Error(`Unknown compute backend on session record: ${name}`);
+			},
+		};
+	}
+
+	get capabilities(): SandboxProvider['capabilities'] {
+		return this.fallback.capabilities;
+	}
+
+	get warmPool(): SandboxProvider['warmPool'] {
+		return this.fallback.warmPool;
+	}
+
+	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance {
+		return this.fallback.create(id, options);
+	}
+
+	get connectExisting(): SandboxProvider['connectExisting'] {
+		return this.fallback.connectExisting?.bind(this.fallback);
+	}
+
+	get listActive(): SandboxProvider['listActive'] {
+		return this.fallback.listActive?.bind(this.fallback);
+	}
+
+	/** The fallback's optional reachability probe, which deploy-time preflight duck-types. */
+	get healthCheck(): (() => Promise<void>) | undefined {
+		const probe = (this.fallback as { healthCheck?: () => Promise<void> }).healthCheck;
+		return probe?.bind(this.fallback);
+	}
+
+	proxy(request: Request): Promise<Response | null> {
+		return this.fallback.proxy(request);
+	}
+
+	withEndUserRequest<T>(
+		request: Request,
+		principal: EndUserPrincipal,
+		next: () => Promise<T>,
+	): Promise<T> {
+		const fallback = this.fallback.withEndUserRequest?.bind(this.fallback);
+		return this.external.withEndUserRequest(request, principal, () =>
+			fallback ? fallback(request, principal, next) : next(),
+		);
+	}
+
+	async [Symbol.asyncDispose](): Promise<void> {
+		await Promise.all([
+			this.external[Symbol.asyncDispose](),
+			this.fallback[Symbol.asyncDispose]?.(),
+		]);
+	}
+}

@@ -10,15 +10,26 @@
  * Every call authenticates with the end user's own bearer token alone, and names
  * the kernel owner so the service can refuse a token for anyone else. The hub
  * holds no service credential, so it can only reach a kernel while its owner's
- * token is available (see `EndUserCredentials`).
+ * token is available (see `EndUserCredentials`). The one exception is stopping
+ * another user's session, which goes to the service's admin stop route with the
+ * caller's own token; no other user's token reaches any other route.
  *
  * The kernel image is the environment: the provider declares
- * `managedEnvironment`, so the hub sends no env vars, secrets, setup commands,
- * or kernel token, and it runs no commands. Command-shaped operations throw.
+ * `managedEnvironment`, so the hub writes no env vars, secrets, setup commands,
+ * or kernel token into it, and it runs no commands. Command-shaped operations
+ * throw. A session's integrations and workload identity go to the service's
+ * environment route instead (`sessionEnvironment`), which applies them to that
+ * workspace only.
  */
 import { base64Encode, mapWithConcurrency, WRITE_CONCURRENCY } from '@marimo-hub/compute-commons';
 import { MARIMO_PORT } from '@marimo-hub/core/constants';
-import { ForbiddenError, NotFoundError, UnavailableError } from '@marimo-hub/core/errors';
+import {
+	ForbiddenError,
+	NotFoundError,
+	UnavailableError,
+	ValidationError,
+} from '@marimo-hub/core/errors';
+import { logEvent } from '@marimo-hub/core/logs';
 import type { SandboxId, UserId } from '@marimo-hub/core/ids';
 import type {
 	BoundedReadOptions,
@@ -30,6 +41,7 @@ import type {
 	KernelProxyRequest,
 	KernelProxyTarget,
 	ListFilesOptions,
+	ManagedSessionEnvironment,
 	ListFilesResult,
 	MarimoLaunchSpec,
 	ReadFileResult,
@@ -41,9 +53,13 @@ import type {
 import { listFilesFailure, readFileFailure } from '@marimo-hub/core/ports/sandbox';
 import { EndUserCredentials } from './credentials';
 import type { EndUserCredential } from './credentials';
+import { toKernelEnvironment } from './environment';
 
 export { EndUserCredentials, readEndUserCredential } from './credentials';
 export type { EndUserCredential } from './credentials';
+export { EXTERNAL_KERNEL_BACKEND, ExternalKernelRouter } from './router';
+export { toKernelEnvironment } from './environment';
+export type { KernelEnvironment, Omission } from './environment';
 
 export interface ExternalKernelComputeOptions {
 	/** Base URL of the external kernel API, e.g. `http://kira.example/api/external-kernel/v1`. */
@@ -55,6 +71,11 @@ export interface ExternalKernelComputeOptions {
 	workdir?: string;
 	requestTimeoutMs?: number;
 	now?: () => number;
+	/**
+	 * The hub email of a kernel owner, which the admin stop route names. Without
+	 * it, nobody but the owner can stop the owner's sessions.
+	 */
+	ownerEmail?: (owner: UserId) => Promise<string | undefined>;
 }
 
 export const DEFAULT_TOKEN_HEADER = 'x-pantheon-bearer';
@@ -423,6 +444,43 @@ class ExternalKernelSandbox implements SandboxInstance {
 		this.fileKey = body.file;
 	}
 
+	/**
+	 * Replace this workspace's environment with what the session rendered. The
+	 * service applies it to this workspace only, never to the user's other
+	 * notebooks, and keeps S3 credentials out of the kernel.
+	 */
+	async applyEnvironment(environment: ManagedSessionEnvironment): Promise<void> {
+		const { body, omitted } = toKernelEnvironment(environment);
+		if (omitted.length > 0) {
+			logEvent(
+				{
+					level: 'warn',
+					event: 'external_kernel_environment_omitted',
+					sandbox_id: this.id,
+					omitted,
+				},
+				{ channel: 'warn' },
+			);
+		}
+		if (Object.keys(body).length === 0) return;
+		const response = await this.provider.call(`${this.workspaceUrl}/environment`, {
+			method: 'PUT',
+			credential: this.credential(),
+			action: 'setting the session environment',
+			body: new TextEncoder().encode(JSON.stringify(body)),
+			headers: { 'content-type': 'application/json' },
+			allow: [400],
+		});
+		if (response.status === 400) {
+			// The service's reason can quote a value, so only its code is surfaced.
+			const code = await errorCode(response);
+			throw new ValidationError(
+				`The external kernel service rejected this session's integration environment${code ? ` (${code})` : ''}.`,
+			);
+		}
+		await discard(response);
+	}
+
 	async exposePort(port: number): Promise<ExposePortResult> {
 		if (port !== MARIMO_PORT) throw unsupported(`expose port ${port}`);
 		if (!this.fileKey) throw new UnavailableError('The notebook was not opened before exposure.');
@@ -431,7 +489,17 @@ class ExternalKernelSandbox implements SandboxInstance {
 		return { url: `${this.workspaceUrl}/proxy/?file=${encodeURIComponent(this.fileKey)}` };
 	}
 
+	/**
+	 * The owner, or background work with the owner's cached token, closes the
+	 * workspace. Anyone else's request goes to the admin stop route with that
+	 * caller's own token, which the service accepts only from its admins.
+	 */
 	async destroy(): Promise<void> {
+		const requester = this.provider.credentials.foreignRequester(this.owner);
+		if (requester) {
+			await this.provider.stopForAdmin(requester, this.owner!, this.id);
+			return;
+		}
 		const response = await this.provider.call(this.workspaceUrl, {
 			method: 'DELETE',
 			credential: this.credential(),
@@ -454,12 +522,17 @@ interface CallOptions {
 }
 
 export class ExternalKernelCompute implements SandboxProvider {
-	readonly capabilities = { multiPort: false, managedEnvironment: true } as const;
+	readonly capabilities = {
+		multiPort: false,
+		managedEnvironment: true,
+		sessionEnvironment: true,
+	} as const;
 	readonly baseUrl: string;
 	readonly workdir: string;
 	readonly credentials: EndUserCredentials;
 	private readonly stripHeaderPrefixes: readonly string[];
 	private readonly requestTimeoutMs: number;
+	private readonly ownerEmail?: (owner: UserId) => Promise<string | undefined>;
 
 	constructor(options: ExternalKernelComputeOptions) {
 		const base = new URL(options.baseUrl);
@@ -481,6 +554,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 			(prefix) => prefix.toLowerCase(),
 		);
 		this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+		this.ownerEmail = options.ownerEmail;
 	}
 
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance {
@@ -502,6 +576,55 @@ export class ExternalKernelCompute implements SandboxProvider {
 
 	async proxy(): Promise<Response | null> {
 		return null;
+	}
+
+	/**
+	 * Whether `owner` has a personal kernel, asked with the owner's own token.
+	 * Only `404 no_kernel` means no; every other failure throws.
+	 */
+	async hasKernel(owner: UserId): Promise<boolean> {
+		const response = await this.call(`${this.baseUrl}/kernel`, {
+			credential: this.credentials.forOwner(owner),
+			action: 'checking for a personal kernel',
+			allow: [404],
+		});
+		if (response.status !== 404) {
+			await discard(response);
+			return true;
+		}
+		if ((await errorCode(response.clone())) === 'no_kernel') {
+			await discard(response);
+			return false;
+		}
+		throw await serviceError(response, 'checking for a personal kernel');
+	}
+
+	/**
+	 * Close `owner`'s hub session in `workspace` for an administrator, through the
+	 * only route that accepts a token other than the owner's. It runs no code in
+	 * the kernel and reads nothing from it.
+	 */
+	async stopForAdmin(admin: EndUserCredential, owner: UserId, workspace: SandboxId): Promise<void> {
+		const email = (await this.ownerEmail?.(owner))?.trim().toLowerCase();
+		if (!email) {
+			throw new UnavailableError(
+				"The hub cannot name this kernel's owner to the external kernel service, so only the owner can stop this session.",
+			);
+		}
+		const query = new URLSearchParams({ owner: email, workspace });
+		const response = await this.call(`${this.baseUrl}/admin/kernels/stop?${query}`, {
+			method: 'POST',
+			credential: admin,
+			action: "stopping another user's session",
+			allow: [403],
+		});
+		if (response.status === 403) {
+			await discard(response);
+			throw new ForbiddenError(
+				"The external kernel service does not let you stop another user's session; only its administrators can (HTTP 403).",
+			);
+		}
+		await discard(response);
 	}
 
 	withEndUserRequest<T>(

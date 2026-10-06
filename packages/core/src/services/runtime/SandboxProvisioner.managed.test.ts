@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ForbiddenError, UnavailableError } from '../../errors';
+import { ForbiddenError, UnavailableError, ValidationError } from '../../errors';
 import { createNotebookId, createProjectId, createSandboxId, createVersionId } from '../../ids';
 import { paths } from '../../paths';
-import type { MarimoLaunchSpec, SandboxInstance } from '../../ports/sandbox';
+import type {
+	ManagedSessionEnvironment,
+	MarimoLaunchSpec,
+	SandboxInstance,
+} from '../../ports/sandbox';
 import { EXPOSED_URL, fakeComputeFrom, makeFakeSandbox, MemoryBucket } from '../../testing';
 import { SandboxProvisioner } from './SandboxProvisioner';
-import type { BucketConfig } from './SandboxProvisioner';
+import type { BucketConfig, SessionEnv } from './SandboxProvisioner';
 
 const projectId = createProjectId();
 const notebookId = createNotebookId();
@@ -185,6 +189,100 @@ describe('SandboxProvisioner with a managed-environment provider', () => {
 				bucketHandle: new MemoryBucket(),
 			}),
 		).rejects.toThrow('Not your kernel');
+	});
+
+	describe('a provider that delivers the session environment itself', () => {
+		function delivering() {
+			const world = managedSandbox();
+			const delivered: ManagedSessionEnvironment[] = [];
+			const order: string[] = [];
+			world.instance.applyEnvironment = vi.fn(async (environment: ManagedSessionEnvironment) => {
+				delivered.push(environment);
+				order.push('environment');
+			});
+			const launch = world.instance.launchMarimo!;
+			world.instance.launchMarimo = async (spec) => {
+				order.push('launch');
+				await launch(spec);
+			};
+			const provider = fakeComputeFrom(world.instance, {
+				capabilities: { multiPort: false, managedEnvironment: true, sessionEnvironment: true },
+			});
+			return { ...world, provider, delivered, order };
+		}
+
+		const options = (sessionEnv: SessionEnv) => ({
+			sandboxId,
+			projectId,
+			notebookId,
+			hostname: 'localhost',
+			bucket,
+			bucketHandle: new MemoryBucket(),
+			sessionEnv: Promise.resolve(sessionEnv),
+		});
+
+		it('hands it the whole environment before launch and writes none of it', async () => {
+			const { instance, calls, delivered, order, provider } = delivering();
+			const tunnel = { host: 'db', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] };
+			const access = {
+				endpoint: 'https://s3.example',
+				region: 'us-east-1',
+				accessKeyId: 'AK',
+				secretAccessKey: 'SK',
+				credentialVars: ['AWS_ACCESS_KEY_ID'],
+				endpointVars: [],
+			};
+
+			await new SandboxProvisioner(provider).provision(
+				options({
+					vars: { PGHOST: 'db', SHARED: 'forced' },
+					defaults: { SHARED: 'fallback', ONLY_DEFAULT: 'd' },
+					files: [{ path: '/tmp/marimohub-integrations/x.pem', content: 'pem' }],
+					tunnels: [tunnel],
+					s3: [access],
+					unrelayable: [{ integration: 'mongo', reason: 'srv' }],
+				}),
+			);
+
+			expect(delivered).toEqual([
+				{
+					vars: { PGHOST: 'db', SHARED: 'forced', ONLY_DEFAULT: 'd' },
+					files: [{ path: '/tmp/marimohub-integrations/x.pem', content: 'pem' }],
+					tunnels: [tunnel],
+					s3: [access],
+					unrelayable: [{ integration: 'mongo', reason: 'srv' }],
+				},
+			]);
+			expect(order).toEqual(['environment', 'launch']);
+			expect(instance.setEnvVars).not.toHaveBeenCalled();
+			expect(calls.writeFiles.flat().map((file) => file.path)).not.toContain(
+				'/tmp/marimohub-integrations/x.pem',
+			);
+		});
+
+		it('sends nothing for an empty environment', async () => {
+			const { delivered, provider } = delivering();
+			await new SandboxProvisioner(provider).provision(options({}));
+			expect(delivered).toEqual([]);
+		});
+
+		it("fails the provision with the provider's own refusal", async () => {
+			const { instance, provider } = delivering();
+			vi.mocked(instance.applyEnvironment!).mockRejectedValue(
+				new ValidationError('rejected (invalid_environment)'),
+			);
+			await expect(
+				new SandboxProvisioner(provider).provision(options({ vars: { A: '1' } })),
+			).rejects.toThrow('rejected (invalid_environment)');
+		});
+
+		it('fails the provision when the sandbox cannot take the environment', async () => {
+			const { instance, provider } = delivering();
+			instance.applyEnvironment = undefined;
+			await expect(
+				new SandboxProvisioner(provider).provision(options({ vars: { A: '1' } })),
+			).rejects.toThrow('delivering the session environment');
+		});
 	});
 
 	it('refuses headless job preparation before creating a sandbox', async () => {

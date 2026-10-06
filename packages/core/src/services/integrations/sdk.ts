@@ -10,6 +10,8 @@ import type {
 	QueryReadinessCheck,
 	KindBrand,
 	ProbeRequestInit,
+	SessionS3Access,
+	SessionTunnel,
 	TableSchema,
 	TablePreview,
 	TablePreviewRequest,
@@ -68,6 +70,15 @@ export interface RenderOutput {
 	warnings?: string[];
 	/** User-safe metadata copied into this instance's manifest entry. */
 	manifestExtra?: Record<string, unknown>;
+	/**
+	 * TCP destinations this instance's variables connect to, naming the variables
+	 * that carry each one. Declare every host and port a client dials.
+	 */
+	tunnels?: SessionTunnel[];
+	/** S3 credentials this instance's variables carry, naming those variables. */
+	s3?: SessionS3Access;
+	/** Why this instance's connection target cannot be declared as a tunnel, when it has one. */
+	unrelayable?: string;
 }
 
 /**

@@ -24,6 +24,8 @@ import {
 	SESSION_MODES,
 	SESSION_STATUSES,
 	SessionId,
+	sessionCompute,
+	sessionOwner,
 	sessionPersistsEdits,
 	sessionCan,
 	subjectDefaultRole,
@@ -634,6 +636,26 @@ export async function cancelJobRuns(
 		project_id: pid,
 		notebook_id: nid ?? null,
 	});
+}
+
+/**
+ * Stop a live session that runs in another user's managed-environment kernel
+ * before retiring it. Nobody but the owner can read that kernel, so nothing is
+ * captured; the provider stops it with the caller's own credential, and a
+ * refusal propagates so the session keeps running. Returns whether it stopped
+ * the sandbox, which the caller passes to the retirer as `sandboxStopped`.
+ */
+export async function stopForeignManagedSandbox(
+	deps: Pick<ApiDeps, 'compute'>,
+	session: Session,
+	actor: { id: UserId },
+): Promise<boolean> {
+	if (!session.sandbox_id || session.user_id === actor.id) return false;
+	if (session.status !== 'running' && session.status !== 'starting') return false;
+	const provider = sessionCompute(deps.compute, session);
+	if (provider.capabilities?.managedEnvironment !== true) return false;
+	await provider.create(session.sandbox_id, { owner: sessionOwner(session) }).destroy();
+	return true;
 }
 
 /** Destroy sandboxes best-effort, one failure never stranding the rest; the reconciler backstops. */

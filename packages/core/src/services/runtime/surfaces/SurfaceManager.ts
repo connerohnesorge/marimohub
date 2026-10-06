@@ -1,4 +1,4 @@
-import { sessionOwner } from '../sessionOwner';
+import { sessionCompute, sessionOwner } from '../sessionOwner';
 import type { AuthUser } from '../../../ports/auth';
 import type { SandboxProcess, SandboxProvider } from '../../../ports/sandbox';
 import type { Session } from '../../../schema';
@@ -7,6 +7,7 @@ import {
 	SurfaceOpenInvalidError,
 	SurfacePrimaryError,
 	SurfaceUnavailableError,
+	SurfaceUnsupportedProviderError,
 	UnavailableError,
 } from '../../../errors';
 import type { SessionService } from '../SessionService';
@@ -134,7 +135,14 @@ export class SurfaceManager {
 			throw new SurfaceOpenInvalidError(`Surface ${id} does not support an open path`);
 		}
 		validateOpenPath(options.open);
-		const instance = this.provider.create(session.sandbox_id, { owner: sessionOwner(session) });
+		const provider = sessionCompute(this.provider, session);
+		// The deployment checks its default backend once; a routed one may differ.
+		if (session.compute_backend && provider.capabilities?.multiPort !== true) {
+			throw new SurfaceUnsupportedProviderError(
+				"This session's compute backend cannot expose a second sandbox port",
+			);
+		}
+		const instance = provider.create(session.sandbox_id, { owner: sessionOwner(session) });
 		const context: SurfaceContext = {
 			sessionId: session.session_id,
 			projectId: session.project_id,
@@ -346,7 +354,9 @@ export class SurfaceManager {
 		const current = await this.sessions.getSession(session.project_id, session.session_id);
 		if (!current.sandbox_id) throw new ConflictError('The session has no sandbox');
 		const pidFile = surfacePidFile(session.session_id, id);
-		const instance = this.provider.create(current.sandbox_id, { owner: sessionOwner(current) });
+		const instance = sessionCompute(this.provider, current).create(current.sandbox_id, {
+			owner: sessionOwner(current),
+		});
 		const begun = await this.sessions.beginSurfaceStop(session.project_id, session.session_id, id);
 		if (!begun.transitioned) {
 			if (begun.session.surfaces?.[id]?.status === 'stopped') return;

@@ -69,7 +69,7 @@ export const snowflake = defineIntegration({
 						query: { warehouse: config.warehouse, role: config.role },
 					})
 				: undefined;
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'SNOWFLAKE',
 			dir: 'snowflake',
 			instanceName,
@@ -92,5 +92,9 @@ export const snowflake = defineIntegration({
 			files,
 			manifestExtra: { account: config.account, auth_method: config.auth.method },
 		});
+		return {
+			...output,
+			unrelayable: 'the Snowflake connector derives its host from the account identifier',
+		};
 	},
 });

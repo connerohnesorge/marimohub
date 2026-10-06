@@ -4,6 +4,16 @@
  * Pure — no I/O.
  */
 import type { TempS3Creds } from '../../ports/credentialBroker';
+import type { SessionS3Access } from '../../ports/integrations';
+
+/** The region an S3 SDK signs for when none is configured. */
+export const DEFAULT_S3_REGION = 'us-east-1';
+
+/** The regional AWS S3 endpoint an SDK uses when no endpoint is configured. */
+export function awsS3Endpoint(region: string): string {
+	// China is its own partition, with its own DNS suffix.
+	return `https://s3.${region}.${region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com'}`;
+}
 
 /**
  * @param creds    temporary credentials from a `CredentialBroker.exchange`.
@@ -26,4 +36,34 @@ export function s3CredsToEnv(
 	if (endpoint) env.AWS_ENDPOINT_URL_S3 = endpoint;
 	if (region) env.AWS_REGION = region;
 	return env;
+}
+
+/**
+ * {@link s3CredsToEnv} plus the declaration of which of its variables carry the
+ * credentials, for a backend that keeps credentials out of the kernel.
+ */
+export function s3CredsToSessionEnv(
+	creds: TempS3Creds,
+	endpoint?: string,
+	region?: string,
+): { vars: Record<string, string>; s3: SessionS3Access[] } {
+	const signingRegion = region ?? DEFAULT_S3_REGION;
+	return {
+		vars: s3CredsToEnv(creds, endpoint, region),
+		s3: [
+			{
+				endpoint: endpoint ?? awsS3Endpoint(signingRegion),
+				region: signingRegion,
+				accessKeyId: creds.accessKeyId,
+				secretAccessKey: creds.secretAccessKey,
+				...(creds.sessionToken ? { sessionToken: creds.sessionToken } : {}),
+				credentialVars: [
+					'AWS_ACCESS_KEY_ID',
+					'AWS_SECRET_ACCESS_KEY',
+					...(creds.sessionToken ? ['AWS_SESSION_TOKEN'] : []),
+				],
+				endpointVars: ['AWS_ENDPOINT_URL_S3'],
+			},
+		],
+	};
 }

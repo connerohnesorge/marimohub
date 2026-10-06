@@ -56,6 +56,8 @@ export interface CreateSessionInput {
 	user_id: UserId;
 	runtime?: { python_version?: string; marimo_version?: string };
 	sandbox_id?: SandboxId;
+	/** Routed backend name; absent for the default backend (see SessionSchema). */
+	compute_backend?: string;
 	kernel_auth_token?: string;
 	sandbox_url?: string;
 	compute_profile?: string;
@@ -206,6 +208,7 @@ export class SessionService {
 				: {}),
 			runtime: input.runtime,
 			sandbox_id: input.sandbox_id,
+			...(input.compute_backend ? { compute_backend: input.compute_backend } : {}),
 			kernel_auth_token: input.kernel_auth_token,
 			sandbox_url: input.sandbox_url,
 			compute_profile: input.compute_profile,

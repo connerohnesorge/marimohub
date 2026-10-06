@@ -438,10 +438,16 @@ export function renderConnection(spec: ConnectionRender): RenderOutput {
 	};
 }
 
+/** The variable {@link renderConnection} sets for `field`. */
+export function connectionVar(tool: string, instanceName: string, field: string): string {
+	return `MARIMOHUB_${tool}_${envSegment(instanceName)}_${field}`;
+}
+
 /**
  * {@link renderConnection} for a SQL database reached by URL. Fixes the field
  * set those kinds share, and with it the rule that the URL is as secret as the
  * password it embeds — a kind that spelled its own field map could forget that.
+ * Declares the server as a tunnel carried by the HOST, PORT, and URL fields.
  */
 export function renderSqlConnection(options: {
 	tool: string;
@@ -459,12 +465,15 @@ export function renderSqlConnection(options: {
 	fields?: Record<string, FieldValue>;
 	/** Driver-standard names this instance claims for marimo's discovery. */
 	discovery?: Record<string, string | undefined>;
+	/** Which `discovery` names carry the server's host and port. */
+	discoveryTunnel?: { hostVars?: string[]; portVars?: string[] };
 	warnings?: string[];
 	descriptor?: Record<string, unknown>;
 	files?: { path: string; content: string }[];
 }): RenderOutput {
 	const { config } = options;
-	return renderConnection({
+	const field = (name: string) => connectionVar(options.tool, options.instanceName, name);
+	const output = renderConnection({
 		tool: options.tool,
 		dir: options.dir,
 		instanceName: options.instanceName,
@@ -484,6 +493,18 @@ export function renderSqlConnection(options: {
 		files: options.files,
 		manifestExtra: { host: config.host, database: config.database },
 	});
+	return {
+		...output,
+		tunnels: [
+			{
+				host: config.host,
+				port: config.port,
+				hostVars: [field('HOST'), ...(options.discoveryTunnel?.hostVars ?? [])],
+				portVars: [field('PORT'), ...(options.discoveryTunnel?.portVars ?? [])],
+				urlVars: [field('URL')],
+			},
+		],
+	};
 }
 
 export interface ConnectionUrl {
