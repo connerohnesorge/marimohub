@@ -2,7 +2,7 @@
 // render, URL assembly, and the TLS trust material several of them accept.
 import { z } from 'zod';
 import { ValidationError } from '../../../errors';
-import type { UiHints } from '../../../ports/integrations';
+import type { SessionHost, UiHints } from '../../../ports/integrations';
 import { parseHttpUrl } from '../../../url';
 import { INTEGRATIONS_DIR } from '../bundle';
 import { envSegment, HOSTNAME_REGEX } from '../sdk';
@@ -436,6 +436,38 @@ export function renderConnection(spec: ConnectionRender): RenderOutput {
 		],
 		manifestExtra: spec.manifestExtra,
 	};
+}
+
+/** Google hosts every Google client library reaches for tokens and discovery. */
+export const GOOGLE_AUTH_HOSTS: readonly SessionHost[] = [
+	{ host: 'oauth2.googleapis.com' },
+	{ host: 'www.googleapis.com' },
+];
+
+/** The host and port an http(s) URL names. */
+export function urlHost(url: string): SessionHost {
+	const parsed = new URL(url);
+	const port = Number(parsed.port) || (parsed.protocol === 'http:' ? 80 : 443);
+	return { host: parsed.hostname.replaceAll(/^\[|\]$/g, ''), port };
+}
+
+const ENTRA_LOGIN_HOSTS: Record<string, string> = {
+	'core.windows.net': 'login.microsoftonline.com',
+	'core.usgovcloudapi.net': 'login.microsoftonline.us',
+	'core.chinacloudapi.cn': 'login.chinacloudapi.cn',
+};
+
+/** The Microsoft Entra sign-in host for an Azure Storage endpoint suffix, when it is a known cloud. */
+export function entraLoginHost(endpointSuffix: string): string | undefined {
+	return ENTRA_LOGIN_HOSTS[endpointSuffix];
+}
+
+/** The Hub endpoint plus, for huggingface.co, the CDNs that serve large files. */
+export function huggingFaceHosts(endpoint: string): SessionHost[] {
+	const hub = urlHost(endpoint);
+	return hub.host === 'huggingface.co'
+		? [hub, { host: '*.huggingface.co' }, { host: '*.hf.co' }]
+		: [hub];
 }
 
 /** The variable {@link renderConnection} sets for `field`. */

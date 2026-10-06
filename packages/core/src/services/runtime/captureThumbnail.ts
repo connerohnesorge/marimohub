@@ -62,27 +62,39 @@ export async function captureThumbnail(
 			outcome = 'already_attempted';
 			return;
 		}
-		const input = `/tmp/marimohub-thumbnail-${crypto.randomUUID()}.html`;
-		await sandbox.writeFiles([{ path: input, content: capture.html }]);
-		if (expired()) return;
-		if (remaining() < 1000) {
-			outcome = 'insufficient_budget';
-			return;
+		let bytes: Uint8Array;
+		if (sandbox.renderThumbnail) {
+			const rendered = await sandbox.renderThumbnail(capture.html, remaining());
+			outcome = rendered.status;
+			if (rendered.status !== 'ok' || !rendered.png || expired()) return;
+			if (rendered.png.byteLength > THUMBNAIL_MAX_BYTES) {
+				outcome = 'render_failed';
+				return;
+			}
+			bytes = rendered.png;
+		} else {
+			const input = `/tmp/marimohub-thumbnail-${crypto.randomUUID()}.html`;
+			await sandbox.writeFiles([{ path: input, content: capture.html }]);
+			if (expired()) return;
+			if (remaining() < 1000) {
+				outcome = 'insufficient_budget';
+				return;
+			}
+			const venv = shellQuote(`${workdir}/.venv/bin/python`);
+			const args = `-c ${shellQuote(THUMBNAIL_PROGRAM)} ${shellQuote(input)} ${workDeadline / 1000}`;
+			const command = `if [ -x ${venv} ]; then exec ${venv} ${args}; else exec python3 ${args}; fi`;
+			execution = sandbox.exec(command, { timeout: remaining() });
+			const result = await execution;
+			if (expired()) return;
+			if (!result.success) {
+				outcome = 'exec_failed';
+				return;
+			}
+			const response = CaptureResponseSchema.parse(JSON.parse(result.stdout.trim()));
+			outcome = response.status;
+			if (response.status !== 'ok' || !response.png || expired()) return;
+			bytes = Uint8Array.from(atob(response.png), (c) => c.charCodeAt(0));
 		}
-		const venv = shellQuote(`${workdir}/.venv/bin/python`);
-		const args = `-c ${shellQuote(THUMBNAIL_PROGRAM)} ${shellQuote(input)} ${workDeadline / 1000}`;
-		const command = `if [ -x ${venv} ]; then exec ${venv} ${args}; else exec python3 ${args}; fi`;
-		execution = sandbox.exec(command, { timeout: remaining() });
-		const result = await execution;
-		if (expired()) return;
-		if (!result.success) {
-			outcome = 'exec_failed';
-			return;
-		}
-		const response = CaptureResponseSchema.parse(JSON.parse(result.stdout.trim()));
-		outcome = response.status;
-		if (response.status !== 'ok' || !response.png || expired()) return;
-		const bytes = Uint8Array.from(atob(response.png), (c) => c.charCodeAt(0));
 		const published = await notebooks.thumbnails.publish(pid, nid, capture, bytes, workDeadline);
 		if (!expired()) outcome = published ? 'captured' : 'superseded';
 	};

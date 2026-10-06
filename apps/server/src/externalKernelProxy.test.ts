@@ -103,11 +103,11 @@ describe('proxy exposure through an external kernel', () => {
 				credentialHeaders: ['x-pantheon-email'],
 			},
 		});
-		return { deps, token, compute };
+		return { deps, token };
 	}
 
 	it('forwards HTTP to the per-user server root with the user token and the file pinned', async () => {
-		const { deps, token, compute } = await runningSession();
+		const { deps, token } = await runningSession();
 		const app = createApi(deps);
 		const bearer = jwt(EMAIL);
 		http.length = 0;
@@ -140,11 +140,10 @@ describe('proxy exposure through an external kernel', () => {
 			[],
 		);
 		expect(http[0].headers['x-custom']).toBe('kept');
-		await compute[Symbol.asyncDispose]();
 	});
 
 	it('relays a WebSocket upgrade to the per-user server with the user token and the file pinned', async () => {
-		const { deps, token, compute } = await runningSession();
+		const { deps, token } = await runningSession();
 		const server = { listeners: [] as ((...args: never[]) => void)[] };
 		attachSandboxProxyUpgrade(
 			{ on: (_event, listener) => server.listeners.push(listener as never) },
@@ -192,11 +191,10 @@ describe('proxy exposure through an external kernel', () => {
 		client.write('ping-frame');
 		await vi.waitFor(() => expect(Buffer.concat(received).toString()).toBe('ping-frame'));
 		client.destroy();
-		await compute[Symbol.asyncDispose]();
 	});
 
 	it('rejects an upgrade without the user token instead of dialing the kernel', async () => {
-		const { deps, token, compute } = await runningSession();
+		const { deps, token } = await runningSession();
 		const server = { listeners: [] as ((...args: never[]) => void)[] };
 		attachSandboxProxyUpgrade(
 			{ on: (_event, listener) => server.listeners.push(listener as never) },
@@ -220,6 +218,5 @@ describe('proxy exposure through an external kernel', () => {
 		await vi.waitFor(() => expect(client.destroyed).toBe(true));
 		expect(Buffer.concat(received).toString()).toMatch(/^HTTP\/1\.1 503 SERVICE_UNAVAILABLE/);
 		expect(upgrades).toHaveLength(0);
-		await compute[Symbol.asyncDispose]();
 	});
 });

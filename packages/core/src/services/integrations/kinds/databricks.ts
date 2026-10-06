@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineIntegration } from '../sdk';
 import { zSecret } from '../secretFields';
-import { connectionUrl, connectionVar, hostField, renderConnection } from './common';
+import { connectionUrl, hostField, renderConnection } from './common';
 import { databricksBrowse, testDatabricksMetadata } from './databricksBrowse';
 
 const HTTP_PATH_REGEX = /^\/[A-Za-z0-9._\-/]+$/;
@@ -92,19 +92,8 @@ export const databricks = defineIntegration({
 			descriptor: { auth_method: config.auth.method, server_hostname: config.host },
 			manifestExtra: { host: config.host, auth_method: config.auth.method },
 		});
-		const field = (name: string) => connectionVar('DATABRICKS', instanceName, name);
-		return {
-			...output,
-			tunnels: [
-				{
-					host: config.host,
-					port: 443,
-					hostVars: [field('HOST')],
-					portVars: [],
-					urlVars: [field('URL')],
-				},
-			],
-		};
+		// An HTTPS API: reached by name so TLS still verifies the workspace host.
+		return { ...output, hosts: [{ host: config.host }] };
 	},
 
 	testConnection: testDatabricksMetadata,

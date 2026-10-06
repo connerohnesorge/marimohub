@@ -50,6 +50,7 @@ import {
 	saga,
 	MODE_POLICY,
 	isPastAuthorizationDeadline,
+	isTerminal,
 	SandboxProvisioner,
 	SESSION_MODES,
 	SessionId,
@@ -80,7 +81,14 @@ import {
 	scheduleProjectAlert,
 } from '../notifications';
 import type { ApiDeps, SandboxConfig } from '../context';
+import { isKernelApp, startKernelApp } from '../kernelApps';
 import { mergeSessionEnv, resolveFederatedEnv, resolveIntegrationRender } from '../sandboxEnv';
+import {
+	attendOwnerSession,
+	environmentRefreshAt,
+	needsOwnerRequests,
+	settleOwnerSession,
+} from '../ownerSessionUpkeep';
 import {
 	assertProjectRole,
 	assertSessionAccess,
@@ -103,7 +111,7 @@ import {
 	SessionResponseSchema,
 	SurfaceResponseSchema,
 	sessionRetirer,
-	stopForeignManagedSandbox,
+	stopForeignManagedSession,
 	SuccessResponseSchema,
 	toComputeResourcesResponse,
 } from '../shared';
@@ -289,6 +297,22 @@ const leaveAppVisit = createRoute({
 		200: jsonContent(SuccessResponseSchema, 'Visit released'),
 		...commonErrors(),
 		...errorResponses(400, 403, 404),
+	},
+});
+
+const leaveEditorSession = createRoute({
+	method: 'post',
+	path: '/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave-editor',
+	operationId: 'sessions.leaveEditor',
+	tags: ['Sessions'],
+	summary: 'Report that an editor is closing',
+	description:
+		"Saves the notebook now when only the session owner's requests can reach its kernel, because the hub cannot save it later. Otherwise does nothing.",
+	request: { params: SessionIdParam },
+	responses: {
+		200: jsonContent(SuccessResponseSchema, 'Noted'),
+		...commonErrors(),
+		...errorResponses(403, 404),
 	},
 });
 
@@ -770,11 +794,7 @@ async function admittedSessionNotebooks(
 	return admitted;
 }
 
-async function retireSelectedSession(
-	deps: ApiDeps,
-	selected: Session,
-	opts: { sandboxStopped?: boolean } = {},
-): Promise<void> {
+async function retireSelectedSession(deps: ApiDeps, selected: Session): Promise<void> {
 	const { sessions } = deps.services;
 	const { project_id: pid, notebook_id: nid, session_id: sid } = selected;
 	// Only the winner of the terminating transition performs teardown.
@@ -788,10 +808,7 @@ async function retireSelectedSession(
 			);
 	} finally {
 		// Reconciliation can recover the pool from the terminal session if invalidation fails.
-		await sessionRetirer(deps).retire(session, {
-			teardown: transitioned,
-			sandboxStopped: opts.sandboxStopped,
-		});
+		await sessionRetirer(deps).retire(session, { teardown: transitioned });
 	}
 }
 
@@ -1427,6 +1444,39 @@ export async function startNotebookSession(input: {
 	if (mode === 'app' && !sourceVersionId)
 		throw new ConflictError('The app has no committed version');
 
+	if (mode === 'app' && !body?.replace_app_session_id) {
+		const kernelApp = await startKernelApp(deps, {
+			project,
+			notebookId: nid,
+			viewer: user,
+			versionId: sourceVersionId!,
+			restricted: restrictedViewerCredentials,
+			ephemeral,
+			authorizationExpiresAt,
+			appBaseUrl,
+		});
+		if (kernelApp) {
+			await appendAudit({ ...request, userId: user.id }, 'app.start', () =>
+				deps.services.events.append({
+					event: 'app.start',
+					actor: user.id,
+					project_id: pid,
+					notebook_id: nid,
+					session_id: kernelApp.session_id,
+				}),
+			);
+			return {
+				...toSessionResponse(kernelApp, await grants(kernelApp)),
+				reused: false,
+				// Each visit has its own session; leaving the page closes it.
+				app_assignment: {
+					visit_id: body?.app_visit_id ?? 'api',
+					generation: kernelApp.sandbox_id!,
+				},
+			};
+		}
+	}
+
 	let replacementTarget: Session | undefined;
 	if (body?.replace_app_session_id) {
 		const target = await sessions.getSession(pid, body.replace_app_session_id);
@@ -1536,6 +1586,22 @@ export async function startNotebookSession(input: {
 		? (await sessions.findReusableEditor(pid, nid, user.id, 'exclusive', true)).session
 		: undefined;
 
+	// The owner's previous editor ended (expired, or an administrator stopped it)
+	// in a kernel only the owner's requests reach. Capture it with this request's
+	// token before this session takes the claim, or the new session would
+	// supersede it.
+	if (mode === 'edit' && !ephemeral && existingEditorClaim?.session_id) {
+		const holder = await sessions.getSession(pid, existingEditorClaim.session_id).catch(() => null);
+		if (
+			holder?.user_id === user.id &&
+			isTerminal(holder.status) &&
+			!holder.sandbox_reclaimed_at &&
+			needsOwnerRequests(deps, holder)
+		) {
+			await settleOwnerSession(deps, holder);
+		}
+	}
+
 	// Chosen with the caller's own credential before anything is recorded. A
 	// failed choice fails the start; it never falls through to another backend.
 	const sessionBackend =
@@ -1544,6 +1610,10 @@ export async function startNotebookSession(input: {
 			: undefined;
 	const sessionProvider = sessionCompute(compute, { compute_backend: sessionBackend });
 	const provisioner = new SandboxProvisioner(sessionProvider);
+	// A backend whose sandboxes belong to one user claims its editors exclusively,
+	// whatever the deployment's editor sharing; every other session keeps it.
+	const sessionSharing: EditorSandboxSharing =
+		sessionProvider.capabilities?.exclusiveEditors === true ? 'exclusive' : sharing;
 
 	let sandboxId = admission?.member.sandbox_id ?? createSandboxId();
 	const sessionId = admission?.member.session_id ?? createSessionId();
@@ -1579,6 +1649,7 @@ export async function startNotebookSession(input: {
 	let usedFallback = false;
 	// Audit pin for the integration versions rendered into this sandbox.
 	let integrationAttachments: SessionRender['attachments'] | undefined;
+	let deliveredEnv: SessionEnv | undefined;
 	// In subdomain mode clientUrl === url and originUrl is unset.
 	let clientUrl = '';
 	let originUrl: string | undefined;
@@ -1603,7 +1674,7 @@ export async function startNotebookSession(input: {
 		const restoreFilesystemSnapshot =
 			!ephemeral && workspacePolicy.restoreFilesystemSnapshot
 				? await resolveRestoreSnapshot(sessionProvider, notebooks, pid, nid, {
-						sharing: mode === 'edit' ? sharing : 'shared',
+						sharing: mode === 'edit' ? sessionSharing : 'shared',
 						userId: user.id,
 					})
 				: undefined;
@@ -1664,7 +1735,7 @@ export async function startNotebookSession(input: {
 						ephemeral,
 						mode,
 						source_version_id: sourceVersionId,
-						editor_sandbox_sharing: mode === 'edit' ? sharing : undefined,
+						editor_sandbox_sharing: mode === 'edit' ? sessionSharing : undefined,
 						authorization_expires_at: authorizationExpiresAt,
 					});
 				};
@@ -1699,7 +1770,7 @@ export async function startNotebookSession(input: {
 						pid,
 						nid,
 						session!.session_id,
-						sharing,
+						sessionSharing,
 						user.id,
 					);
 					if (!result.claimed && result.claim.session_id) {
@@ -1819,6 +1890,7 @@ export async function startNotebookSession(input: {
 							if (marimoEnv) env = mergeSessionEnv(env, marimoEnv);
 							// Integration values are defaults; WIF and marimo configuration win collisions.
 							if (integrationEnv) env = mergeSessionEnv(integrationEnv, env ?? {});
+							deliveredEnv = env;
 							return env;
 						},
 						launchStrategy: async () => {
@@ -1965,7 +2037,13 @@ export async function startNotebookSession(input: {
 					);
 					return;
 				}
-				const result = await sessions.claimEditor(pid, nid, session!.session_id, sharing, user.id);
+				const result = await sessions.claimEditor(
+					pid,
+					nid,
+					session!.session_id,
+					sessionSharing,
+					user.id,
+				);
 				if (!result.claimed && result.claim.session_id) {
 					throw new EditorClaimLostError(result.claim.session_id);
 				}
@@ -2024,7 +2102,8 @@ export async function startNotebookSession(input: {
 				const winner = await revalidateEditorReuse(
 					await tightenAuthorizationDeadline(winnerCandidate),
 				);
-				if (sharing === 'exclusive' && winner.user_id !== user.id) {
+				const winnerSharing = winner.editor_sandbox_sharing ?? sessionSharing;
+				if (winnerSharing === 'exclusive' && winner.user_id !== user.id) {
 					throw new EditSessionOwnedError(`Editing is currently owned by ${winner.user_id}`);
 				}
 				const winnerGrants = await grants(winner);
@@ -2032,8 +2111,8 @@ export async function startNotebookSession(input: {
 					...toSessionResponse(winner, winnerGrants),
 					reused: true,
 					editor_session: {
-						sharing,
-						access: sharing === 'shared' ? ('shared' as const) : ('owner' as const),
+						sharing: winnerSharing,
+						access: winnerSharing === 'shared' ? ('shared' as const) : ('owner' as const),
 					},
 				};
 			}
@@ -2081,6 +2160,14 @@ export async function startNotebookSession(input: {
 		throw err;
 	} finally {
 		observer.flush();
+	}
+
+	// Credentials a kernel keeps expire mid-session; the owner's requests send
+	// them again from this time on (see `attendOwnerSession`).
+	const refreshAt =
+		managedEnvironment && !withholdSessionEnv ? environmentRefreshAt(deliveredEnv) : undefined;
+	if (refreshAt && updated) {
+		updated = await sessions.scheduleEnvironmentRefresh(pid, updated.session_id, refreshAt);
 	}
 
 	if (replacingAfterTakeover && temporaryToRetire) {
@@ -2133,10 +2220,10 @@ export async function startNotebookSession(input: {
 		...(mode === 'edit'
 			? {
 					editor_session: {
-						sharing,
+						sharing: sessionSharing,
 						access: ephemeral
 							? ('temporary' as const)
-							: sharing === 'shared'
+							: sessionSharing === 'shared'
 								? ('shared' as const)
 								: ('owner' as const),
 					},
@@ -2189,8 +2276,9 @@ app.openapi(deleteSession, async (c) => {
 	// their own ephemeral session (role re-checked; see assertSessionControl).
 	await assertSessionControl(project, existing, user, deps, labels);
 
-	const sandboxStopped = await stopForeignManagedSandbox(deps, existing, user);
-	await retireSelectedSession(deps, existing, { sandboxStopped });
+	if (!(await stopForeignManagedSession(deps, existing, user))) {
+		await retireSelectedSession(deps, existing);
+	}
 
 	return c.json({ success: true }, 200);
 });
@@ -2219,6 +2307,7 @@ app.openapi(heartbeatSession, async (c) => {
 
 	if (
 		sessionMode(existing) === 'app' &&
+		!isKernelApp(deps, existing) &&
 		(existing.status === 'running' || existing.status === 'starting')
 	) {
 		const pool = new AppPoolService(deps.bucket, sessions, deps.policy.appPool, deps.metrics);
@@ -2230,6 +2319,7 @@ app.openapi(heartbeatSession, async (c) => {
 	}
 
 	const updated = await sessions.heartbeat(pid, sid);
+	attendOwnerSession(deps, { project, user, session: updated });
 	const response = toSessionResponse(
 		updated,
 		await sessionGrantsFor(project, user, updated, deps, labels),
@@ -2242,6 +2332,21 @@ app.openapi(heartbeatSession, async (c) => {
 	);
 });
 
+app.openapi(leaveEditorSession, async (c) => {
+	const deps = c.get('deps');
+	const user = c.get('user');
+	const { pid, nid, sid } = c.req.valid('param');
+	const project = await loadSessionProject(deps.services.projects, pid, user, deps);
+	const session = await deps.services.sessions.getSession(pid, sid);
+	if (session.notebook_id !== nid || sessionMode(session) !== 'edit') {
+		throw new NotFoundError(`Session ${sid} not found`);
+	}
+	const labels = await assertSessionNotebookVisible(deps, project, session, user);
+	await assertSessionAccess(project, session, user, deps, labels);
+	attendOwnerSession(deps, { project, user, session, saveNow: true });
+	return c.json({ success: true as const }, 200);
+});
+
 app.openapi(leaveAppVisit, async (c) => {
 	const deps = c.get('deps');
 	const { pid, nid, sid } = c.req.valid('param');
@@ -2252,6 +2357,16 @@ app.openapi(leaveAppVisit, async (c) => {
 		throw new NotFoundError('App session not found');
 	const labels = await assertSessionNotebookVisible(deps, project, session, user);
 	await assertSessionAccess(project, session, user, deps, labels);
+	if (isKernelApp(deps, session)) {
+		// Only the viewer who opened it can close it, with their own token.
+		if (session.user_id === user.id) {
+			const claimed = await deps.services.sessions.beginTerminating(pid, sid);
+			if (claimed.transitioned) {
+				await sessionRetirer(deps).retire(session, { teardown: true });
+			}
+		}
+		return c.json({ success: true as const }, 200);
+	}
 	await new AppPoolService(
 		deps.bucket,
 		deps.services.sessions,

@@ -5,6 +5,7 @@ import type {
 	BrowsePageRequest,
 	IntegrationProbe,
 	QueryReadinessCheck,
+	SessionHost,
 	TableColumn,
 	TableSchema,
 } from '../../../ports/integrations';
@@ -21,18 +22,24 @@ import {
 	icebergRequirements,
 	icebergRestStorageSchema,
 	icebergStorageUiHints,
+	mergeIcebergNetworks,
 	renderIcebergCatalog,
 	runtimeCatalogProperties,
 	runtimeRootProperties,
+	storageNetwork,
 	storageProperties,
 	validateExtraProperties,
 } from './icebergShared';
+import type { IcebergNetwork } from './icebergShared';
 import {
+	entraLoginHost,
+	GOOGLE_AUTH_HOSTS,
 	HTTP_HEADER_NAME_REGEX,
 	httpUrlField,
 	isInsecureHttpUrl,
 	isIpAddressHost,
 	isValidS3Bucket,
+	urlHost,
 	usesInsecureAuthenticatedS3,
 } from './common';
 import { brokeredS3Secret, duckdbS3StorageAccess, staticS3Credentials } from './duckdbS3';
@@ -548,7 +555,33 @@ function renderIcebergRest(config: IcebergRestConfig, instanceName: string) {
 			storage: config.storage.scheme,
 		},
 		files,
+		network: mergeIcebergNetworks(restNetwork(config), storageNetwork(config.storage)),
 	});
+}
+
+/** The catalog host, where its auth goes, and what a relay cannot carry. */
+function restNetwork(config: IcebergRestConfig): IcebergNetwork {
+	const hosts: SessionHost[] = [urlHost(config.uri)];
+	const unrelayable: string[] = [];
+	const relayYamlKeys: string[] = [];
+	const { auth } = config;
+	if (auth.method === 'oauth2_client_credentials') hosts.push(urlHost(auth.token_endpoint));
+	if (auth.method === 'google') {
+		hosts.push(...GOOGLE_AUTH_HOSTS);
+		if (auth.credentials_json) {
+			relayYamlKeys.push('auth');
+			unrelayable.push('the service account file path is inside the catalog configuration');
+		}
+	}
+	if (auth.method === 'entra') hosts.push({ host: entraLoginHost('core.windows.net')! });
+	if (auth.method === 'sigv4') {
+		unrelayable.push('SigV4-signed catalog requests need AWS credentials in the kernel');
+	}
+	if (config.tls.ca_bundle || config.tls.client_certificate) {
+		relayYamlKeys.push('ssl');
+		unrelayable.push('custom TLS file paths are inside the catalog configuration');
+	}
+	return { hosts, relayYamlKeys, unrelayable };
 }
 
 const PYICEBERG_PREVIEW_SCRIPT = `import json

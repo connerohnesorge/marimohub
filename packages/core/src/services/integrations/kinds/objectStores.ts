@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { ValidationError } from '../../../errors';
 import type { QueryReadinessCheck } from '../../../ports/integrations';
 import type { DuckDBHttpAccess } from '../data-preview/programs';
-import { awsS3Endpoint, DEFAULT_S3_REGION } from '../../identity/s3CredsEnv';
+import { DEFAULT_S3_REGION } from '../../identity/s3CredsEnv';
 import { defineIntegration, HOSTNAME_REGEX } from '../sdk';
 import { zSecret } from '../secretFields';
 import {
@@ -16,7 +16,9 @@ import {
 	AWS_REGION_REGEX,
 	awsStaticCredentials,
 	connectionVar,
+	entraLoginHost,
 	GCS_BUCKET_REGEX,
+	GOOGLE_AUTH_HOSTS,
 	httpUrlField,
 	isInsecureHttpUrl,
 	isIpAddressHost,
@@ -237,28 +239,30 @@ export const s3 = defineIntegration({
 		});
 		if (!staticAuth) return output;
 		const field = (name: string) => connectionVar('S3', instanceName, name);
-		const region = config.region ?? DEFAULT_S3_REGION;
 		return {
 			...output,
-			s3: {
-				endpoint: config.endpoint_url ?? awsS3Endpoint(region),
-				region,
-				accessKeyId: staticAuth.access_key_id,
-				secretAccessKey: staticAuth.secret_access_key,
-				...(staticAuth.session_token ? { sessionToken: staticAuth.session_token } : {}),
-				credentialVars: [
-					field('ACCESS_KEY_ID'),
-					field('SECRET_ACCESS_KEY'),
-					field('SESSION_TOKEN'),
-					...(config.ambient_env
-						? ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']
-						: []),
-				],
-				endpointVars: [
-					...(config.ambient_env ? ['AWS_ENDPOINT_URL_S3'] : []),
-					field('ENDPOINT_URL'),
-				],
-			},
+			aws: [
+				{
+					services: ['s3'],
+					region: config.region ?? DEFAULT_S3_REGION,
+					...(config.endpoint_url ? { endpoint: config.endpoint_url } : {}),
+					accessKeyId: staticAuth.access_key_id,
+					secretAccessKey: staticAuth.secret_access_key,
+					...(staticAuth.session_token ? { sessionToken: staticAuth.session_token } : {}),
+					credentialVars: [
+						field('ACCESS_KEY_ID'),
+						field('SECRET_ACCESS_KEY'),
+						field('SESSION_TOKEN'),
+						...(config.ambient_env
+							? ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']
+							: []),
+					],
+					endpointVars: [
+						...(config.ambient_env ? ['AWS_ENDPOINT_URL_S3'] : []),
+						field('ENDPOINT_URL'),
+					],
+				},
+			],
 		};
 	},
 });
@@ -443,7 +447,7 @@ export const gcs = defineIntegration({
 			config.auth.method === 'service_account'
 				? renderFile(files, `gcs/${instanceName}-sa.json`, config.auth.credentials_json)
 				: undefined;
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'GCS',
 			dir: 'gcs',
 			instanceName,
@@ -461,6 +465,7 @@ export const gcs = defineIntegration({
 			files,
 			manifestExtra: { bucket: config.bucket, auth_method: config.auth.method },
 		});
+		return { ...output, hosts: [{ host: 'storage.googleapis.com' }, ...GOOGLE_AUTH_HOSTS] };
 	},
 });
 
@@ -580,7 +585,7 @@ export const azureBlob = defineIntegration({
 		const connectionString =
 			auth.method === 'connection_string' ? auth.connection_string : undefined;
 		const principal = auth.method === 'service_principal' ? auth : undefined;
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'AZURE',
 			dir: 'azure',
 			instanceName,
@@ -609,5 +614,19 @@ export const azureBlob = defineIntegration({
 				: {},
 			manifestExtra: { account_name: config.account_name, auth_method: auth.method },
 		});
+		const login = principal ? entraLoginHost(config.endpoint_suffix) : undefined;
+		return {
+			...output,
+			hosts: [
+				{ host: `${config.account_name}.blob.${config.endpoint_suffix}` },
+				{ host: `${config.account_name}.dfs.${config.endpoint_suffix}` },
+				...(login ? [{ host: login }] : []),
+			],
+			...(principal && !login
+				? {
+						unrelayable: `the Microsoft Entra sign-in host for ${config.endpoint_suffix} is not known`,
+					}
+				: {}),
+		};
 	},
 });

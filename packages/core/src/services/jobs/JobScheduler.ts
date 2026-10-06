@@ -331,7 +331,8 @@ export class JobScheduler {
 		return this.deps.runs.withJobMutation(jobRef, async () => {
 			if (await this.deps.jobs.isDeleting(jobRef)) return 'none';
 			const job = await this.loadJob(projectId, notebookId, jobId);
-			if (!job?.enabled || !job.schedule) return 'none';
+			// The author's kernel fires its own schedule (the hub holds no token for it).
+			if (!job?.enabled || !job.schedule || job.kernel_schedule) return 'none';
 			let cron;
 			try {
 				cron = parseCron(job.schedule.cron);
@@ -560,7 +561,7 @@ export class JobScheduler {
 		if (!job) return;
 		const failed = finished.status === 'failed' || finished.status === 'timed_out';
 		const retry = job.retry;
-		if (failed && retry && finished.attempt <= retry.max_retries) {
+		if (failed && retry && finished.runner !== 'kernel' && finished.attempt <= retry.max_retries) {
 			if (await this.deps.jobs.isDeleting(job)) return;
 			const current = await this.loadJob(job.project_id, job.notebook_id, job.id);
 			if (!current) return;

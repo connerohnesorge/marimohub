@@ -380,6 +380,8 @@ describe('makeCompute fail-fast', () => {
 			multiPort: false,
 			managedEnvironment: true,
 			sessionEnvironment: true,
+			exclusiveEditors: true,
+			requestCredentials: true,
 		});
 		expect(external.baseUrl).toBe('http://kira.svc:8080/api/external-kernel/v1');
 		expect(external.workdir).toBe('/home/marimo/work');
@@ -463,6 +465,34 @@ describe('makeCompute fail-fast', () => {
 				{ sandboxExposureMode: 'proxy' },
 			),
 		).toThrow(/MARIMOHUB_COMPUTE_MODAL_TOKEN_ID/);
+	});
+
+	it('passes the enrolled users and the token audience to the external kernel', () => {
+		const env = {
+			MARIMOHUB_COMPUTE_BACKEND: 'external-kernel',
+			MARIMOHUB_COMPUTE_EXTERNAL_URL: 'http://kira.svc:8080/api/external-kernel/v1',
+			MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: 'kubernetes',
+			MARIMOHUB_COMPUTE_EXTERNAL_USERS: 'Ada@Example.com, grace@example.com',
+			MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE: 'marimohub',
+		};
+		const router = makeCompute(env, { sandboxExposureMode: 'proxy' }) as ExternalKernelRouter;
+		expect(router.isEnrolled('ada@example.com')).toBe(true);
+		expect(router.isEnrolled('someone@example.com')).toBe(false);
+		expect(
+			(
+				makeCompute(
+					{ ...env, MARIMOHUB_COMPUTE_EXTERNAL_USERS: '' },
+					{ sandboxExposureMode: 'proxy' },
+				) as ExternalKernelRouter
+			).isEnrolled('someone@example.com'),
+		).toBe(true);
+		const error = getConfigError(() =>
+			makeCompute(
+				{ ...env, MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: '' },
+				{ sandboxExposureMode: 'proxy' },
+			),
+		);
+		expect(error.opts.variable).toBe('MARIMOHUB_COMPUTE_EXTERNAL_USERS');
 	});
 
 	it('ignores the fallback setting on other backends', () => {

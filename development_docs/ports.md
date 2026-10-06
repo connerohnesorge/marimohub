@@ -74,6 +74,17 @@ authenticated `/api/v1` request, so the provider can read the caller's token.
 `proxy`-exposure kernel request, HTTP and WebSocket, after the hub has
 authorized it. `compute-external-kernel` implements all of these.
 
+A provider whose sandboxes each belong to one user declares
+`capabilities.exclusiveEditors`; the session route then claims its edit
+sessions exclusively, whatever the deployment's editor sharing.
+
+A provider that keeps no credential between requests declares
+`capabilities.requestCredentials`. The lifecycle sweep skips its sessions, and
+the owner's heartbeats, `leave-editor`, and session starts run the same
+per-session upkeep through `SessionLifecycleService.attend` inside the owner's
+request (`packages/api/src/ownerSessionUpkeep.ts`). Expiring credentials are
+re-sent the same way, at the session's `environment_refresh_at`.
+
 A provider can front more than one backend with `routing`.
 `routing.selectEditBackend(owner)` runs inside the owner's request at each edit
 session start and names the backend, or returns `undefined` for the default;

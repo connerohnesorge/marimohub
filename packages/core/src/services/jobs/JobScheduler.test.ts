@@ -688,6 +688,59 @@ describe('JobScheduler', () => {
 		expect((await scheduler(fakeRunner(env)).tick()).fired).toBe(0);
 	});
 
+	describe("jobs fired by the author's kernel", () => {
+		it('never fires them on the hub', async () => {
+			const job = await createJob();
+			await env.jobs.setKernelSchedule(pid, nid, job.id, true);
+			const runner = fakeRunner(env);
+
+			expect((await scheduler(runner).tick()).fired).toBe(0);
+			expect(runner.executed).toEqual([]);
+
+			await env.jobs.setKernelSchedule(pid, nid, job.id, false);
+			expect((await scheduler(runner).tick()).fired).toBe(1);
+		});
+
+		it('audits and notifies a reported run once, never retries or dispatches it', async () => {
+			const deliver = vi.fn(async () => 'delivered' as const);
+			const job = await createJob({
+				retry: { max_retries: 2, backoff_seconds: 0 },
+				notifications: { on: ['failure'] },
+			});
+			await env.jobs.setKernelSchedule(pid, nid, job.id, true);
+			const runId = createRunId();
+			const report = {
+				job: { ...job, kernel_schedule: true },
+				runId,
+				status: 'failed' as const,
+				startedAt: new Date(now - MINUTE).toISOString(),
+				finishedAt: new Date(now).toISOString(),
+				error: { code: 'KERNEL_RUN_FAILED', message: 'boom' },
+				html: '<p>partial</p>',
+				timeoutSeconds: 60,
+			};
+			const recorded = await env.jobRuns.recordKernelRun(report);
+			const runner = fakeRunner(env);
+			const s = scheduler(runner, { projectAlerts: { deliver, test: vi.fn() } });
+
+			await s.tick();
+			await settle(s);
+			await env.jobRuns.recordKernelRun(report);
+			await s.tick();
+			await settle(s);
+
+			expect(recorded).toMatchObject({
+				status: 'failed',
+				runner: 'kernel',
+				output: { html_bytes: 14 },
+			});
+			expect(runner.executed).toEqual([]);
+			expect(await env.jobRuns.listRuns(pid, nid, job.id)).toHaveLength(1);
+			expect(deliver).toHaveBeenCalledOnce();
+			expect(await env.jobRuns.readHtml(recorded)).toBe('<p>partial</p>');
+		});
+	});
+
 	it('loads the authoritative head when the snapshot scheduling fields are stale', async () => {
 		const job = await createJob();
 		await env.catalog.updateNotebookEntry('test.jobs.stale', ACTOR, pid, nid, (notebook) => ({

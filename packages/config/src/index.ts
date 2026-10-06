@@ -460,9 +460,25 @@ function parseMcpConfig(env: Env, externalIssuer?: string): McpConfig | undefine
 			variable: 'MARIMOHUB_AUTH_OIDC_ACCESS_TOKEN_AUDIENCE',
 		});
 	}
+	const gatewayIdentity = parseOnOff(env, 'MARIMOHUB_MCP_GATEWAY_IDENTITY', {
+		fallback: false,
+		docs: 'docs/mcp.md',
+	});
+	if (gatewayIdentity && authBackend(env) !== 'proxy-header') {
+		throw new ConfigError(
+			'MARIMOHUB_MCP_GATEWAY_IDENTITY=on requires MARIMOHUB_AUTH_BACKEND=proxy-header',
+			{
+				variable: 'MARIMOHUB_MCP_GATEWAY_IDENTITY',
+				remediation:
+					'Only a gateway that verifies each caller and sets identity headers can identify MCP callers. Turn it off, or use the proxy-header backend.',
+				docs: 'docs/mcp.md',
+			},
+		);
+	}
 	return {
 		publicBaseUrl,
 		...(externalIssuer ? { externalAuthorizationServer: externalIssuer } : {}),
+		...(gatewayIdentity ? { gatewayIdentity: true } : {}),
 	};
 }
 
@@ -640,7 +656,6 @@ export function createFromEnv(
 	const sessionLifetime = parseSessionLifetime(env);
 	const sandboxImages = resolveSandboxImages(env);
 	const computeProfiles = parseComputeProfiles(env.MARIMOHUB_COMPUTE_PROFILES);
-	const computeBackendValue = computeBackend(env) ?? 'unset';
 	// Profiles, images, warm pools, and previews belong to the backend that runs
 	// everything except routed edit sessions.
 	const defaultBackendValue = defaultComputeBackend(env) ?? 'unset';
@@ -656,18 +671,6 @@ export function createFromEnv(
 		env.MARIMOHUB_COMPUTE_PROFILE_OVERRIDE,
 	);
 	const editorSandboxSharing = parseEditorSandboxSharing(env);
-	if (computeBackendValue === 'external-kernel' && editorSandboxSharing !== 'exclusive') {
-		// A shared editor sandbox would put one user's kernel in front of another.
-		throw new ConfigError(
-			'The external-kernel backend requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive',
-			{
-				variable: 'MARIMOHUB_EDITOR_SANDBOX_SHARING',
-				remediation:
-					'Set MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive so each session runs in the personal kernel of its owner.',
-				docs: 'docs/setup/compute/external-kernel.md',
-			},
-		);
-	}
 	const userHome = makeSandboxUserHome(env, editorSandboxSharing);
 	const profileNotice = unsupportedBackendNotice(
 		defaultBackendValue,
@@ -772,12 +775,7 @@ export function createFromEnv(
 			auth: parseSandboxAuth(env.MARIMOHUB_SANDBOX_AUTH),
 			appBaseUrl: env.MARIMOHUB_APP_BASE_URL,
 			persistWorkspace: parsePersistWorkspace(env),
-			// Thumbnails render inside the sandbox, which an external kernel does not allow.
-			automaticThumbnails: parseBool(
-				env,
-				'MARIMOHUB_AUTOMATIC_THUMBNAILS',
-				defaultBackendValue !== 'external-kernel',
-			),
+			automaticThumbnails: parseBool(env, 'MARIMOHUB_AUTOMATIC_THUMBNAILS', true),
 			sessionLifetime,
 			images: sandboxImages,
 			resources: computeResources,

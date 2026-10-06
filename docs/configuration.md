@@ -290,13 +290,15 @@ Native Kubernetes creates one keep-alive Pod and Service per session through `@k
 
 `MARIMOHUB_COMPUTE_BACKEND=external-kernel`
 
-Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, per-notebook dependencies, jobs, apps, or surfaces; integrations and workload identity go through the service's environment route. See [External kernel](compute.md#external-kernel).
+Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy`; its editor sessions are always exclusive. The kernel image is the environment, so sessions get no AI, per-notebook dependencies, jobs, apps, or surfaces; integrations and workload identity go through the service's environment route. See [External kernel](compute.md#external-kernel).
 
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
 | `MARIMOHUB_COMPUTE_EXTERNAL_URL` | Base URL of the external kernel API, reachable from the hub. | Yes | — | `http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1` |
 | `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER` | Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there. | — | `x-pantheon-bearer` | — |
 | `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND` | Backend that runs edit sessions for users the external service answers `404 no_kernel` for, and every app, job, warm pool, and preview. It is configured with its own variables, exactly as if it were `MARIMOHUB_COMPUTE_BACKEND`. Any other answer from the service fails the session start; it never falls back. Unset: every edit session needs a personal kernel. | — | — | `kubernetes` |
+| `MARIMOHUB_COMPUTE_EXTERNAL_USERS` | Comma-separated emails of the users who have a personal kernel. With a fallback backend, everyone else goes straight to the fallback and never contacts the external service, so its outages and rollouts cannot block them. Listed users still fall back on `404 no_kernel` and fail on any other error. Unset: every user asks the service. | — | — | `ada@example.com,grace@example.com` |
+| `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE` | Audience the external service accepts. A request token without it (for example a CLI token for another client) is treated as missing and never forwarded, and the request fails with sign-in guidance. Unset: any token is forwarded. | — | — | `marimohub` |
 
 ### Local (dev only)
 
@@ -470,7 +472,7 @@ Server-wide settings; no backend selector.
 | `MARIMOHUB_SESSION_MAX_LIFETIME_SECONDS` | marimohub-owned hard session lifetime: the lifecycle sweep gracefully saves + tears the session down at this deadline (extending while editors are still connected). Provider-side caps (CoreWeave/E2B) default to 2x this as an orphan backstop. | — | `14400` | — |
 | `MARIMOHUB_SESSION_IDLE_TIMEOUT_SECONDS` | Reap a session when its heartbeat is stale for this period and it has no active connections. Apps inherit this value unless MARIMOHUB_SESSION_APP_IDLE_TIMEOUT_SECONDS is set. Modal uses 1.5x the effective timeout as a provider fallback. | — | `1800` | — |
 | `MARIMOHUB_SESSION_APP_IDLE_TIMEOUT_SECONDS` | Time an app sandbox remains empty after its last visit assignment expires, including reconnect grace, subject to connection protection. Falls back to MARIMOHUB_SESSION_IDLE_TIMEOUT_SECONDS (1800 seconds by default). Credential and provider lifetime limits still apply. | — | — | — |
-| `MARIMOHUB_AUTOMATIC_THUMBNAILS` | Capture saved HTML once at editor shutdown when Playwright and Chromium are already installed. Never executes notebook code. Set false to disable. | — | `true` | — |
+| `MARIMOHUB_AUTOMATIC_THUMBNAILS` | Capture saved HTML once at editor shutdown when Playwright and Chromium are already installed. Never executes notebook code. External-kernel sessions ask the kernel service to render it instead. Set false to disable. | — | `true` | — |
 | `MARIMOHUB_SESSION_SNAPSHOT_INTERVAL_SECONDS` | Periodic save cadence for live sessions — the durability floor bounding what a hard kill (backstop, node loss, OOM) can lose. Unchanged notebooks are deduped (no spurious versions). `0` disables periodic snapshots. | — | `120` | — |
 | `MARIMOHUB_SESSION_LIFETIME_EXTENSION_SECONDS` | How far the session deadline slides each time the lifecycle sweep finds editors still connected at it. | — | `1800` | — |
 | `MARIMOHUB_SESSION_CONNECTION_AWARE` | Ask the kernel for its active connection count before a lifetime/idle teardown, extending instead of reaping while editors are connected. Set `false` to reap strictly on schedule. | — | `true` | — |
@@ -497,6 +499,7 @@ The built-in OAuth 2.1 server exposes notebooks to MCP clients. MCP is off by de
 | Variable | Description | Required | Default | Example |
 | --- | --- | --- | --- | --- |
 | `MARIMOHUB_MCP` | Enables the MCP endpoint and OAuth server. Requires an HTTPS `MARIMOHUB_APP_BASE_URL` (plain http is accepted only for localhost and 127.0.0.1). Values: `on`, `off`. | — | `off` | `on` |
+| `MARIMOHUB_MCP_GATEWAY_IDENTITY` | Behind a gateway that verifies each caller and sets identity headers (`MARIMOHUB_AUTH_BACKEND=proxy-header`), accept a `/mcp` request that carries no bearer as the caller the gateway identified. A request a browser marks as coming from another site is refused. Values: `on`, `off`. | — | `off` | `on` |
 
 ## Jobs
 

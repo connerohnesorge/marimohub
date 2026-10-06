@@ -1050,7 +1050,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 				name: 'External kernel',
 				selectorValue: 'external-kernel',
 				description:
-					"Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy` and `MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive`. The kernel image is the environment, so sessions get no AI, per-notebook dependencies, jobs, apps, or surfaces; integrations and workload identity go through the service's environment route. See [External kernel](compute.md#external-kernel).",
+					"Attaches every edit session to the signed-in user's own long-lived marimo server, run by an external service. Each request carries only that user's token, read from a request header; the hub holds no service credential. Requires `MARIMOHUB_SANDBOX_EXPOSURE=proxy`; its editor sessions are always exclusive. The kernel image is the environment, so sessions get no AI, per-notebook dependencies, jobs, apps, or surfaces; integrations and workload identity go through the service's environment route. See [External kernel](compute.md#external-kernel).",
 				vars: [
 					{
 						id: 'MARIMOHUB_COMPUTE_EXTERNAL_URL',
@@ -1072,6 +1072,20 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						description:
 							'Backend that runs edit sessions for users the external service answers `404 no_kernel` for, and every app, job, warm pool, and preview. It is configured with its own variables, exactly as if it were `MARIMOHUB_COMPUTE_BACKEND`. Any other answer from the service fails the session start; it never falls back. Unset: every edit session needs a personal kernel.',
 						example: 'kubernetes',
+					},
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_USERS',
+						name: 'Users with a personal kernel',
+						description:
+							'Comma-separated emails of the users who have a personal kernel. With a fallback backend, everyone else goes straight to the fallback and never contacts the external service, so its outages and rollouts cannot block them. Listed users still fall back on `404 no_kernel` and fail on any other error. Unset: every user asks the service.',
+						example: 'ada@example.com,grace@example.com',
+					},
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE',
+						name: 'Kernel token audience',
+						description:
+							'Audience the external service accepts. A request token without it (for example a CLI token for another client) is treated as missing and never forwarded, and the request fails with sign-in guidance. Unset: any token is forwarded.',
+						example: 'marimohub',
 					},
 				],
 			},
@@ -1594,7 +1608,7 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						id: 'MARIMOHUB_AUTOMATIC_THUMBNAILS',
 						name: 'Automatic notebook thumbnails',
 						description:
-							'Capture saved HTML once at editor shutdown when Playwright and Chromium are already installed. Never executes notebook code. Set false to disable.',
+							'Capture saved HTML once at editor shutdown when Playwright and Chromium are already installed. Never executes notebook code. External-kernel sessions ask the kernel service to render it instead. Set false to disable.',
 						default: 'true',
 					},
 					{
@@ -1759,6 +1773,14 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 						name: 'MCP server',
 						description:
 							'Enables the MCP endpoint and OAuth server. Requires an HTTPS `MARIMOHUB_APP_BASE_URL` (plain http is accepted only for localhost and 127.0.0.1). Values: `on`, `off`.',
+						default: 'off',
+						example: 'on',
+					},
+					{
+						id: 'MARIMOHUB_MCP_GATEWAY_IDENTITY',
+						name: 'MCP gateway identity',
+						description:
+							'Behind a gateway that verifies each caller and sets identity headers (`MARIMOHUB_AUTH_BACKEND=proxy-header`), accept a `/mcp` request that carries no bearer as the caller the gateway identified. A request a browser marks as coming from another site is refused. Values: `on`, `off`.',
 						default: 'off',
 						example: 'on',
 					},

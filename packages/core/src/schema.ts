@@ -814,6 +814,17 @@ export const SessionSchema = z.looseObject({
 	 */
 	takeover_capture_completed_at: z.iso.datetime().optional(),
 	/**
+	 * Another user stopped this session through its kernel service, which saved
+	 * the open notebooks into the workspace before closing them. Reclaiming the
+	 * sandbox then captures that workspace before destroying it.
+	 */
+	admin_stopped_at: z.iso.datetime().optional(),
+	/**
+	 * When the credentials delivered to a kernel that keeps them must be sent
+	 * again. The owner's next request at or after this time re-renders them.
+	 */
+	environment_refresh_at: z.iso.datetime().optional(),
+	/**
 	 * A discard-only session. This includes viewer throwaways and explicit
 	 * temporary editors: nothing is written back at teardown — no version,
 	 * HTML/session snapshot, workspace mirror, or FS snapshot. Absent means the
@@ -1048,6 +1059,11 @@ export const JobDefinitionSchema = z.looseObject({
 	concurrency_policy: z.enum(JOB_CONCURRENCY_POLICIES).default('forbid'),
 	/** Delivered through the project's alert destinations (`job.run.*` kinds). */
 	notifications: JobNotificationsSchema.optional(),
+	/**
+	 * The author's personal kernel fires this job's schedule and reports each
+	 * run; the hub scheduler never fires it.
+	 */
+	kernel_schedule: z.boolean().optional(),
 	created_by: UserIdSchema,
 	created_at: z.iso.datetime(),
 	updated_at: z.iso.datetime(),
@@ -1101,6 +1117,8 @@ export const JobRunSchema = z.looseObject({
 		})
 		.optional(),
 	cancelled_by: UserIdSchema.optional(),
+	/** The author's personal kernel ran it and reported the outcome; the hub never retries it. */
+	runner: z.literal('kernel').optional(),
 });
 
 export type JobRun = z.infer<typeof JobRunSchema>;

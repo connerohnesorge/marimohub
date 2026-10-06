@@ -140,6 +140,100 @@ describe('ExternalKernelRouter', () => {
 		).rejects.toThrow(/unreachable/);
 	});
 
+	describe('with a list of enrolled users', () => {
+		const stranger: EndUserPrincipal = {
+			userId: 'user-stranger' as UserId,
+			email: 'x@example.com',
+		};
+
+		function enrolledRouter(baseUrl: string) {
+			const { fallback } = fallbackProvider();
+			const external = new ExternalKernelCompute({ baseUrl, now: () => NOW });
+			return new ExternalKernelRouter(external, fallback, {
+				enrolledUsers: [' Owner@Example.com '],
+			});
+		}
+
+		it('sends everyone else to the fallback without contacting the service, even when it is down', async () => {
+			for (const router of [
+				enrolledRouter(baseUrl),
+				enrolledRouter('http://127.0.0.1:1/api/external-kernel/v1'),
+			]) {
+				await expect(
+					router.withEndUserRequest(new Request('http://hub.example/'), stranger, () =>
+						router.routing.selectEditBackend(stranger),
+					),
+				).resolves.toBeUndefined();
+			}
+			expect(seen).toHaveLength(0);
+		});
+
+		it('asks the service for a listed user, and fails clearly when it is down', async () => {
+			const router = enrolledRouter(baseUrl);
+			await expect(asOwner(router, () => router.routing.selectEditBackend(owner))).resolves.toBe(
+				EXTERNAL_KERNEL_BACKEND,
+			);
+			answer = { status: 404, body: { error: { code: 'no_kernel' } } };
+			await expect(
+				asOwner(router, () => router.routing.selectEditBackend(owner)),
+			).resolves.toBeUndefined();
+
+			const down = enrolledRouter('http://127.0.0.1:1/api/external-kernel/v1');
+			await expect(asOwner(down, () => down.routing.selectEditBackend(owner))).rejects.toThrow(
+				/unreachable/,
+			);
+		});
+	});
+
+	describe('kernelJobs', () => {
+		it("places an author's jobs by the same rule as their edit sessions", async () => {
+			const { fallback } = fallbackProvider();
+			const external = new ExternalKernelCompute({ baseUrl, now: () => NOW });
+			const router = new ExternalKernelRouter(external, fallback, {
+				enrolledUsers: [OWNER_EMAIL],
+			});
+			const stranger = { userId: 'user-stranger' as UserId, email: 'x@example.com' };
+
+			await expect(router.kernelJobs.runsJobsOf(stranger)).resolves.toBe(false);
+			expect(seen).toHaveLength(0);
+			await expect(asOwner(router, () => router.kernelJobs.runsJobsOf(owner))).resolves.toBe(true);
+			answer = { status: 404, body: { error: { code: 'no_kernel' } } };
+			await expect(asOwner(router, () => router.kernelJobs.runsJobsOf(owner))).resolves.toBe(false);
+			answer = { status: 503, body: { error: { code: 'unavailable' } } };
+			await expect(asOwner(router, () => router.kernelJobs.runsJobsOf(owner))).rejects.toThrow();
+		});
+
+		it('hands a run its environment in the service format, without AWS keys in env', () => {
+			const { router } = makeRouter();
+
+			const body = router.kernelJobs.environment({
+				vars: { A: '1', AWS_ACCESS_KEY_ID: 'AK' },
+				files: [],
+				network: {
+					tunnels: [],
+					hosts: [],
+					mongodb: [],
+					aws: [
+						{
+							services: ['s3'],
+							region: 'us-east-1',
+							accessKeyId: 'AK',
+							secretAccessKey: 'SK',
+							credentialVars: ['AWS_ACCESS_KEY_ID'],
+							endpointVars: [],
+						},
+					],
+					relayEnv: {},
+					relayFiles: [],
+					unrelayable: [],
+				},
+			}) as { env: Record<string, string>; aws: unknown[] };
+
+			expect(body.env).toEqual({ A: '1' });
+			expect(body.aws).toHaveLength(1);
+		});
+	});
+
 	it('names each backend and refuses an unknown one', () => {
 		const { router, external, fallback } = makeRouter();
 		expect(router.routing.backend(undefined)).toBe(fallback);

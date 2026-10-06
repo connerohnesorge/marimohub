@@ -190,6 +190,7 @@ export {
 	INTEGRATIONS_DIR_ENV,
 } from './integrations/bundle';
 export type { RenderedIntegration } from './integrations/bundle';
+export { emptySessionNetwork, mergeSessionNetworks } from './integrations/network';
 export {
 	athena,
 	azureBlob,
@@ -261,6 +262,7 @@ export {
 export {
 	createWorkspaceLoadStrategies,
 	DEFAULT_SANDBOX_STARTUP_TIMEOUT_MS,
+	managedSessionEnvironment,
 	SandboxProvisioner,
 } from './runtime/SandboxProvisioner';
 export type {
@@ -337,6 +339,8 @@ export type { ComputeProfileConfig, ResolvedComputeProfile } from './runtime/res
 export { resolveLaunchStrategyForSession } from './runtime/launchStrategy';
 export type { ResolvedLaunchStrategy } from './runtime/launchStrategy';
 export { resolveNotebookLaunchSource } from './runtime/notebookLaunchSource';
+export { MAX_PINNED_FILES_BYTES, pinnedNotebookFiles } from './runtime/pinnedNotebookFiles';
+export type { PinnedNotebookFiles } from './runtime/pinnedNotebookFiles';
 export { buildMarimoLaunch } from './runtime/marimoLaunch';
 export type { MarimoLaunchMode, MarimoLaunchStrategyName } from './runtime/marimoLaunch';
 export { executeInActiveKernel, KernelDiscoveryTimeoutError } from './runtime/activeKernel';

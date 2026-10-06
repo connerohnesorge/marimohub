@@ -54,6 +54,19 @@ export interface EnqueueRunInput {
 	runId?: RunId;
 }
 
+export interface KernelRunInput {
+	job: JobDefinition;
+	/** The id the run spec handed out; a repeated report converges on one run. */
+	runId?: RunId;
+	status: 'succeeded' | 'failed' | 'timed_out';
+	startedAt: string;
+	finishedAt: string;
+	error?: RunError;
+	html?: string;
+	sourceVersionId?: VersionId;
+	timeoutSeconds: number;
+}
+
 export interface ActiveRun {
 	marker: JobRunMarker;
 	/** Null when the marker outlived (or preceded) its record. */
@@ -289,6 +302,62 @@ export class JobRunService {
 		const created = await putIfAbsent(this.bucket, this.runPaths(run).record, JSON.stringify(run));
 		if (!created) return this.getRun(job.project_id, job.notebook_id, job.id, runId);
 		this.metrics.increment('jobs.runs.skipped');
+		return run;
+	}
+
+	/**
+	 * A run the author's personal kernel executed and reported. Written terminal
+	 * with its output, plus a finalization marker so the scheduler audits and
+	 * notifies it like any other run.
+	 */
+	async recordKernelRun(input: KernelRunInput): Promise<JobRun> {
+		const { job } = input;
+		const runId = input.runId ?? createRunId();
+		if (input.runId && (await this.runExists(job.project_id, job.notebook_id, job.id, runId))) {
+			return this.getRun(job.project_id, job.notebook_id, job.id, runId);
+		}
+		const ref = {
+			project_id: job.project_id,
+			notebook_id: job.notebook_id,
+			job_id: job.id,
+			run_id: runId,
+		};
+		const output =
+			input.html !== undefined ? await this.putOutputs(ref, { html: input.html }) : undefined;
+		const run = JobRunSchema.parse({
+			schema_version: CURRENT_JOB_RUN_VERSION,
+			...ref,
+			status: input.status,
+			trigger: 'schedule',
+			...(input.sourceVersionId ? { source_version_id: input.sourceVersionId } : {}),
+			attempt: 1,
+			timeout_seconds: input.timeoutSeconds,
+			queued_at: input.startedAt,
+			started_at: input.startedAt,
+			finished_at: input.finishedAt,
+			...(input.error ? { error: input.error } : {}),
+			...(output ? { output } : {}),
+			runner: 'kernel',
+		});
+		const marker: JobRunMarker = {
+			run_id: runId,
+			continuation_run_id: createRunId(),
+			job_id: job.id,
+			notebook_id: job.notebook_id,
+			project_id: job.project_id,
+			created_at: new Date().toISOString(),
+		};
+		await putIfAbsent(
+			this.bucket,
+			paths.jobRunMarker(job.project_id, runId),
+			JSON.stringify(marker),
+		);
+		const jobPaths = paths.project(job.project_id).notebook(job.notebook_id).job(job.id);
+		await putIfAbsent(this.bucket, jobPaths.runIndex(runId), '');
+		if (!(await putIfAbsent(this.bucket, this.runPaths(run).record, JSON.stringify(run)))) {
+			return this.getRun(job.project_id, job.notebook_id, job.id, runId);
+		}
+		this.metrics.increment('jobs.runs.kernel', 1, { status: input.status });
 		return run;
 	}
 
@@ -533,7 +602,10 @@ export class JobRunService {
 	}
 
 	/** Write-once captured outputs; returns the byte counts to stamp on the record. */
-	async putOutputs(run: JobRun, outputs: RunOutputs): Promise<NonNullable<JobRun['output']>> {
+	async putOutputs(
+		run: Pick<JobRun, 'project_id' | 'notebook_id' | 'job_id' | 'run_id'>,
+		outputs: RunOutputs,
+	): Promise<NonNullable<JobRun['output']>> {
 		const p = this.runPaths(run);
 		const encoder = new TextEncoder();
 		const output: NonNullable<JobRun['output']> = { html_bytes: 0 };

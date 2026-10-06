@@ -2,7 +2,7 @@ import type { NotebookId, ProjectId, SandboxId, UserId } from '../ids';
 import type { SessionMode } from '../constants';
 import type { Millis } from '../duration';
 import type { Timings } from '../timing';
-import type { SessionS3Access, SessionTunnel, SessionUnrelayable } from './integrations';
+import type { SessionNetwork } from './integrations';
 
 export type ExecResult =
 	| { success: true; stdout: string; stderr: string }
@@ -174,6 +174,11 @@ export interface ExecOptions {
 }
 
 /** One file to write into a sandbox. `Uint8Array` content is written verbatim. */
+export interface RenderedThumbnail {
+	status: 'ok' | 'render_failed' | 'timeout' | 'unsupported';
+	png?: Uint8Array;
+}
+
 export interface SandboxFileWrite {
 	path: string;
 	content: string | Uint8Array;
@@ -213,10 +218,7 @@ export interface ManagedSessionEnvironment {
 	vars: Record<string, string>;
 	/** Absolute sandbox paths; variables may name them. */
 	files: { path: string; content: string }[];
-	tunnels: SessionTunnel[];
-	/** In ascending precedence: a later set wins where only one can apply. */
-	s3: SessionS3Access[];
-	unrelayable: SessionUnrelayable[];
+	network: SessionNetwork;
 }
 
 export interface SandboxInstance {
@@ -283,6 +285,12 @@ export interface SandboxInstance {
 	 * through `exec`. A backend without directory entries may treat it as a no-op.
 	 */
 	ensureDirectories?(paths: readonly string[]): Promise<void>;
+	/**
+	 * Render a notebook's HTML snapshot to a PNG thumbnail outside the hub, for a
+	 * sandbox that runs no commands. Without it the hub runs its own render
+	 * program in the sandbox. `unsupported` means the backend cannot render.
+	 */
+	renderThumbnail?(html: string, timeoutMs: number): Promise<RenderedThumbnail>;
 	exposePort(port: number, options: ExposePortOptions): Promise<ExposePortResult>;
 	destroy(): Promise<void>;
 	/**
@@ -415,11 +423,63 @@ export interface SandboxRouting {
 	backend(name: string | undefined): SandboxProvider;
 }
 
+/** A job schedule that a kernel service fires on its author's behalf. */
+export interface KernelJobSchedule {
+	cron: string;
+	timezone: string;
+	enabled: boolean;
+}
+
+/**
+ * Hands scheduled jobs to their author's own kernel service, which fires them as
+ * the author and reports each run back. Every call runs inside the author's own
+ * request and uses only the author's credential.
+ */
+export interface KernelJobs {
+	/** Whether `author`'s scheduled jobs run in their kernel. Throws when that cannot be told. */
+	runsJobsOf(author: EndUserPrincipal): Promise<boolean>;
+	register(author: UserId, jobKey: string, schedule: KernelJobSchedule): Promise<void>;
+	/** Idempotent: a job the service does not know is already gone. */
+	unregister(author: UserId, jobKey: string): Promise<void>;
+	/** A run's environment in the kernel service's own form. */
+	environment(env: ManagedSessionEnvironment): unknown;
+}
+
+/** One viewer's session of an app, to run in its author's own kernel runtime. */
+export interface KernelAppStart {
+	/** The hub's id for the session; the service names the session after it. */
+	sandboxId: SandboxId;
+	authorEmail: string;
+	app: NotebookId;
+	version: string;
+	/** The notebook to run, relative to the file tree. */
+	notebook: string;
+	files: readonly { path: string; content: Uint8Array }[];
+	environment: ManagedSessionEnvironment;
+}
+
+/**
+ * Runs apps in their author's own kernel runtime, one session per viewer and
+ * with the viewer's own credential. The sessions it starts are served by
+ * `routing.backend(backend)`.
+ */
+export interface KernelApps {
+	readonly backend: string;
+	/** False sends the author's apps to the hub without asking the kernel service. */
+	mayRunAppsOf(authorEmail: string): boolean;
+	/** Starts the session inside the viewer's request; undefined when the author has no kernel. */
+	start(input: KernelAppStart): Promise<{ originUrl: string } | undefined>;
+}
+
 export interface SandboxProvider {
 	/** Opt-in requires strict reconnect and idempotent destruction by the original sandbox ID. */
 	readonly warmPool?: WarmPoolSupport;
 	/** Present on a provider that routes edit sessions between backends per user. */
 	readonly routing?: SandboxRouting;
+	/** Present when authors' scheduled jobs can run in their own kernels. */
+	readonly kernelJobs?: KernelJobs;
+	/** Present when apps can run in their author's own kernel runtime. */
+	readonly kernelApps?: KernelApps;
 	readonly capabilities?: {
 		multiPort: boolean;
 		/** Applies resources.cpu and resources.memoryBytes from compute profiles. */
@@ -439,6 +499,18 @@ export interface SandboxProvider {
 		 * `SandboxInstance.applyEnvironment`. AI and the kernel token stay withheld.
 		 */
 		sessionEnvironment?: boolean;
+		/**
+		 * Each sandbox belongs to the one user it was started for, so its edit
+		 * sessions are claimed exclusively whatever the deployment's editor sharing.
+		 */
+		exclusiveEditors?: boolean;
+		/**
+		 * The provider keeps no credential between requests: only a request from the
+		 * sandbox's owner (or an admin, to stop it) can reach a sandbox. Background
+		 * sweeps leave these sessions alone, and the owner's own requests save and
+		 * settle them instead (`SessionLifecycleService.attend`).
+		 */
+		requestCredentials?: boolean;
 	};
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance;
 	/** Attach without creating; a missing or stopped sandbox must fail on first use. */

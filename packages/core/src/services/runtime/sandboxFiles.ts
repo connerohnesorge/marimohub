@@ -101,8 +101,14 @@ function batchByBytes<T extends { size: number }>(items: readonly T[], maxBytes:
 	return batches;
 }
 
+/** What a workspace restore needs from a sandbox. */
+export type WorkspaceRestoreTarget = Pick<
+	SandboxInstance,
+	'writeFiles' | 'exec' | 'ensureDirectories'
+>;
+
 async function createSandboxDirectories(
-	sandbox: SandboxInstance,
+	sandbox: WorkspaceRestoreTarget,
 	directories: readonly string[],
 ): Promise<void> {
 	const ensureDirectories = sandbox.ensureDirectories?.bind(sandbox);
@@ -198,7 +204,7 @@ export interface WorkspaceRestoreOptions {
  * `files` phase to workspace size rather than leaving it to guesswork.
  */
 export async function restoreWorkspace(
-	sandbox: SandboxInstance,
+	sandbox: WorkspaceRestoreTarget,
 	bucket: Bucket,
 	sourcePrefix: string,
 	workingDir: string,

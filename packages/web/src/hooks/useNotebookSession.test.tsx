@@ -668,6 +668,23 @@ describe('useNotebookSession', () => {
 		expect(JSON.parse(init!.body as string)).toEqual(assignment);
 	});
 
+	it('lets the hub save a running editor when the page is discarded', async () => {
+		const fetchMock = vi.fn(async (..._args: Parameters<typeof fetch>) => jsonOk(makeSession()));
+		vi.stubGlobal('fetch', fetchMock);
+		const { result } = renderHookWithClient(() => useNotebookSession(PID, NID), {
+			toaster: false,
+		});
+		await waitFor(() => expect(result.current.isRunning).toBe(true));
+		await act(async () => {
+			window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+		});
+		const leave = fetchMock.mock.calls.find(([url]) =>
+			String(url).endsWith('/sess-1/leave-editor'),
+		);
+		expect(leave?.[1]?.method).toBe('POST');
+		expect(leave?.[1]?.keepalive).toBe(true);
+	});
+
 	it('a late poll response cannot resurrect a session after the startup timeout', async () => {
 		vi.useFakeTimers();
 		let releasePoll!: (response: Response) => void;

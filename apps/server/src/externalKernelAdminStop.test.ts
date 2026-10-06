@@ -5,7 +5,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApi } from '@marimo-hub/api';
 import { createInitializedBucket, makeTestDeps } from '@marimo-hub/api/testing';
 import { ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
-import { createServices, ProxyExposure, SandboxId } from '@marimo-hub/core';
+import {
+	createServices,
+	Millis,
+	paths,
+	ProxyExposure,
+	SandboxId,
+	SessionLifecycleService,
+} from '@marimo-hub/core';
 import type { Authenticator, NotebookId, ProjectId, SessionId, UserId } from '@marimo-hub/core';
 import { ACTOR, uid } from '@marimo-hub/core/testing';
 
@@ -21,6 +28,7 @@ function jwt(email: string): string {
 }
 
 const ownerToken = jwt(OWNER_EMAIL);
+const SAVED_NOTEBOOK = 'import marimo as mo\n# saved by the kernel service before the stop\n';
 const adminToken = jwt(ADMIN_EMAIL);
 
 function authAs(id: UserId, email: string): Authenticator {
@@ -33,7 +41,7 @@ interface Seen {
 	headers: IncomingHttpHeaders;
 }
 
-describe("a super admin stopping another user's external-kernel session", () => {
+describe('external-kernel sessions, kept only by requests', () => {
 	let kira: Server;
 	let baseUrl: string;
 	/** Every request the hub makes to the external kernel service, in order. */
@@ -54,6 +62,30 @@ describe("a super admin stopping another user's external-kernel session", () => 
 				const admitted = kiraAdmins.has(claims.email ?? '');
 				res.writeHead(admitted ? 204 : 403, { 'content-type': 'application/json' });
 				res.end(admitted ? undefined : '{"error":{"code":"forbidden"}}');
+				return;
+			}
+			// The workspace after the admin stop: the notebook as the service saved it.
+			if (url.pathname.endsWith('/list')) {
+				const size = Buffer.byteLength(SAVED_NOTEBOOK);
+				res.writeHead(200, { 'content-type': 'application/json' });
+				res.end(
+					JSON.stringify(
+						url.searchParams.get('path')
+							? { entries: [] }
+							: { entries: [{ path: 'notebook.py', type: 'file', size }] },
+					),
+				);
+				return;
+			}
+			if (url.pathname.endsWith('/files')) {
+				const found = url.searchParams.get('path') === 'notebook.py';
+				res.writeHead(found ? 200 : 404, { 'content-type': 'application/octet-stream' });
+				res.end(found ? SAVED_NOTEBOOK : '{"error":{"code":"not_found"}}');
+				return;
+			}
+			if (req.method === 'DELETE') {
+				res.writeHead(204);
+				res.end();
 				return;
 			}
 			res.writeHead(200, { 'content-type': 'application/json' });
@@ -93,42 +125,118 @@ describe("a super admin stopping another user's external-kernel session", () => 
 			baseUrl,
 			ownerEmail: async (id) => (id === ACTOR ? OWNER_EMAIL : undefined),
 		});
-		// The owner used their kernel, so the hub holds their token for background work.
-		await compute.withEndUserRequest(
-			new Request('http://hub.example/api/v1/x', { headers: { 'x-pantheon-bearer': ownerToken } }),
-			{ userId: ACTOR, email: OWNER_EMAIL },
-			() => compute.create(SANDBOX, { owner: { projectId: pid, userId: ACTOR } }).ready!(),
-		);
-		seen.length = 0;
-		const app = createApi(
-			makeTestDeps(bucket, {
-				compute,
-				authenticator: authAs(ADMIN, ADMIN_EMAIL),
-				policy: { superAdmins: [ADMIN_EMAIL], editorSandboxSharing: 'exclusive' },
-				sandbox: {
-					bucket: { name: 'test', endpoint: '' },
-					hostname: 'localhost',
-					workdir: '/workspace',
-					persistWorkspace: 'source',
-					exposure: new ProxyExposure(SECRET),
-				},
-			}),
-		);
-		const stop = () =>
-			app.fetch(
-				new Request(
-					`http://hub.example/api/v1/projects/${pid}/notebooks/${notebook.id as NotebookId}/sessions/${session.session_id}`,
-					{ method: 'DELETE', headers: { 'x-pantheon-bearer': adminToken } },
-				),
+		const background: Promise<unknown>[] = [];
+		const api = (id: UserId, email: string) =>
+			createApi(
+				makeTestDeps(bucket, {
+					services,
+					compute,
+					authenticator: authAs(id, email),
+					policy: { superAdmins: [ADMIN_EMAIL], editorSandboxSharing: 'exclusive' },
+					backgroundTasks: { defer: (task) => background.push(task) },
+					sandbox: {
+						bucket: { name: 'test', endpoint: '' },
+						hostname: 'localhost',
+						workdir: '/workspace',
+						persistWorkspace: 'source',
+						exposure: new ProxyExposure(SECRET),
+						sessionLifetime: {
+							maxLifetimeMs: Millis.hours(8),
+							idleTimeoutMsByMode: { edit: Millis.hours(1), app: Millis.hours(1) },
+							snapshotIntervalMs: Millis.minutes(2),
+							extensionMs: Millis.hours(1),
+							connectionAware: true,
+							sweepIntervalMs: Millis.minutes(1),
+						},
+					},
+				}),
 			);
-		const status = async () =>
-			(await services.sessions.getSession(pid, session.session_id as SessionId)).status;
-		return { compute, stop, status };
+		const adminApi = api(ADMIN, ADMIN_EMAIL);
+		const ownerApi = api(ACTOR, OWNER_EMAIL);
+		const sessionUrl = `http://hub.example/api/v1/projects/${pid}/notebooks/${notebook.id as NotebookId}/sessions/${session.session_id}`;
+		const stop = () =>
+			adminApi.fetch(
+				new Request(sessionUrl, {
+					method: 'DELETE',
+					headers: { 'x-pantheon-bearer': adminToken },
+				}),
+			);
+		/** An owner request; resolves once the upkeep it started has finished. */
+		const asOwner = async (path: 'heartbeat' | 'leave-editor') => {
+			const res = await ownerApi.fetch(
+				new Request(`${sessionUrl}/${path}`, {
+					method: 'POST',
+					headers: { 'x-pantheon-bearer': ownerToken },
+				}),
+			);
+			await Promise.all(background.splice(0));
+			return res;
+		};
+		const record = () => services.sessions.getSession(pid, session.session_id as SessionId);
+		const status = async () => (await record()).status;
+		const sweep = () =>
+			new SessionLifecycleService(services.sessions, services.notebooks, compute, bucket, {
+				idleTimeoutMsByMode: { edit: 3_600_000, app: 3_600_000 },
+				snapshotIntervalMs: 1,
+				extensionMs: 0,
+				connectionAware: false,
+				persistWorkspace: 'source',
+				automaticThumbnails: false,
+				workdir: '/workspace',
+			}).sweep();
+		const savedCode = async () =>
+			(
+				await bucket.get(paths.project(pid).notebook(notebook.id).workspaceFile('notebook.py'))
+			)?.text();
+		const ageSnapshot = () =>
+			services.sessions.markSnapshotted(
+				pid,
+				session.session_id as SessionId,
+				new Date(Date.now() - Millis.minutes(10)).toISOString(),
+			);
+		return { stop, asOwner, record, status, sweep, savedCode, ageSnapshot };
 	}
 
-	it('calls only the admin stop route, with the admin token', async () => {
+	const kernelCalls = () =>
+		seen.map(({ method, url }) => `${method} ${url.pathname.split('/').at(-1)}`);
+
+	it('lets the maintenance sweep send nothing, even for a session due a save', async () => {
+		const { sweep, ageSnapshot, savedCode } = await runningSession();
+		await ageSnapshot();
+
+		await sweep();
+
+		expect(seen).toEqual([]);
+		expect(await savedCode()).toBe('import marimo as mo');
+	});
+
+	it("saves on the owner's heartbeat when a save is due, with the owner's token", async () => {
+		const { asOwner, ageSnapshot, savedCode } = await runningSession();
+
+		expect((await asOwner('heartbeat')).status).toBe(200);
+		expect(seen).toEqual([]);
+
+		await ageSnapshot();
+		await asOwner('heartbeat');
+		expect(await savedCode()).toBe(SAVED_NOTEBOOK);
+		expect(kernelCalls()).toEqual(expect.arrayContaining(['GET list', 'GET files']));
+		expect(new Set(seen.map(({ headers }) => headers.authorization))).toEqual(
+			new Set([`Bearer ${ownerToken}`]),
+		);
+	});
+
+	it('saves at once when the owner leaves the editor', async () => {
+		const { asOwner, savedCode } = await runningSession();
+
+		expect((await asOwner('leave-editor')).status).toBe(200);
+
+		expect(await savedCode()).toBe(SAVED_NOTEBOOK);
+		expect(kernelCalls()).not.toContain(`DELETE ${SANDBOX}`);
+	});
+
+	it("an admin's stop is captured by the owner's next request, never by the sweep", async () => {
 		kiraAdmins.add(ADMIN_EMAIL);
-		const { compute, stop, status } = await runningSession();
+		const { stop, asOwner, record, status, sweep, savedCode } = await runningSession();
 
 		const res = await stop();
 
@@ -140,17 +248,33 @@ describe("a super admin stopping another user's external-kernel session", () => 
 		expect(seen[0].url.searchParams.get('owner')).toBe(OWNER_EMAIL.toLowerCase());
 		expect(seen[0].url.searchParams.get('workspace')).toBe(SANDBOX);
 		expect(seen[0].headers.authorization).toBe(`Bearer ${adminToken}`);
-		await compute[Symbol.asyncDispose]();
+
+		seen.length = 0;
+		await sweep();
+		expect(seen).toEqual([]);
+		expect((await record()).sandbox_reclaimed_at).toBeUndefined();
+
+		// The owner's open editor heartbeats: the hub captures what the service
+		// saved, with the owner's token, then removes the workspace.
+		await asOwner('heartbeat');
+		expect(await savedCode()).toBe(SAVED_NOTEBOOK);
+		expect(kernelCalls()).toEqual(
+			expect.arrayContaining(['GET list', 'GET files', `DELETE ${SANDBOX}`]),
+		);
+		expect(new Set(seen.map(({ headers }) => headers.authorization))).toEqual(
+			new Set([`Bearer ${ownerToken}`]),
+		);
+		expect(seen.at(-1)?.method).toBe('DELETE');
+		expect((await record()).sandbox_reclaimed_at).toBeDefined();
 	});
 
-	it("keeps the session running and never falls back to the owner's token when refused", async () => {
-		const { compute, stop, status } = await runningSession();
+	it("keeps the session running and never uses the owner's token when refused", async () => {
+		const { stop, status } = await runningSession();
 
 		const res = await stop();
 
 		expect(res.status).toBe(403);
 		expect(await status()).toBe('running');
 		expect(seen.map(({ headers }) => headers.authorization)).toEqual([`Bearer ${adminToken}`]);
-		await compute[Symbol.asyncDispose]();
 	});
 });

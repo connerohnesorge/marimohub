@@ -1,7 +1,7 @@
-export { JobsService } from './JobsService';
+export { JobsService, validateJobSchedule } from './JobsService';
 export type { CreateJobInput, JobLimits, UpdateJobInput } from './JobsService';
 export { JobRunService } from './JobRunService';
-export type { EnqueueRunInput } from './JobRunService';
+export type { EnqueueRunInput, KernelRunInput } from './JobRunService';
 export { JobRunner } from './JobRunner';
 export type { JobRunContext, JobRunnerDeps, JobRunnerSandboxConfig } from './JobRunner';
 export { appendJobRunFinishEvent, JobScheduler } from './JobScheduler';

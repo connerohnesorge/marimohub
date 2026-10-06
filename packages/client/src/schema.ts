@@ -1164,6 +1164,26 @@ export interface paths {
 		patch?: never;
 		trace?: never;
 	};
+	'/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave-editor': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Report that an editor is closing
+		 * @description Saves the notebook now when only the session owner's requests can reach its kernel, because the hub cannot save it later. Otherwise does nothing.
+		 */
+		post: operations['sessions.leaveEditor'];
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
 	'/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave': {
 		parameters: {
 			query?: never;
@@ -1195,6 +1215,46 @@ export interface paths {
 		post: operations['sessions.surfaces.ensure'];
 		/** Stop a secondary session surface */
 		delete: operations['sessions.surfaces.stop'];
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	'/api/v1/jobs/{job_key}/run-spec': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		/**
+		 * What a job author's personal kernel runs when it fires the job
+		 * @description Only for the job's author, whose personal kernel fires its schedule; anyone else gets 404. 404 means the job is gone; 409 means it should not run now (disabled, unscheduled, or back on the hub).
+		 */
+		get: operations['jobs.kernel.runSpec'];
+		put?: never;
+		post?: never;
+		delete?: never;
+		options?: never;
+		head?: never;
+		patch?: never;
+		trace?: never;
+	};
+	'/api/v1/jobs/{job_key}/external-runs': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path?: never;
+			cookie?: never;
+		};
+		get?: never;
+		put?: never;
+		/**
+		 * Record a run that the job author's personal kernel finished
+		 * @description Only for the job's author. The run is recorded, audited, and notified like a hub run; it is never retried. Repeating a report with the same `run_id` returns the recorded run.
+		 */
+		post: operations['jobs.kernel.recordRun'];
+		delete?: never;
 		options?: never;
 		head?: never;
 		patch?: never;
@@ -3430,116 +3490,26 @@ export interface components {
 			/** @description Workspace-relative file to open. Supported only by the VS Code surface. */
 			open?: string;
 		};
-		JobPage: {
-			items: components['schemas']['Job'][];
-			next_cursor: string | null;
-		};
-		Job: {
-			id: string;
-			notebook_id: string;
-			project_id: string;
-			name: string;
-			enabled: boolean;
-			schedule?: components['schemas']['JobSchedule'];
-			parameters?: components['schemas']['JobParameters'];
-			retry?: components['schemas']['JobRetryPolicy'];
-			timeout_seconds?: number;
-			/**
-			 * @description Known values: forbid, allow. Unrecognized values normalize to unknown.
-			 * @example forbid
-			 * @enum {string}
-			 */
-			concurrency_policy: 'forbid' | 'allow' | 'unknown';
-			notifications?: components['schemas']['JobNotifications'];
-			created_by: string;
-			/** Format: date-time */
-			created_at: string;
-			/** Format: date-time */
-			updated_at: string;
-		};
-		JobSchedule: {
-			/**
-			 * @description Five-field cron expression (minute hour day-of-month month day-of-week).
-			 * @example 0 6 * * 1-5
-			 */
-			cron: string;
-			/**
-			 * @description IANA time zone the cron fields are evaluated in.
-			 * @example Europe/Berlin
-			 */
-			timezone: string;
-		};
-		/**
-		 * @description String parameters passed to the notebook as `--key value` after `--`, readable via `mo.cli_args()`. Parameters are visible to every project member who can read the job or its run history; do not store secrets here.
-		 * @example {
-		 *       "region": "eu-west-1"
-		 *     }
-		 */
-		JobParameters: {
-			[key: string]: string;
-		};
-		JobRetryPolicy: {
-			max_retries: number;
-			/** @default 60 */
-			backoff_seconds: number;
-		};
-		/** @description Deliver `job.run.failed` / `job.run.succeeded` project alerts for this job. Failures notify once retries are exhausted. */
-		JobNotifications: {
-			on: ('failure' | 'success')[];
-		};
-		JobCreateBody: {
-			/** @example Nightly refresh */
-			name: string;
-			/** @default true */
-			enabled: boolean;
-			schedule?: components['schemas']['JobSchedule'];
-			parameters?: components['schemas']['JobParameters'];
-			retry?: components['schemas']['JobRetryPolicy'];
-			/**
-			 * @description Run deadline in seconds; capped by MARIMOHUB_JOBS_MAX_TIMEOUT_SECONDS.
-			 * @example 1800
-			 */
-			timeout_seconds?: number;
-			/**
-			 * @default forbid
-			 * @enum {string}
-			 */
-			concurrency_policy: 'forbid' | 'allow';
-			notifications?: components['schemas']['JobNotifications'];
-		};
-		JobUpdateBody: {
-			name?: string;
-			enabled?: boolean;
-			schedule?: {
-				/**
-				 * @description Five-field cron expression (minute hour day-of-month month day-of-week).
-				 * @example 0 6 * * 1-5
-				 */
-				cron: string;
-				/**
-				 * @description IANA time zone the cron fields are evaluated in.
-				 * @example Europe/Berlin
-				 */
-				timezone: string;
-			} | null;
+		KernelJobRunSpec: {
+			/** @description Report the run under this id. */
+			run_id: string;
+			/** @description The file to run, relative to the file tree. */
+			notebook: string;
+			/** @description The notebook version the files come from. */
+			version: string;
+			files: {
+				path: string;
+				content_base64: string;
+			}[];
+			/** @description Passed as `mo.cli_args()`. */
 			parameters?: {
 				[key: string]: string;
-			} | null;
-			retry?: {
-				max_retries: number;
-				/** @default 60 */
-				backoff_seconds: number;
-			} | null;
-			/**
-			 * @description Run deadline in seconds; capped by MARIMOHUB_JOBS_MAX_TIMEOUT_SECONDS.
-			 * @example 1800
-			 */
-			timeout_seconds?: number | null;
-			/** @enum {string} */
-			concurrency_policy?: 'forbid' | 'allow';
-			notifications?: {
-				on: ('failure' | 'success')[];
-			} | null;
+			};
+			timeout_seconds: number;
+			/** @description The run's integrations, in the kernel service's environment format. */
+			environment: {
+				[key: string]: unknown;
+			};
 		};
 		JobRun: {
 			run_id: string;
@@ -3611,6 +3581,129 @@ export interface components {
 				logs_bytes?: number;
 			};
 			cancelled_by?: string;
+		};
+		/**
+		 * @description String parameters passed to the notebook as `--key value` after `--`, readable via `mo.cli_args()`. Parameters are visible to every project member who can read the job or its run history; do not store secrets here.
+		 * @example {
+		 *       "region": "eu-west-1"
+		 *     }
+		 */
+		JobParameters: {
+			[key: string]: string;
+		};
+		KernelJobRunReport: {
+			run_id?: string;
+			/** @enum {string} */
+			status: 'succeeded' | 'failed' | 'timed_out';
+			/** Format: date-time */
+			started_at: string;
+			/** Format: date-time */
+			finished_at: string;
+			html_base64?: string;
+			error?: string;
+			version?: string;
+		};
+		JobPage: {
+			items: components['schemas']['Job'][];
+			next_cursor: string | null;
+		};
+		Job: {
+			id: string;
+			notebook_id: string;
+			project_id: string;
+			name: string;
+			enabled: boolean;
+			schedule?: components['schemas']['JobSchedule'];
+			parameters?: components['schemas']['JobParameters'];
+			retry?: components['schemas']['JobRetryPolicy'];
+			timeout_seconds?: number;
+			/**
+			 * @description Known values: forbid, allow. Unrecognized values normalize to unknown.
+			 * @example forbid
+			 * @enum {string}
+			 */
+			concurrency_policy: 'forbid' | 'allow' | 'unknown';
+			notifications?: components['schemas']['JobNotifications'];
+			created_by: string;
+			/** Format: date-time */
+			created_at: string;
+			/** Format: date-time */
+			updated_at: string;
+		};
+		JobSchedule: {
+			/**
+			 * @description Five-field cron expression (minute hour day-of-month month day-of-week).
+			 * @example 0 6 * * 1-5
+			 */
+			cron: string;
+			/**
+			 * @description IANA time zone the cron fields are evaluated in.
+			 * @example Europe/Berlin
+			 */
+			timezone: string;
+		};
+		JobRetryPolicy: {
+			max_retries: number;
+			/** @default 60 */
+			backoff_seconds: number;
+		};
+		/** @description Deliver `job.run.failed` / `job.run.succeeded` project alerts for this job. Failures notify once retries are exhausted. */
+		JobNotifications: {
+			on: ('failure' | 'success')[];
+		};
+		JobCreateBody: {
+			/** @example Nightly refresh */
+			name: string;
+			/** @default true */
+			enabled: boolean;
+			schedule?: components['schemas']['JobSchedule'];
+			parameters?: components['schemas']['JobParameters'];
+			retry?: components['schemas']['JobRetryPolicy'];
+			/**
+			 * @description Run deadline in seconds; capped by MARIMOHUB_JOBS_MAX_TIMEOUT_SECONDS.
+			 * @example 1800
+			 */
+			timeout_seconds?: number;
+			/**
+			 * @default forbid
+			 * @enum {string}
+			 */
+			concurrency_policy: 'forbid' | 'allow';
+			notifications?: components['schemas']['JobNotifications'];
+		};
+		JobUpdateBody: {
+			name?: string;
+			enabled?: boolean;
+			schedule?: {
+				/**
+				 * @description Five-field cron expression (minute hour day-of-month month day-of-week).
+				 * @example 0 6 * * 1-5
+				 */
+				cron: string;
+				/**
+				 * @description IANA time zone the cron fields are evaluated in.
+				 * @example Europe/Berlin
+				 */
+				timezone: string;
+			} | null;
+			parameters?: {
+				[key: string]: string;
+			} | null;
+			retry?: {
+				max_retries: number;
+				/** @default 60 */
+				backoff_seconds: number;
+			} | null;
+			/**
+			 * @description Run deadline in seconds; capped by MARIMOHUB_JOBS_MAX_TIMEOUT_SECONDS.
+			 * @example 1800
+			 */
+			timeout_seconds?: number | null;
+			/** @enum {string} */
+			concurrency_policy?: 'forbid' | 'allow';
+			notifications?: {
+				on: ('failure' | 'success')[];
+			} | null;
 		};
 		JobRunTriggerBody: {
 			parameters?: components['schemas']['JobParameters'];
@@ -12339,6 +12432,95 @@ export interface operations {
 			};
 		};
 	};
+	'sessions.leaveEditor': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				pid: string;
+				nid: string;
+				sid: string;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			/** @description Noted */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['SuccessResponse'];
+				};
+			};
+			/** @description Authentication required */
+			401: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Access forbidden */
+			403: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Not found */
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Request body too large */
+			413: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Validation error */
+			422: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Internal server error */
+			500: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Service unavailable */
+			503: {
+				headers: {
+					/** @description Seconds to wait before retrying. */
+					'Retry-After': string;
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+		};
+	};
 	'sessions.leaveApp': {
 		parameters: {
 			query?: never;
@@ -12697,6 +12879,221 @@ export interface operations {
 				};
 				content: {
 					'application/json': components['schemas']['SuccessResponse'];
+				};
+			};
+			/** @description Bad request */
+			400: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Authentication required */
+			401: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Access forbidden */
+			403: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Not found */
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Conflict */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Request body too large */
+			413: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Validation error */
+			422: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Internal server error */
+			500: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Service unavailable */
+			503: {
+				headers: {
+					/** @description Seconds to wait before retrying. */
+					'Retry-After': string;
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+		};
+	};
+	'jobs.kernel.runSpec': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description The project, notebook, and job ids joined by dots. */
+				job_key: string;
+			};
+			cookie?: never;
+		};
+		requestBody?: never;
+		responses: {
+			/** @description Run spec */
+			200: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': {
+						/** @enum {boolean} */
+						success: true;
+						data: components['schemas']['KernelJobRunSpec'];
+					};
+				};
+			};
+			/** @description Authentication required */
+			401: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Access forbidden */
+			403: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Not found */
+			404: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Conflict */
+			409: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Request body too large */
+			413: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Validation error */
+			422: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Internal server error */
+			500: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+			/** @description Service unavailable */
+			503: {
+				headers: {
+					/** @description Seconds to wait before retrying. */
+					'Retry-After': string;
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': components['schemas']['ErrorResponse'];
+				};
+			};
+		};
+	};
+	'jobs.kernel.recordRun': {
+		parameters: {
+			query?: never;
+			header?: never;
+			path: {
+				/** @description The project, notebook, and job ids joined by dots. */
+				job_key: string;
+			};
+			cookie?: never;
+		};
+		requestBody: {
+			content: {
+				'application/json': components['schemas']['KernelJobRunReport'];
+			};
+		};
+		responses: {
+			/** @description Recorded */
+			201: {
+				headers: {
+					[name: string]: unknown;
+				};
+				content: {
+					'application/json': {
+						/** @enum {boolean} */
+						success: true;
+						data: components['schemas']['JobRun'];
+					};
 				};
 			};
 			/** @description Bad request */

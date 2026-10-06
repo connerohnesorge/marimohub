@@ -377,6 +377,12 @@ export interface BackgroundTaskScheduler {
 export interface McpConfig {
 	publicBaseUrl: string;
 	externalAuthorizationServer?: string;
+	/**
+	 * Behind a gateway that verifies each caller's own token and passes identity
+	 * headers (the proxy-header backend), a `/mcp` request without a bearer is
+	 * that caller. Requests a browser marks as coming from another site never are.
+	 */
+	gatewayIdentity?: boolean;
 }
 
 /**

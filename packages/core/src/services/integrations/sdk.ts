@@ -10,7 +10,9 @@ import type {
 	QueryReadinessCheck,
 	KindBrand,
 	ProbeRequestInit,
-	SessionS3Access,
+	SessionAwsAccess,
+	SessionHost,
+	SessionMongoUrl,
 	SessionTunnel,
 	TableSchema,
 	TablePreview,
@@ -70,14 +72,27 @@ export interface RenderOutput {
 	warnings?: string[];
 	/** User-safe metadata copied into this instance's manifest entry. */
 	manifestExtra?: Record<string, unknown>;
-	/**
-	 * TCP destinations this instance's variables connect to, naming the variables
-	 * that carry each one. Declare every host and port a client dials.
+	/*
+	 * Network declarations, for a backend that relays kernel traffic and keeps
+	 * credentials out of the kernel (see `SessionNetwork`). Every other backend
+	 * ignores them. Declare every destination a client dials.
 	 */
+	/** Raw TCP servers, with the variables that carry their host, port, or URL. */
 	tunnels?: SessionTunnel[];
-	/** S3 credentials this instance's variables carry, naming those variables. */
-	s3?: SessionS3Access;
-	/** Why this instance's connection target cannot be declared as a tunnel, when it has one. */
+	/** HTTPS services a client reaches by name. */
+	hosts?: SessionHost[];
+	/** Variables holding MongoDB URLs, whose replica set members a relay resolves. */
+	mongodb?: SessionMongoUrl[];
+	/** AWS credentials this instance's variables or YAML carry. */
+	aws?: SessionAwsAccess[];
+	/** Values a relaying backend sets after withholding the credential variables. */
+	relayEnv?: Record<string, string>;
+	/**
+	 * Properties of this instance's PyIceberg catalog a relaying backend drops:
+	 * credentials it withholds, or file paths it cannot deliver.
+	 */
+	relayYamlKeys?: string[];
+	/** Why part of this instance's network cannot be declared. */
 	unrelayable?: string;
 }
 

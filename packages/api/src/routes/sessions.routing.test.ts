@@ -45,7 +45,12 @@ function routedCompute(select: (owner: EndUserPrincipal) => Promise<string | und
 		}),
 	};
 	const personalProvider = fakeComputeFrom(personalInstance, {
-		capabilities: { multiPort: false, managedEnvironment: true },
+		capabilities: {
+			multiPort: false,
+			managedEnvironment: true,
+			exclusiveEditors: true,
+			requestCredentials: true,
+		},
 	});
 	const regularCreate = vi.spyOn(regularProvider, 'create');
 	const personalCreate = vi.spyOn(personalProvider, 'create');
@@ -233,7 +238,7 @@ describe("Another user's session in a personal kernel", () => {
 
 	const sessionsPath = (suffix = '') => `/projects/${pid}/notebooks/${nid}/sessions${suffix}`;
 
-	it('stops it through the provider alone, capturing nothing', async () => {
+	it("stops it through the provider alone and keeps the saved workspace for the owner's capture", async () => {
 		const { routed, owner, other } = apis();
 		const started = await expectOk<Session>(await owner('POST', sessionsPath()));
 		routed.personal.calls.readFile.length = 0;
@@ -242,12 +247,52 @@ describe("Another user's session in a personal kernel", () => {
 
 		expect(routed.personal.instance.destroy).toHaveBeenCalledOnce();
 		expect(routed.personal.calls.readFile).toEqual([]);
-		const stored = await createServices(bucket).sessions.getSession(
+		const services = createServices(bucket);
+		const stored = await services.sessions.getSession(pid, started.session_id as SessionId);
+		expect(stored.status).toBe('terminated');
+		expect(stored.admin_stopped_at).toBeDefined();
+		// Not reclaimed: the claim holds the notebook until the workspace is captured.
+		expect(stored.sandbox_reclaimed_at).toBeUndefined();
+		expect((await services.sessions.getEditorClaim(pid, nid))?.session_id).toBe(started.session_id);
+	});
+
+	it("captures the stopped workspace with the owner's own request before a new start", async () => {
+		const { routed, owner, other } = apis();
+		const started = await expectOk<Session>(await owner('POST', sessionsPath()));
+		await expectOk(await other('DELETE', sessionsPath(`/${started.session_id}`)));
+		routed.personal.calls.readFile.length = 0;
+		vi.mocked(routed.personal.instance.destroy).mockClear();
+
+		const restarted = await expectOk<Session>(await owner('POST', sessionsPath()));
+
+		expect(restarted.session_id).not.toBe(started.session_id);
+		// The capture read the saved notebook, then the old workspace was destroyed.
+		expect(routed.personal.calls.readFile).toContain('/workspace/notebook.py');
+		expect(routed.personal.instance.destroy).toHaveBeenCalledOnce();
+		const old = await createServices(bucket).sessions.getSession(
 			pid,
 			started.session_id as SessionId,
 		);
+		expect(old.sandbox_reclaimed_at).toBeDefined();
+	});
+
+	it("stops another user's live temporary session through the provider when the notebook is deleted", async () => {
+		const { routed, owner, other } = apis();
+		await expectOk<Session>(await owner('POST', sessionsPath()));
+		const temporary = await expectOk<Session>(
+			await other('POST', sessionsPath(), { edit_intent: 'temporary' }),
+		);
+		vi.mocked(routed.personal.instance.destroy).mockClear();
+
+		await expectOk(await owner('DELETE', `/projects/${pid}/notebooks/${nid}`));
+
+		expect(routed.personal.instance.destroy).toHaveBeenCalledOnce();
+		const stored = await createServices(bucket).sessions.getSession(
+			pid,
+			temporary.session_id as SessionId,
+		);
 		expect(stored.status).toBe('terminated');
-		expect(stored.sandbox_reclaimed_at).toBeDefined();
+		expect(stored.admin_stopped_at).toBeDefined();
 	});
 
 	it('leaves it running when the provider refuses the stop', async () => {
@@ -297,5 +342,86 @@ describe("Another user's session in a personal kernel", () => {
 		);
 		expect(stored.status).toBe('running');
 		expect(routed.personal.instance.destroy).not.toHaveBeenCalled();
+	});
+});
+
+describe('Editor sharing on a routing compute provider', () => {
+	let bucket: MemoryBucket;
+	let pid: ProjectId;
+	let nid: NotebookId;
+	const sessionsPath = () => `/projects/${pid}/notebooks/${nid}/sessions`;
+
+	beforeEach(async () => {
+		bucket = await createInitializedBucket();
+		const services = createServices(bucket);
+		const project = await services.projects.createProject({ name: 'P', description: 'd' }, ACTOR);
+		pid = project.id as ProjectId;
+		const notebook = await services.notebooks.createNotebook(
+			pid,
+			{ title: 'NB', description: 'd', code: 'import marimo as mo' },
+			ACTOR,
+		);
+		nid = notebook.id as NotebookId;
+	});
+
+	/** ACTOR has a personal kernel; STRANGER does not. The deployment shares editors. */
+	function apis() {
+		const routed = routedCompute(async (owner) => (owner.userId === ACTOR ? PERSONAL : undefined));
+		const deps: Partial<ApiDeps> = {
+			policy: { editorSandboxSharing: 'shared', defaultRole: 'editor' },
+		};
+		return {
+			routed,
+			withKernel: createTestApi({ bucket, userId: ACTOR, compute: routed.compute, deps }).request,
+			withoutKernel: createTestApi({ bucket, userId: STRANGER, compute: routed.compute, deps })
+				.request,
+		};
+	}
+
+	type Started = Session & { editor_session: { sharing: string; access: string } };
+
+	it('keeps shared editing for users on the regular backend', async () => {
+		const { withoutKernel, routed } = apis();
+		const first = await expectOk<Started>(await withoutKernel('POST', sessionsPath()));
+
+		expect(first.editor_session).toEqual({ sharing: 'shared', access: 'shared' });
+		expect((await createServices(bucket).sessions.getEditorClaim(pid, nid))?.sharing).toBe(
+			'shared',
+		);
+		expect(routed.personal.create).not.toHaveBeenCalled();
+	});
+
+	it('lets a user with a kernel join an editor already shared on the regular backend', async () => {
+		const { withKernel, withoutKernel, routed } = apis();
+		const shared = await expectOk<Started>(await withoutKernel('POST', sessionsPath()));
+
+		const joined = await expectOk<Started & { reused: boolean }>(
+			await withKernel('POST', sessionsPath()),
+		);
+
+		expect(joined.reused).toBe(true);
+		expect(joined.session_id).toBe(shared.session_id);
+		expect(routed.personal.create).not.toHaveBeenCalled();
+	});
+
+	it('claims an external-kernel editor exclusively, so others cannot share it', async () => {
+		const { withKernel, withoutKernel } = apis();
+		const personal = await expectOk<Started>(await withKernel('POST', sessionsPath()));
+
+		expect(personal.editor_session).toEqual({ sharing: 'exclusive', access: 'owner' });
+		const stored = await createServices(bucket).sessions.getSession(
+			pid,
+			personal.session_id as SessionId,
+		);
+		expect(stored.editor_sandbox_sharing).toBe('exclusive');
+		expect((await createServices(bucket).sessions.getEditorClaim(pid, nid))?.sharing).toBe(
+			'exclusive',
+		);
+		await expectError(await withoutKernel('POST', sessionsPath()), 409, 'EDIT_SESSION_OWNED');
+		const temporary = await expectOk<Started>(
+			await withoutKernel('POST', sessionsPath(), { edit_intent: 'temporary' }),
+		);
+		expect(temporary.editor_session.access).toBe('temporary');
+		expect(temporary.user_id).toBe(STRANGER);
 	});
 });

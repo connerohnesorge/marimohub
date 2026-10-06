@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createRunId, UnavailableError, ValidationError } from '@marimo-hub/core';
+import {
+	createRunId,
+	emptySessionNetwork,
+	UnavailableError,
+	ValidationError,
+} from '@marimo-hub/core';
 import type {
 	JobDefinition,
 	JobRun,
@@ -123,16 +128,20 @@ describe('resolveFederatedEnv', () => {
 				AWS_ENDPOINT_URL_S3: 'https://s3.example',
 				AWS_REGION: 'eu',
 			},
-			s3: [
-				{
-					endpoint: 'https://s3.example',
-					region: 'eu',
-					accessKeyId: 'AK',
-					secretAccessKey: 'SK',
-					credentialVars: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
-					endpointVars: ['AWS_ENDPOINT_URL_S3'],
-				},
-			],
+			network: {
+				...emptySessionNetwork(),
+				aws: [
+					{
+						services: ['s3'],
+						endpoint: 'https://s3.example',
+						region: 'eu',
+						accessKeyId: 'AK',
+						secretAccessKey: 'SK',
+						credentialVars: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
+						endpointVars: ['AWS_ENDPOINT_URL_S3'],
+					},
+				],
+			},
 		});
 	});
 
@@ -272,7 +281,7 @@ describe('resolveJobSandboxEnv', () => {
 			},
 			defaults: {},
 		});
-		expect(env?.s3?.map(({ accessKeyId }) => accessKeyId)).toEqual(['AK']);
+		expect(env?.network?.aws.map(({ accessKeyId }) => accessKeyId)).toEqual(['AK']);
 	});
 
 	it('attributes the render to the manual triggerer, else the job author, with their email', async () => {

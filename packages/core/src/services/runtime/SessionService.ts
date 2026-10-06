@@ -565,6 +565,42 @@ export class SessionService {
 		}));
 	}
 
+	async markAdminStopped(projectId: ProjectId, id: SessionId, at: string): Promise<Session> {
+		return this.mutate(projectId, id, (session) => ({ ...session, admin_stopped_at: at }));
+	}
+
+	async scheduleEnvironmentRefresh(
+		projectId: ProjectId,
+		id: SessionId,
+		at: string | undefined,
+	): Promise<Session> {
+		return this.mutate(projectId, id, (session) =>
+			session.environment_refresh_at === at ? null : { ...session, environment_refresh_at: at },
+		);
+	}
+
+	/**
+	 * Take a due environment refresh: moves `environment_refresh_at` to `retryAt`
+	 * so concurrent requests (other tabs, other replicas) do not refresh it too.
+	 * False when it is not due or the session is no longer running.
+	 */
+	async claimEnvironmentRefresh(
+		projectId: ProjectId,
+		id: SessionId,
+		now: number,
+		retryAt: string,
+	): Promise<boolean> {
+		let claimed = false;
+		await this.mutate(projectId, id, (session) => {
+			claimed = false;
+			const due = session.environment_refresh_at;
+			if (session.status !== 'running' || !due || Date.parse(due) > now) return null;
+			claimed = true;
+			return { ...session, environment_refresh_at: retryAt };
+		});
+		return claimed;
+	}
+
 	/** Refresh a running session's heartbeat (keeps it off the TTL reaper).
 	 * Coalesced to ~1 write/60s; never revives a terminal/terminating session.
 	 * Provisioning owns the `starting` to `running` transition so a heartbeat

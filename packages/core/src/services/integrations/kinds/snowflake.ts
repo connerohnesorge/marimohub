@@ -92,9 +92,7 @@ export const snowflake = defineIntegration({
 			files,
 			manifestExtra: { account: config.account, auth_method: config.auth.method },
 		});
-		return {
-			...output,
-			unrelayable: 'the Snowflake connector derives its host from the account identifier',
-		};
+		// The account host and OCSP responder are both under snowflakecomputing.com.
+		return { ...output, hosts: [{ host: '*.snowflakecomputing.com' }] };
 	},
 });

@@ -32,16 +32,22 @@ describe('createFromEnv external-kernel compute', () => {
 		MARIMOHUB_SANDBOX_EXPOSURE: 'proxy',
 		MARIMOHUB_SANDBOX_PROXY_ACK_UNTRUSTED: 'true',
 		MARIMOHUB_AUTH_SESSION_SECRET: 'a-test-signing-secret-at-least-32-bytes-long!!',
-		MARIMOHUB_EDITOR_SANDBOX_SHARING: 'exclusive',
 	};
 
-	it('requires exclusive editor sandboxes', () => {
-		expect(() => createFromEnv({ ...env, MARIMOHUB_EDITOR_SANDBOX_SHARING: 'shared' })).toThrow(
-			/requires MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive/,
+	it("keeps the deployment's editor sharing; external-kernel sessions claim exclusively", () => {
+		const deps = createFromEnv({
+			...env,
+			MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND: 'kubernetes',
+			MARIMOHUB_COMPUTE_IMAGE: 'img',
+		});
+		expect(deps.policy.editorSandboxSharing).toBe('shared');
+		expect(deps.compute.capabilities?.exclusiveEditors).toBeUndefined();
+		expect(deps.compute.routing?.backend('external-kernel').capabilities?.exclusiveEditors).toBe(
+			true,
 		);
 	});
 
-	it('turns off in-sandbox thumbnails and sandbox data previews by default', () => {
+	it('keeps thumbnails on; external sessions ask the kernel service to render them', () => {
 		const deps = createFromEnv({
 			...env,
 			MARIMOHUB_INTEGRATIONS: 'on',
@@ -49,8 +55,7 @@ describe('createFromEnv external-kernel compute', () => {
 			MARIMOHUB_DATA_PREVIEW_IMAGE: 'preview-image',
 		});
 		expect(deps.compute.capabilities?.managedEnvironment).toBe(true);
-		expect(deps.sandbox.automaticThumbnails).toBe(false);
-		expect(deps.policy.editorSandboxSharing).toBe('exclusive');
+		expect(deps.sandbox.automaticThumbnails).toBe(true);
 	});
 });
 
@@ -1822,6 +1827,23 @@ describe('createFromEnv MCP config', () => {
 				MARIMOHUB_APP_BASE_URL: 'https://hub.example.com/base/',
 			}).mcp,
 		).toEqual({ publicBaseUrl: 'https://hub.example.com/base' });
+	});
+
+	it('accepts gateway identity on /mcp only behind the proxy-header backend', () => {
+		const env = {
+			...baseEnv,
+			MARIMOHUB_MCP: 'on',
+			MARIMOHUB_APP_BASE_URL: 'https://hub.example.com',
+			MARIMOHUB_MCP_GATEWAY_IDENTITY: 'on',
+		};
+		expect(() => createFromEnv(env)).toThrow(/requires MARIMOHUB_AUTH_BACKEND=proxy-header/);
+		expect(
+			createFromEnv({
+				...env,
+				MARIMOHUB_AUTH_BACKEND: 'proxy-header',
+				MARIMOHUB_AUTH_ALLOWED_EMAIL_DOMAINS: '*',
+			}).mcp,
+		).toEqual({ publicBaseUrl: 'https://hub.example.com', gatewayIdentity: true });
 	});
 
 	it.each([

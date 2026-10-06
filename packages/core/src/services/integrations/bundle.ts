@@ -4,12 +4,12 @@ import { ValidationError } from '../../errors';
 import { hasControlCharacter, isRecord } from '../../internal/validation';
 import type {
 	IntegrationVersionPin,
+	SessionNetwork,
 	SessionRender,
-	SessionS3Access,
 	SessionTunnel,
-	SessionUnrelayable,
 	WorkloadRef,
 } from '../../ports/integrations';
+import { emptySessionNetwork } from './network';
 import type { RenderOutput } from './sdk';
 import { CODE_EXECUTION_ENV, SHELL_BASICS_ENV } from './environmentName';
 import { stringify } from 'yaml';
@@ -145,67 +145,118 @@ export function bundleIntegrations(
 		path: `${INTEGRATIONS_DIR}/manifest.json`,
 		content: `${JSON.stringify(manifest, null, '\t')}\n`,
 	});
-	const network = bundleNetwork(rendered, vars, varOwner);
+	const network = bundleNetwork(rendered, vars, varOwner, yamlFiles);
 
 	return {
 		files,
 		vars,
 		attachments: rendered.map(({ id, name, kind, version }) => ({ id, name, kind, version })),
 		warnings,
-		...(network.tunnels.length > 0 ? { tunnels: network.tunnels } : {}),
-		...(network.s3.length > 0 ? { s3: network.s3 } : {}),
-		...(network.unrelayable.length > 0 ? { unrelayable: network.unrelayable } : {}),
+		...(network ? { network } : {}),
 	};
 }
 
 /**
  * Keep only the declared variables that made it into the bundle: a discovery
  * variable another instance claimed no longer carries this instance's target.
+ * Undefined when no instance declared anything.
  */
 function bundleNetwork(
 	rendered: RenderedIntegration[],
 	vars: Record<string, string>,
 	varOwner: Map<string, string>,
-): { tunnels: SessionTunnel[]; s3: SessionS3Access[]; unrelayable: SessionUnrelayable[] } {
-	const tunnels: SessionTunnel[] = [];
-	const s3: SessionS3Access[] = [];
-	const unrelayable: SessionUnrelayable[] = [];
+	yamlFiles: Map<string, MergedYaml>,
+): SessionNetwork | undefined {
+	const network = emptySessionNetwork();
+	const yamlKeys = new Map<string, Set<string>>();
+	let declared = false;
 	for (const item of rendered) {
-		const owned = (name: string) => varOwner.get(name) === item.name;
-		for (const tunnel of item.output.tunnels ?? []) {
-			if (
-				!tunnel.host ||
-				!Number.isInteger(tunnel.port) ||
-				tunnel.port < 1 ||
-				tunnel.port > 65535
-			) {
+		const { output } = item;
+		const relayEnv = output.relayEnv ?? {};
+		for (const [key, value] of Object.entries(relayEnv)) {
+			assertValidEnvValue(key, value, item.name);
+			network.relayEnv[key] = value;
+		}
+		const owned = (name: string) =>
+			varOwner.get(name) === item.name || Object.hasOwn(relayEnv, name);
+		for (const tunnel of output.tunnels ?? []) {
+			if (!tunnel.host || !isPort(tunnel.port)) {
 				throw new ValidationError(`Integration "${item.name}" declared an invalid tunnel target.`);
 			}
-			const declared: SessionTunnel = {
+			const kept: SessionTunnel = {
 				host: tunnel.host,
 				port: tunnel.port,
 				hostVars: tunnel.hostVars.filter(owned),
 				portVars: tunnel.portVars.filter(owned),
 				urlVars: tunnel.urlVars.filter(owned),
 			};
-			if (declared.hostVars.length + declared.portVars.length + declared.urlVars.length > 0) {
-				tunnels.push(declared);
+			if (kept.hostVars.length + kept.portVars.length + kept.urlVars.length > 0) {
+				network.tunnels.push(kept);
 			}
 		}
-		if (item.output.s3) {
+		for (const host of output.hosts ?? []) {
+			if (!host.host || (host.port !== undefined && !isPort(host.port))) {
+				throw new ValidationError(`Integration "${item.name}" declared an invalid host.`);
+			}
+			network.hosts.push(host);
+		}
+		for (const { urlVar } of output.mongodb ?? []) {
+			if (owned(urlVar)) network.mongodb.push({ urlVar });
+		}
+		for (const access of output.aws ?? []) {
 			// Withholding a credential variable must not depend on who owns it.
 			const present = (name: string) => Object.hasOwn(vars, name);
-			s3.push({
-				...item.output.s3,
-				credentialVars: item.output.s3.credentialVars.filter(present),
-				endpointVars: item.output.s3.endpointVars.filter(owned),
+			network.aws.push({
+				...access,
+				credentialVars: access.credentialVars.filter(present),
+				endpointVars: access.endpointVars.filter(owned),
 			});
 		}
-		if (item.output.unrelayable) {
-			unrelayable.push({ integration: item.name, reason: item.output.unrelayable });
+		if (output.relayYamlKeys?.length) yamlKeys.set(item.name, new Set(output.relayYamlKeys));
+		if (output.unrelayable) {
+			network.unrelayable.push({ integration: item.name, reason: output.unrelayable });
+		}
+		declared ||=
+			Object.keys(relayEnv).length > 0 ||
+			[output.tunnels, output.hosts, output.mongodb, output.aws, output.relayYamlKeys].some(
+				(list) => !!list?.length,
+			) ||
+			!!output.unrelayable;
+	}
+	network.relayFiles = relayYamlFiles(yamlFiles, yamlKeys);
+	return declared ? network : undefined;
+}
+
+function isPort(port: number): boolean {
+	return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/** The merged PyIceberg YAML with withheld credential properties removed from each catalog. */
+function relayYamlFiles(
+	yamlFiles: Map<string, MergedYaml>,
+	yamlKeys: Map<string, Set<string>>,
+): SessionNetwork['relayFiles'] {
+	if (yamlKeys.size === 0) return [];
+	const relayed: SessionNetwork['relayFiles'] = [];
+	for (const [path, file] of [...yamlFiles].sort(([a], [b]) => a.localeCompare(b))) {
+		const value = structuredClone(file.value);
+		const catalogs = isRecord(value.catalog) ? value.catalog : undefined;
+		let changed = false;
+		for (const [instance, keys] of yamlKeys) {
+			const catalog = catalogs?.[instance];
+			if (!isRecord(catalog)) continue;
+			for (const key of keys) {
+				if (Object.hasOwn(catalog, key)) {
+					delete catalog[key];
+					changed = true;
+				}
+			}
+		}
+		if (changed) {
+			relayed.push({ path: `${INTEGRATIONS_DIR}/${path}`, content: stringify(sortObject(value)) });
 		}
 	}
-	return { tunnels, s3, unrelayable };
+	return relayed;
 }
 
 function assertValidEnvValue(key: string, value: string, instance: string): void {

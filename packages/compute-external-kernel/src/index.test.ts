@@ -45,6 +45,11 @@ class FakeKernelService {
 	readonly kernels = new Set([OWNER_EMAIL, ADMIN_EMAIL]);
 	readonly admins = new Set([ADMIN_EMAIL]);
 	readonly environments = new Map<string, unknown>();
+	readonly jobs = new Map<string, unknown>();
+	/** Whether the service offers the thumbnail route. */
+	thumbnails = true;
+	/** App sessions by id: who opened them and what was sent. */
+	readonly apps = new Map<string, { viewer: string; author: string; body: unknown }>();
 	forbidden = new Set<string>();
 	ownerMismatch = false;
 	private server?: Server;
@@ -98,6 +103,9 @@ class FakeKernelService {
 					.email
 			: undefined;
 		if (!email) return reply.status(401, { error: { code: 'unauthorized' } });
+		const path0 = url.pathname.replace('/api/external-kernel/v1', '');
+		if (path0.startsWith('/apps/sessions'))
+			return this.handleApp(method, path0, email, headers, body, reply);
 		if (this.ownerMismatch || headers['x-external-kernel-owner'] !== email.toLowerCase()) {
 			return reply.status(403, { error: { code: 'owner_mismatch' } });
 		}
@@ -110,6 +118,16 @@ class FakeKernelService {
 		if (!this.kernels.has(email)) return reply.status(404, { error: { code: 'no_kernel' } });
 		if (method === 'GET' && path === '/kernel')
 			return reply.status(200, { ready: true, user: email });
+		const job = /^\/jobs\/([^/]+)$/.exec(path)?.[1];
+		if (job && method === 'PUT') {
+			this.jobs.set(`${email}:${job}`, JSON.parse(body.toString()));
+			return reply.status(204);
+		}
+		if (job && method === 'DELETE') {
+			return this.jobs.delete(`${email}:${job}`)
+				? reply.status(204)
+				: reply.status(404, { error: { code: 'job_not_found' } });
+		}
 		const match = /^\/workspaces\/([^/]+)(\/.*)?$/.exec(path);
 		if (!match) return reply.status(404, { error: { code: 'not_found' } });
 		const [, workspace, rest = ''] = match;
@@ -153,6 +171,13 @@ class FakeKernelService {
 			const { notebook } = JSON.parse(body.toString()) as { notebook: string };
 			return reply.status(200, { file: `/home/kira/workspaces/${workspace}/${notebook}` });
 		}
+		if (method === 'POST' && rest === '/thumbnail') {
+			if (!this.thumbnails) return reply.status(404, { error: { code: 'not_found' } });
+			if (body.toString().includes('BROKEN')) {
+				return reply.status(422, { error: { code: 'render_failed' } });
+			}
+			return reply.bytes(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+		}
 		if (method === 'PUT' && rest === '/environment') {
 			const environment = JSON.parse(body.toString()) as { env?: Record<string, string> };
 			if (environment.env?.REJECT) {
@@ -166,6 +191,33 @@ class FakeKernelService {
 		if (method === 'DELETE' && rest === '') return reply.status(204);
 		return reply.status(404, { error: { code: 'not_found' } });
 	}
+
+	/** Viewer routes: the token is any user's; on start, the owner header names the author. */
+	private handleApp(
+		method: string,
+		path: string,
+		email: string,
+		headers: IncomingHttpHeaders,
+		body: Buffer,
+		reply: { status: (code: number, json?: unknown) => void },
+	): void {
+		if (method === 'POST' && path === '/apps/sessions') {
+			const author = String(headers['x-external-kernel-owner'] ?? '');
+			if (!this.kernels.has(author)) return reply.status(404, { error: { code: 'no_kernel' } });
+			const parsed = JSON.parse(body.toString()) as { session: string };
+			this.apps.set(parsed.session, { viewer: email, author, body: parsed });
+			return reply.status(201, { session: parsed.session });
+		}
+		const id = /^\/apps\/sessions\/([^/]+)$/.exec(path)?.[1];
+		const app = id ? this.apps.get(id) : undefined;
+		if (method === 'DELETE' && id) {
+			if (!app) return reply.status(404, { error: { code: 'not_found' } });
+			if (app.viewer !== email) return reply.status(403, { error: { code: 'forbidden' } });
+			this.apps.delete(id);
+			return reply.status(204);
+		}
+		return reply.status(404, { error: { code: 'not_found' } });
+	}
 }
 
 const service = new FakeKernelService();
@@ -174,12 +226,14 @@ let provider: ExternalKernelCompute;
 
 beforeAll(() => service.start());
 afterAll(() => service.stop());
-afterEach(async () => {
-	await provider?.[Symbol.asyncDispose]();
+afterEach(() => {
 	service.requests.length = 0;
 	service.files.clear();
 	service.workspaces.clear();
 	service.environments.clear();
+	service.jobs.clear();
+	service.apps.clear();
+	service.thumbnails = true;
 	service.forbidden.clear();
 	service.admins.clear();
 	service.admins.add(ADMIN_EMAIL);
@@ -265,7 +319,7 @@ describe('ExternalKernelCompute', () => {
 		);
 	});
 
-	it("refuses a token for someone else in the owner's own request instead of using the cache", async () => {
+	it("refuses another user's token in the owner's request", async () => {
 		makeProvider();
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
 		await asOwner(() => provider.create(SANDBOX, owned).ready!());
@@ -435,6 +489,8 @@ describe('ExternalKernelCompute', () => {
 			multiPort: false,
 			managedEnvironment: true,
 			sessionEnvironment: true,
+			exclusiveEditors: true,
+			requestCredentials: true,
 		});
 		expect(service.requests).toHaveLength(0);
 	});
@@ -489,32 +545,54 @@ describe('ExternalKernelCompute', () => {
 		).rejects.toThrow(/edit sessions only/);
 	});
 
-	it("keeps only the owner's token in memory for background calls, until it expires", async () => {
+	it('keeps no token between requests, so work outside a request sends nothing', async () => {
 		makeProvider();
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
 		await asOwner(() => provider.create(SANDBOX, owned).ready!());
-		// A later request from the owner refreshes the cached token.
-		await asOwner(async () => {}, ownerLaterToken);
+		service.requests.length = 0;
 
-		await provider.create(SANDBOX, owned).destroy();
-		const deletes = service.requests.filter((request) => request.method === 'DELETE');
-		expect(deletes.map((request) => request.headers.authorization)).toEqual([
-			`Bearer ${ownerLaterToken}`,
-		]);
-
-		clock = NOW + 7200_000;
 		await expect(provider.create(SANDBOX, owned).destroy()).rejects.toThrow(
-			/No end-user credential/,
+			/no request from the kernel's owner is in progress/,
 		);
+		expect(service.requests).toEqual([]);
 	});
 
-	it('does not cache tokens of users who never drive a kernel', async () => {
+	it("uses only each request's own token", async () => {
 		makeProvider();
-		await provider.withEndUserRequest(browserRequest(adminToken), admin, async () => {});
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		await asOwner(() => provider.create(SANDBOX, owned).ready!());
+		await asOwner(() => provider.create(SANDBOX, owned).destroy(), ownerLaterToken);
+		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
+			`Bearer ${ownerToken}`,
+			`Bearer ${ownerLaterToken}`,
+		]);
+		service.requests.length = 0;
 
-		await expect(
-			provider.create(SANDBOX, { owner: { projectId: PROJECT, userId: ADMIN } }).destroy(),
-		).rejects.toThrow(/No end-user credential/);
+		// An API client signed in without a kernel token gets guidance, not the browser's token.
+		await expect(asOwner(() => provider.create(SANDBOX, owned).ready!(), '')).rejects.toThrow(
+			/carried no x-pantheon-bearer header/,
+		);
+		expect(service.requests).toEqual([]);
+	});
+
+	it('treats a token for another audience as missing, so it is never forwarded', async () => {
+		provider = new ExternalKernelCompute({
+			baseUrl: service.baseUrl,
+			now: () => clock,
+			tokenAudience: 'marimohub',
+		});
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		const cliToken = jwt({ email: OWNER_EMAIL, exp: NOW / 1000 + 3600, aud: ['pantheon-cli'] });
+		const hubToken = jwt({ email: OWNER_EMAIL, exp: NOW / 1000 + 3600, aud: 'marimohub' });
+
+		await expect(asOwner(() => provider.create(SANDBOX, owned).ready!(), cliToken)).rejects.toThrow(
+			/not issued for the kernel service/,
+		);
+		expect(service.requests).toEqual([]);
+		await asOwner(() => provider.create(SANDBOX, owned).ready!(), hubToken);
+		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
+			`Bearer ${hubToken}`,
+		]);
 	});
 
 	it('attaches only to a workspace that exists', async () => {
@@ -534,27 +612,40 @@ describe('ExternalKernelCompute', () => {
 
 	describe('applyEnvironment', () => {
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
-		const empty = { vars: {}, files: [], tunnels: [], s3: [], unrelayable: [] };
+		const network = {
+			tunnels: [],
+			hosts: [],
+			mongodb: [],
+			aws: [],
+			relayEnv: {},
+			relayFiles: [],
+			unrelayable: [],
+		};
+		const empty = { vars: {}, files: [], network };
 
 		it("replaces this workspace's environment with the owner's token", async () => {
 			makeProvider();
 			await asOwner(() =>
 				provider.create(SANDBOX, owned).applyEnvironment!({
-					...empty,
 					vars: { PGHOST: 'db.internal', AWS_ACCESS_KEY_ID: 'AK' },
-					tunnels: [
-						{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
-					],
-					s3: [
-						{
-							endpoint: 'https://s3.us-east-2.amazonaws.com',
-							region: 'us-east-2',
-							accessKeyId: 'AK',
-							secretAccessKey: 'SK',
-							credentialVars: ['AWS_ACCESS_KEY_ID'],
-							endpointVars: [],
-						},
-					],
+					files: [],
+					network: {
+						...network,
+						tunnels: [
+							{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
+						],
+						hosts: [{ host: 'bigquery.googleapis.com' }],
+						aws: [
+							{
+								services: ['s3'],
+								region: 'us-east-2',
+								accessKeyId: 'AK',
+								secretAccessKey: 'SK',
+								credentialVars: ['AWS_ACCESS_KEY_ID'],
+								endpointVars: [],
+							},
+						],
+					},
 				}),
 			);
 
@@ -570,13 +661,14 @@ describe('ExternalKernelCompute', () => {
 				tunnels: [
 					{ host: 'db.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
 				],
-				s3: [
+				hosts: [{ host: 'bigquery.googleapis.com', port: 443 }],
+				aws: [
 					{
-						endpoint: 'https://s3.us-east-2.amazonaws.com',
+						services: ['s3'],
 						region: 'us-east-2',
+						endpoint: '',
 						accessKeyId: 'AK',
 						secretAccessKey: 'SK',
-						endpointVar: 'AWS_ENDPOINT_URL_S3',
 					},
 				],
 			});
@@ -613,11 +705,151 @@ describe('ExternalKernelCompute', () => {
 		});
 	});
 
+	it('renders thumbnails in the service with the owner token, and reports a missing route', async () => {
+		makeProvider();
+		const sandbox = provider.create(SANDBOX, { owner: { projectId: PROJECT, userId: OWNER } });
+
+		const rendered = await asOwner(() => sandbox.renderThumbnail!('<div>saved</div>', 5000));
+		const failed = await asOwner(() => sandbox.renderThumbnail!('<div>BROKEN</div>', 5000));
+		service.thumbnails = false;
+		const missing = await asOwner(() => sandbox.renderThumbnail!('<div>saved</div>', 5000));
+
+		expect(rendered).toEqual({ status: 'ok', png: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) });
+		expect(failed).toEqual({ status: 'render_failed' });
+		expect(missing).toEqual({ status: 'unsupported' });
+		const [post] = service.requests;
+		expect(post.method).toBe('POST');
+		expect(post.url).toBe(`/api/external-kernel/v1/workspaces/${SANDBOX}/thumbnail`);
+		expect(post.headers.authorization).toBe(`Bearer ${ownerToken}`);
+		expect(post.headers['content-type']).toBe('text/html; charset=utf-8');
+		expect(post.body).toBe('<div>saved</div>');
+	});
+
+	describe('app sessions', () => {
+		const viewerToken = jwt({ email: ADMIN_EMAIL, exp: NOW / 1000 + 3600 });
+		const asViewer = <T>(fn: () => Promise<T>) =>
+			provider.withEndUserRequest(browserRequest(viewerToken), admin, fn);
+		const start = () =>
+			provider.startApp({
+				sandboxId: SANDBOX,
+				authorEmail: ` ${OWNER_EMAIL.toUpperCase()} `,
+				app: 'nb-0123456789abcdef' as never,
+				version: 'v1',
+				notebook: 'notebook.py',
+				files: [{ path: 'notebook.py', content: new TextEncoder().encode('import marimo') }],
+				environment: {
+					vars: { A: '1', AWS_SECRET_ACCESS_KEY: 'SK' },
+					files: [],
+					network: {
+						tunnels: [],
+						hosts: [],
+						mongodb: [],
+						aws: [
+							{
+								services: ['s3'],
+								region: 'us-east-1',
+								accessKeyId: 'AK',
+								secretAccessKey: 'SK',
+								credentialVars: ['AWS_SECRET_ACCESS_KEY'],
+								endpointVars: [],
+							},
+						],
+						relayEnv: {},
+						relayFiles: [],
+						unrelayable: [],
+					},
+				},
+			});
+
+		it("starts in the author's runtime with the viewer's token, and only the viewer closes it", async () => {
+			makeProvider();
+
+			const started = await asViewer(start);
+
+			expect(started).toEqual({
+				originUrl: `${service.baseUrl}/apps/sessions/${SANDBOX}/proxy/`,
+			});
+			const [post] = service.requests;
+			expect(post.headers.authorization).toBe(`Bearer ${viewerToken}`);
+			expect(post.headers['x-external-kernel-owner']).toBe(OWNER_EMAIL);
+			const body = JSON.parse(post.body) as {
+				session: string;
+				files: { path: string; contentBase64: string }[];
+				environment: { env: Record<string, string>; aws: unknown[] };
+			};
+			expect(body.session).toBe(SANDBOX);
+			expect(Buffer.from(body.files[0].contentBase64, 'base64').toString()).toBe('import marimo');
+			expect(body.environment.env).toEqual({ A: '1' });
+			expect(body.environment.aws).toHaveLength(1);
+
+			const session = provider.appSession(SANDBOX, {
+				owner: { projectId: PROJECT, userId: ADMIN },
+			});
+			await expect(asOwner(() => session.destroy())).rejects.toBeInstanceOf(ForbiddenError);
+			await asViewer(() => session.destroy());
+			expect(service.apps.size).toBe(0);
+			await expect(asViewer(() => session.readFile('/workspace/notebook.py'))).rejects.toThrow(
+				/app session/,
+			);
+		});
+
+		it("is undefined when the author has no kernel, so the hub's pool serves the app", async () => {
+			makeProvider();
+			service.kernels.delete(OWNER_EMAIL);
+			try {
+				await expect(asViewer(start)).resolves.toBeUndefined();
+			} finally {
+				service.kernels.add(OWNER_EMAIL);
+			}
+		});
+	});
+
+	describe('scheduled jobs', () => {
+		const KEY = 'proj-0123456789abcdef.nb-0123456789abcdef.job-0123456789abcdef';
+		const SCHEDULE = { cron: '0 6 * * *', timezone: 'Europe/Berlin', enabled: true };
+
+		it("registers and removes a job with the author's own token", async () => {
+			makeProvider();
+
+			await asOwner(() => provider.registerJob(OWNER, KEY, SCHEDULE));
+			expect(service.jobs.get(`${OWNER_EMAIL}:${KEY}`)).toEqual({
+				schedule: '0 6 * * *',
+				timezone: 'Europe/Berlin',
+				enabled: true,
+			});
+			await asOwner(() => provider.unregisterJob(OWNER, KEY));
+			// A job the service no longer knows is already gone.
+			await asOwner(() => provider.unregisterJob(OWNER, KEY));
+
+			expect(service.jobs.size).toBe(0);
+			expect(new Set(service.requests.map(({ headers }) => headers.authorization))).toEqual(
+				new Set([`Bearer ${ownerToken}`]),
+			);
+		});
+
+		it("never registers a job for anyone but the request's user", async () => {
+			makeProvider();
+
+			await expect(
+				provider.withEndUserRequest(browserRequest(adminToken), admin, () =>
+					provider.registerJob(OWNER, KEY, SCHEDULE),
+				),
+			).rejects.toBeInstanceOf(ForbiddenError);
+			await expect(provider.registerJob(OWNER, KEY, SCHEDULE)).rejects.toThrow(
+				/No end-user credential/,
+			);
+			await expect(asOwner(() => provider.registerJob(OWNER, '../x', SCHEDULE))).rejects.toThrow(
+				/Invalid scheduled job key/,
+			);
+			expect(service.requests).toEqual([]);
+		});
+	});
+
 	describe("another user's request on the owner's sandbox", () => {
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
 
-		/** The owner drove their kernel, so their token is cached for background work. */
-		async function withCachedOwnerToken() {
+		/** The owner drove their kernel first. */
+		async function afterOwnerRequest() {
 			makeProvider();
 			await asOwner(() => provider.create(SANDBOX, owned).ready!());
 			service.requests.length = 0;
@@ -628,7 +860,7 @@ describe('ExternalKernelCompute', () => {
 		}
 
 		it('stops the session through the admin route with only the caller token', async () => {
-			await withCachedOwnerToken();
+			await afterOwnerRequest();
 
 			await asAdmin(() => provider.create(SANDBOX, owned).destroy());
 
@@ -643,8 +875,8 @@ describe('ExternalKernelCompute', () => {
 			expect(stop.headers['x-external-kernel-owner']).toBe(ADMIN_EMAIL);
 		});
 
-		it('never sends any token to the data routes or replays the cached owner token', async () => {
-			await withCachedOwnerToken();
+		it("never sends any token to the data routes or reuses the owner's token", async () => {
+			await afterOwnerRequest();
 			const sandbox = provider.create(SANDBOX, owned);
 			const operations: [string, () => Promise<unknown>][] = [
 				['ready', () => sandbox.ready!()],
@@ -673,7 +905,7 @@ describe('ExternalKernelCompute', () => {
 		});
 
 		it('fails closed when the service refuses the caller as an admin', async () => {
-			await withCachedOwnerToken();
+			await afterOwnerRequest();
 			service.admins.clear();
 
 			await expect(asAdmin(() => provider.create(SANDBOX, owned).destroy())).rejects.toThrow(
@@ -685,7 +917,7 @@ describe('ExternalKernelCompute', () => {
 		});
 
 		it('sends nothing when the caller has no token or the owner cannot be named', async () => {
-			await withCachedOwnerToken();
+			await afterOwnerRequest();
 			await expect(
 				asAdmin(() => provider.create(SANDBOX, owned).destroy(), ''),
 			).rejects.toBeInstanceOf(UnavailableError);
@@ -697,16 +929,6 @@ describe('ExternalKernelCompute', () => {
 				/only the owner can stop/,
 			);
 			expect(service.requests).toEqual([]);
-		});
-
-		it("still lets background work close the workspace with the owner's cached token", async () => {
-			await withCachedOwnerToken();
-
-			await provider.create(SANDBOX, owned).destroy();
-
-			expect(
-				service.requests.map((request) => [request.method, request.headers.authorization]),
-			).toEqual([['DELETE', `Bearer ${ownerToken}`]]);
 		});
 	});
 
@@ -763,7 +985,7 @@ describe('ExternalKernelCompute', () => {
 			expect(target.headers.get('x-external-kernel-owner')).toBe(OWNER_EMAIL);
 		});
 
-		it("never falls back to the owner's cached token for a proxied request", async () => {
+		it("never uses the owner's earlier token for a proxied request", async () => {
 			makeProvider();
 			await asOwner(() =>
 				provider.create(SANDBOX, { owner: { projectId: PROJECT, userId: OWNER } }).ready!(),

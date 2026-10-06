@@ -29,7 +29,7 @@ import changeRequestsApp from './routes/changeRequests';
 import projectsApp from './routes/projects';
 import projectAlertsApp from './routes/projectAlerts';
 import integrationsApp from './routes/integrations';
-import jobsApp from './routes/jobs';
+import jobsApp, { MAX_KERNEL_RUN_REPORT_BYTES } from './routes/jobs';
 import deepLinksApp from './routes/deepLinks';
 import appsApp from './routes/apps';
 import sessionsApp from './routes/sessions';
@@ -314,11 +314,24 @@ export function createApi(rawDeps: ApiDeps) {
 				413,
 			),
 	});
+	const kernelRunReportBodyLimit = bodyLimit({
+		maxSize: MAX_KERNEL_RUN_REPORT_BYTES,
+		onError: (c) =>
+			fail(
+				c,
+				'PAYLOAD_TOO_LARGE',
+				`Run report exceeds the ${MAX_KERNEL_RUN_REPORT_BYTES}-byte limit`,
+				413,
+			),
+	});
 	app.use(`${API_PREFIX}/*`, (c, next) => {
 		const isWorkspaceFilePut =
 			c.req.method === 'PUT' &&
 			/\/projects\/[^/]+\/notebooks\/[^/]+\/workspace\/files$/.test(c.req.path);
-		return (isWorkspaceFilePut ? workspaceFileBodyLimit : standardBodyLimit)(c, next);
+		if (isWorkspaceFilePut) return workspaceFileBodyLimit(c, next);
+		const isKernelRunReport =
+			c.req.method === 'POST' && /^\/api\/v1\/jobs\/[^/]+\/external-runs$/.test(c.req.path);
+		return (isKernelRunReport ? kernelRunReportBodyLimit : standardBodyLimit)(c, next);
 	});
 	if (deps.mcp) {
 		for (const path of ['/register', '/authorize', '/token', '/revoke', '/mcp']) {

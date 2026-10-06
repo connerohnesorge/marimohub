@@ -270,16 +270,17 @@ describe('network declarations', () => {
 				],
 			}),
 			rendered('beta', {
-				env: { BETA_HOST: 'b.internal' },
+				env: { BETA_HOST: 'b.internal', BETA_MONGO: 'mongodb://b' },
 				discoveryEnv: { PGHOST: 'b.internal' },
 				tunnels: [
 					{ host: 'b.internal', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] },
 				],
+				mongodb: [{ urlVar: 'BETA_MONGO' }, { urlVar: 'ALPHA_URL' }],
 			}),
 		]);
 
-		// alpha wins discovery by name order; beta's only variable went to alpha.
-		expect(result.tunnels).toEqual([
+		// alpha wins discovery by name order; beta's only tunnel variable went to alpha.
+		expect(result.network?.tunnels).toEqual([
 			{
 				host: 'a.internal',
 				port: 5432,
@@ -288,12 +289,14 @@ describe('network declarations', () => {
 				urlVars: ['ALPHA_URL'],
 			},
 		]);
+		expect(result.network?.mongodb).toEqual([{ urlVar: 'BETA_MONGO' }]);
 	});
 
-	it('names every present credential variable and records unrelayable targets', () => {
+	it('names every present credential variable and records relay values and gaps', () => {
 		const access = {
-			endpoint: 'https://minio.internal:9000',
+			services: ['s3'],
 			region: 'us-east-1',
+			endpoint: 'https://minio.internal:9000',
 			accessKeyId: 'AK',
 			secretAccessKey: 'SK',
 			credentialVars: ['S3_KEY', 'S3_SECRET', 'S3_TOKEN'],
@@ -302,18 +305,54 @@ describe('network declarations', () => {
 		const result = bundle([
 			rendered('lake', {
 				env: { S3_KEY: 'AK', S3_SECRET: 'SK', S3_ENDPOINT: 'https://minio.internal:9000' },
-				s3: access,
+				aws: [access],
+				hosts: [{ host: 'storage.googleapis.com' }],
+				relayEnv: { LAKE_URL: 'keyless' },
 			}),
 			rendered('mongo', { env: { MONGO_URL: 'mongodb+srv://cluster' }, unrelayable: 'srv' }),
 		]);
 
-		expect(result.s3).toEqual([
+		expect(result.network?.aws).toEqual([
 			{ ...access, credentialVars: ['S3_KEY', 'S3_SECRET'], endpointVars: ['S3_ENDPOINT'] },
 		]);
-		expect(result.unrelayable).toEqual([{ integration: 'mongo', reason: 'srv' }]);
+		expect(result.network?.hosts).toEqual([{ host: 'storage.googleapis.com' }]);
+		expect(result.network?.relayEnv).toEqual({ LAKE_URL: 'keyless' });
+		expect(result.network?.unrelayable).toEqual([{ integration: 'mongo', reason: 'srv' }]);
 	});
 
-	it('rejects an invalid tunnel target and omits empty declarations', () => {
+	it('renders the PyIceberg YAML without the properties a relay drops', () => {
+		const result = bundle([
+			rendered('glue', {
+				yamlFiles: [
+					{
+						path: '.pyiceberg.yaml',
+						value: {
+							catalog: {
+								glue: { type: 'glue', 'glue.access-key-id': 'AK', 'glue.region': 'us-east-2' },
+							},
+						},
+					},
+				],
+				relayYamlKeys: ['glue.access-key-id'],
+			}),
+			rendered('rest', {
+				yamlFiles: [
+					{ path: '.pyiceberg.yaml', value: { catalog: { rest: { type: 'rest', token: 't' } } } },
+				],
+			}),
+		]);
+
+		const yamlPath = `${INTEGRATIONS_DIR}/.pyiceberg.yaml`;
+		expect(result.files.find(({ path }) => path === yamlPath)?.content).toContain(
+			'glue.access-key-id',
+		);
+		const relayed = result.network?.relayFiles.find(({ path }) => path === yamlPath)?.content;
+		expect(relayed).not.toContain('glue.access-key-id');
+		expect(relayed).toContain('glue.region');
+		expect(relayed).toContain('token: t');
+	});
+
+	it('rejects an invalid tunnel or host and omits the network when nothing is declared', () => {
 		expect(() =>
 			bundle([
 				rendered('bad', {
@@ -322,9 +361,9 @@ describe('network declarations', () => {
 				}),
 			]),
 		).toThrow(/invalid tunnel target/);
-		const plain = bundle([rendered('plain', { env: { X: '1' } })]);
-		expect(plain).not.toHaveProperty('tunnels');
-		expect(plain).not.toHaveProperty('s3');
-		expect(plain).not.toHaveProperty('unrelayable');
+		expect(() => bundle([rendered('bad', { hosts: [{ host: 'h', port: 0 }] })])).toThrow(
+			/invalid host/,
+		);
+		expect(bundle([rendered('plain', { env: { X: '1' } })])).not.toHaveProperty('network');
 	});
 });

@@ -735,6 +735,51 @@ describe('SessionLifecycleService', () => {
 		});
 	});
 
+	describe('sandboxes only their owner can reach (requestCredentials)', () => {
+		const ownerOnly = () => {
+			compute = Object.assign(compute, {
+				capabilities: { multiPort: false, requestCredentials: true },
+			});
+		};
+
+		it('the sweep leaves them alone, even when due a save or past their deadline', async () => {
+			ownerOnly();
+			await putSession({ last_snapshot_at: iso(-SNAPSHOT_INTERVAL_MS - 1000) });
+			await putSession({ expires_at: iso(-1000), notebook_id: createNotebookId() });
+			await putSession({ status: 'expired', last_heartbeat: iso(-60 * 60 * 1000) });
+
+			const result = await makeService().sweep(now);
+
+			expect(Object.values(result).every((n) => n === 0)).toBe(true);
+			expect(probe).not.toHaveBeenCalled();
+			expect(sandboxCalls.destroy).toBe(0);
+			expect(notebooks.commitSession).not.toHaveBeenCalled();
+		});
+
+		it("attend applies the sweep's upkeep to one session", async () => {
+			ownerOnly();
+			const due = await putSession({ last_snapshot_at: iso(-SNAPSHOT_INTERVAL_MS - 1000) });
+			const expired = await putSession({
+				status: 'expired',
+				last_heartbeat: iso(-60 * 60 * 1000),
+				notebook_id: createNotebookId(),
+			});
+
+			expect((await makeService().attend(due, { now })).snapshotted).toBe(1);
+			expect((await makeService().attend(expired, { now })).reclaimed).toBe(1);
+			expect(sandboxCalls.destroy).toBe(1);
+			expect((await getStored(expired)).sandbox_reclaimed_at).toBeDefined();
+		});
+
+		it('attend saves a leaving editor before the snapshot cadence', async () => {
+			const s = await putSession({ last_snapshot_at: iso(-1000) });
+
+			expect((await makeService().attend(s, { now })).snapshotted).toBe(0);
+			expect((await makeService().attend(s, { now, saveNow: true })).snapshotted).toBe(1);
+			expect(sandboxCalls.destroy).toBe(0);
+		});
+	});
+
 	it.each(['surface stop', 'sandbox handle'])(
 		'continues sweeping after a %s failure',
 		async (failure) => {

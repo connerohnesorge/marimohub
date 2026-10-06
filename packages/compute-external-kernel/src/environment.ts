@@ -1,21 +1,31 @@
 /**
  * Maps a session's rendered environment onto the external kernel service's
- * workspace environment (`PUT /workspaces/{id}/environment`).
+ * workspace environment (`PUT /workspaces/{id}/environment`, version 2).
  *
- * The service writes each file where it chooses and sets one variable to its
- * path, relays each tunnel through loopback and rewrites the variables that
- * carry it, and keeps S3 credentials itself, re-signing requests sent to a
- * loopback endpoint. Whatever cannot be expressed that way is omitted rather
- * than sent with a value that would point somewhere wrong; `omitted` names it
- * (never its value) so the caller can log it.
+ * The service writes each file where it chooses; an `env` value names one as
+ * `${KIRA_FILE:<name>}`, `envVar` gets its path, and `dirEnvVar` its directory.
+ * It relays each tunnel through loopback and rewrites the variables that carry
+ * it, lets `hosts` through its egress proxy with TLS end to end, resolves and
+ * relays MongoDB URLs itself, and keeps AWS credentials, re-signing each request
+ * sent to a loopback endpoint per service. Whatever cannot be expressed is
+ * omitted rather than sent with a value that would point somewhere wrong;
+ * `omitted` names it (never its value) so the caller can log it.
  */
-import type { SessionS3Access, SessionTunnel } from '@marimo-hub/core/ports/integrations';
+import type {
+	SessionAwsAccess,
+	SessionHost,
+	SessionTunnel,
+} from '@marimo-hub/core/ports/integrations';
 import type { ManagedSessionEnvironment } from '@marimo-hub/core/ports/sandbox';
 
 export interface KernelEnvironmentFile {
+	/** A file name, optionally under one directory. */
 	name: string;
 	contentBase64: string;
+	/** Set to the file's path; empty when no variable names the whole path. */
 	envVar: string;
+	/** Set to the file's directory. */
+	dirEnvVar?: string;
 }
 
 export interface KernelEnvironmentTunnel {
@@ -26,13 +36,20 @@ export interface KernelEnvironmentTunnel {
 	urlVars: string[];
 }
 
-export interface KernelEnvironmentS3 {
-	endpoint: string;
+export interface KernelEnvironmentHost {
+	host: string;
+	port: number;
+}
+
+export interface KernelEnvironmentAws {
+	services: string[];
 	region: string;
+	/** An S3-compatible endpoint; empty for AWS itself. */
+	endpoint: string;
 	accessKeyId: string;
 	secretAccessKey: string;
 	sessionToken?: string;
-	endpointVar: string;
+	expiresAt?: string;
 }
 
 /** The request body; each PUT replaces the workspace's whole environment. */
@@ -40,11 +57,13 @@ export interface KernelEnvironment {
 	env?: Record<string, string>;
 	files?: KernelEnvironmentFile[];
 	tunnels?: KernelEnvironmentTunnel[];
-	s3?: KernelEnvironmentS3[];
+	hosts?: KernelEnvironmentHost[];
+	mongodb?: { urlVar: string }[];
+	aws?: KernelEnvironmentAws[];
 }
 
 export interface Omission {
-	kind: 'variable' | 'file' | 'tunnel' | 's3' | 'integration';
+	kind: 'variable' | 'file' | 'tunnel' | 'host' | 'mongodb' | 'aws' | 'integration';
 	name: string;
 	reason: string;
 }
@@ -52,14 +71,13 @@ export interface Omission {
 // The service's limits, mirrored so a session fails here with a reason instead
 // of on a bare 400.
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
-const FILE_NAME = /^[A-Za-z0-9._-]{1,128}$/;
 const MAX_ENV_VALUE_BYTES = 32 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TUNNELS = 16;
 const DNS_NAME =
 	/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 const IPV6 = /^[0-9A-Fa-f:.]+$/;
-const DEFAULT_ENDPOINT_VAR = 'AWS_ENDPOINT_URL_S3';
+const AWS_SERVICE = /^[a-z0-9-]{1,64}$/;
 
 const utf8 = new TextEncoder();
 
@@ -67,8 +85,13 @@ function byteLength(value: string): number {
 	return utf8.encode(value).byteLength;
 }
 
-function isHost(host: string): boolean {
+function isHost(host: string, wildcard = false): boolean {
+	if (wildcard && host.startsWith('*.')) return DNS_NAME.test(host.slice(2));
 	return host.includes(':') ? IPV6.test(host) : DNS_NAME.test(host);
+}
+
+function isPort(port: number): boolean {
+	return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 function isHttpOrigin(value: string): boolean {
@@ -94,20 +117,8 @@ function commonDirectory(paths: readonly string[]): string | undefined {
 	return common === '/' ? undefined : common;
 }
 
-/** `postgres/db-ca.pem` under the rendered root becomes `postgres-db-ca.pem`. */
-function fileName(path: string, root: string | undefined, taken: Set<string>): string {
-	const relative = root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
-	const base =
-		relative
-			.split('/')
-			.filter(Boolean)
-			.join('-')
-			.replaceAll(/[^A-Za-z0-9._-]/g, '_')
-			.slice(-120) || 'file';
-	let name = base;
-	for (let n = 2; taken.has(name); n++) name = `${base}-${n}`;
-	taken.add(name);
-	return name;
+function segment(value: string): string {
+	return value.replaceAll(/[^A-Za-z0-9._-]/g, '_').slice(-128) || 'file';
 }
 
 function urlCarries(value: string, host: string, port: number): boolean {
@@ -119,37 +130,55 @@ function base64(content: string): string {
 	return Buffer.from(content, 'utf8').toString('base64');
 }
 
-export function toKernelEnvironment(environment: ManagedSessionEnvironment): {
+function fileReference(name: string): string {
+	return `\${KIRA_FILE:${name}}`;
+}
+
+/** Replace every raw or percent-encoded occurrence of `path` in `value`. */
+function substitute(value: string, path: string, replacement: string): string {
+	const encoded = encodeURIComponent(path);
+	let out = value.split(path).join(replacement);
+	const index = () => out.toLowerCase().indexOf(encoded.toLowerCase());
+	for (let at = index(); at !== -1; at = index()) {
+		out = out.slice(0, at) + replacement + out.slice(at + encoded.length);
+	}
+	return out;
+}
+
+export interface KernelEnvironmentResult {
 	body: KernelEnvironment;
 	omitted: Omission[];
-} {
+	/** The earliest time a delivered credential stops working. */
+	expiresAt?: string;
+}
+
+export function toKernelEnvironment(
+	environment: ManagedSessionEnvironment,
+): KernelEnvironmentResult {
+	const { network } = environment;
 	const omitted: Omission[] = [];
 	const vars = new Map(Object.entries(environment.vars));
 	const drop = (name: string, reason: string) => {
 		if (vars.delete(name)) omitted.push({ kind: 'variable', name, reason });
 	};
 
-	for (const { integration, reason } of environment.unrelayable) {
-		omitted.push({ kind: 'integration', name: integration, reason: `no tunnel: ${reason}` });
+	for (const { integration, reason } of network.unrelayable) {
+		omitted.push({ kind: 'integration', name: integration, reason });
 	}
 
 	// Credentials never ride in the environment, whichever set the service keeps.
-	const s3 = environment.s3.at(-1);
-	for (const access of environment.s3) {
-		for (const name of access.credentialVars) vars.delete(name);
-		for (const name of access.endpointVars) vars.delete(name);
-		if (access !== s3) {
-			omitted.push({
-				kind: 's3',
-				name: access.endpoint,
-				reason: 'the service keeps one S3 credential set per workspace; a later one won',
-			});
-		}
+	for (const access of network.aws) {
+		for (const name of [...access.credentialVars, ...access.endpointVars]) vars.delete(name);
 	}
-	const s3Body = s3 ? kernelS3(s3, omitted) : undefined;
-	if (s3Body) vars.delete(s3Body.endpointVar);
+	for (const [name, value] of Object.entries(network.relayEnv)) vars.set(name, value);
+	const aws = kernelAws(network.aws, omitted);
 
-	const files = kernelFiles(environment.files, vars, drop, omitted);
+	const relayed = new Map(network.relayFiles.map((file) => [file.path, file.content]));
+	const rendered = environment.files.map((file) => ({
+		path: file.path,
+		content: relayed.get(file.path) ?? file.content,
+	}));
+	const files = kernelFiles(rendered, vars, drop, omitted);
 
 	const env: Record<string, string> = {};
 	for (const [name, value] of vars) {
@@ -162,108 +191,165 @@ export function toKernelEnvironment(environment: ManagedSessionEnvironment): {
 		}
 	}
 
-	const tunnels = kernelTunnels(environment.tunnels, env, omitted);
+	const tunnels = kernelTunnels(network.tunnels, env, omitted);
+	const hosts = kernelHosts(network.hosts, omitted);
+	const mongodb = network.mongodb.filter(({ urlVar }) => {
+		if (/^mongodb(\+srv)?:\/\//.test(env[urlVar] ?? '')) return true;
+		omitted.push({ kind: 'mongodb', name: urlVar, reason: 'not a MongoDB URL variable' });
+		return false;
+	});
 
 	const body: KernelEnvironment = {};
 	if (Object.keys(env).length > 0) body.env = env;
 	if (files.length > 0) body.files = files;
 	if (tunnels.length > 0) body.tunnels = tunnels;
-	if (s3Body) body.s3 = [s3Body];
-	return { body, omitted };
+	if (hosts.length > 0) body.hosts = hosts;
+	if (mongodb.length > 0) body.mongodb = mongodb.map(({ urlVar }) => ({ urlVar }));
+	if (aws.length > 0) body.aws = aws;
+	const expiries = aws.flatMap(({ expiresAt }) => (expiresAt ? [expiresAt] : []));
+	const expiresAt = expiries.sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+	return { body, omitted, ...(expiresAt ? { expiresAt } : {}) };
 }
 
-function kernelS3(access: SessionS3Access, omitted: Omission[]): KernelEnvironmentS3 | undefined {
-	const endpointVar = access.endpointVars[0] ?? DEFAULT_ENDPOINT_VAR;
-	if (
-		!isHttpOrigin(access.endpoint) ||
-		!access.region ||
-		!access.accessKeyId ||
-		!access.secretAccessKey ||
-		!ENV_NAME.test(endpointVar)
-	) {
-		omitted.push({ kind: 's3', name: access.endpoint, reason: 'incomplete S3 credential set' });
-		return;
-	}
-	for (const extra of access.endpointVars.slice(1)) {
-		omitted.push({
-			kind: 'variable',
-			name: extra,
-			reason: `the service points only ${endpointVar} at its S3 relay`,
+/** A later credential set wins every service it names; an earlier one keeps the rest. */
+function kernelAws(
+	accesses: readonly SessionAwsAccess[],
+	omitted: Omission[],
+): KernelEnvironmentAws[] {
+	const claimed = new Set<string>();
+	const entries: KernelEnvironmentAws[] = [];
+	for (const access of [...accesses].reverse()) {
+		const name = `${access.services.join('+')}@${access.endpoint ?? 'aws'}`;
+		if (
+			!access.region ||
+			!access.accessKeyId ||
+			!access.secretAccessKey ||
+			(access.endpoint !== undefined && !isHttpOrigin(access.endpoint)) ||
+			!access.services.every((service) => AWS_SERVICE.test(service))
+		) {
+			omitted.push({ kind: 'aws', name, reason: 'incomplete AWS credential set' });
+			continue;
+		}
+		const services = access.services.filter((service) => !claimed.has(service));
+		if (services.length === 0) {
+			omitted.push({ kind: 'aws', name, reason: 'newer credentials sign every service it names' });
+			continue;
+		}
+		for (const service of services) claimed.add(service);
+		entries.unshift({
+			services,
+			region: access.region,
+			endpoint: access.endpoint ?? '',
+			accessKeyId: access.accessKeyId,
+			secretAccessKey: access.secretAccessKey,
+			...(access.sessionToken ? { sessionToken: access.sessionToken } : {}),
+			...(access.expiresAt ? { expiresAt: access.expiresAt } : {}),
 		});
 	}
-	return {
-		endpoint: access.endpoint,
-		region: access.region,
-		accessKeyId: access.accessKeyId,
-		secretAccessKey: access.secretAccessKey,
-		...(access.sessionToken ? { sessionToken: access.sessionToken } : {}),
-		endpointVar,
-	};
+	return entries;
 }
 
 /**
- * A file reaches the kernel only through a variable whose whole value is its
- * path; the service picks the real path and sets that variable to it. A value
- * that only embeds a rendered path, or names a rendered directory, would point
- * at nothing, so it is omitted. So is a file whose content embeds one.
+ * A file reaches the kernel through the variables that name it: its whole path
+ * becomes `envVar` (or `${KIRA_FILE:<name>}` for a second such variable), an
+ * embedded path, plain or percent-encoded, becomes `${KIRA_FILE:<name>}`, and a
+ * variable naming a rendered directory ships that directory's files with
+ * `dirEnvVar`. A file whose content embeds a rendered path, or that nothing
+ * names, is omitted, and so is any value left pointing at a rendered path.
  */
 function kernelFiles(
-	rendered: ManagedSessionEnvironment['files'],
+	rendered: readonly { path: string; content: string }[],
 	vars: Map<string, string>,
 	drop: (name: string, reason: string) => void,
 	omitted: Omission[],
 ): KernelEnvironmentFile[] {
 	const root = commonDirectory(rendered.map(({ path }) => path));
-	const paths = new Set(rendered.map(({ path }) => path));
+	if (root === undefined) return [];
+	const underRoot = (dir: string) => dir === root || dir.startsWith(`${root}/`);
 	const directories = new Set<string>();
-	const underRoot = (dir: string) =>
-		root !== undefined && (dir === root || dir.startsWith(`${root}/`));
-	for (const path of paths) {
-		let dir = parentDirectory(path);
-		while (underRoot(dir)) {
+	for (const { path } of rendered) {
+		for (let dir = parentDirectory(path); underRoot(dir); dir = parentDirectory(dir)) {
 			directories.add(dir);
-			dir = parentDirectory(dir);
 		}
 	}
-	// URLs carry the path percent-encoded (`sslrootcert=%2Ftmp%2F...`).
-	const encodedRoot = root && encodeURIComponent(`${root}/`).toLowerCase();
-	const embedsRenderedPath = (value: string) =>
-		root !== undefined &&
-		!paths.has(value) &&
-		(value.includes(`${root}/`) || value.toLowerCase().includes(encodedRoot!));
+	const encodedRoot = encodeURIComponent(`${root}/`).toLowerCase();
+	const embedsRendered = (value: string) =>
+		value.includes(`${root}/`) || value.toLowerCase().includes(encodedRoot);
+	const deliverable = (file: { path: string; content: string }): string | undefined => {
+		if (byteLength(file.content) > MAX_FILE_BYTES) return 'larger than 1 MiB';
+		if (embedsRendered(file.content)) return 'content embeds a rendered file path';
+		return;
+	};
+
+	const files: KernelEnvironmentFile[] = [];
+	const taken = new Set<string>();
+	const unique = (name: string) => {
+		let candidate = name;
+		for (let n = 2; taken.has(candidate); n++) candidate = `${name}-${n}`;
+		taken.add(candidate);
+		return candidate;
+	};
+	const shipped = new Set<string>();
 
 	// Deleting the current entry while iterating a Map is safe.
-	for (const [name, value] of vars) {
-		if (directories.has(value)) drop(name, 'names a directory of rendered files');
-		else if (embedsRenderedPath(value)) drop(name, 'embeds the path of a rendered file');
+	for (const [variable, value] of vars) {
+		if (!directories.has(value)) continue;
+		vars.delete(variable);
+		const label = segment(variable.toLowerCase().replaceAll('_', '-'));
+		for (const file of rendered.filter(({ path }) => parentDirectory(path) === value)) {
+			const reason = deliverable(file);
+			if (reason) {
+				omitted.push({ kind: 'file', name: file.path, reason });
+				continue;
+			}
+			const base = segment(file.path.slice(file.path.lastIndexOf('/') + 1));
+			files.push({
+				name: unique(`${label}/${base}`),
+				contentBase64: base64(file.content),
+				envVar: '',
+				dirEnvVar: variable,
+			});
+			shipped.add(file.path);
+		}
 	}
 
-	const taken = new Set<string>();
-	const files: KernelEnvironmentFile[] = [];
 	for (const file of rendered) {
-		const references = [...vars].filter(([, value]) => value === file.path).map(([name]) => name);
-		let reason: string | undefined;
-		if (references.length === 0) reason = 'no variable names this file';
-		else if (byteLength(file.content) > MAX_FILE_BYTES) reason = 'larger than 1 MiB';
-		else if (embedsRenderedPath(file.content)) reason = 'content embeds a rendered file path';
-		if (reason) {
-			omitted.push({ kind: 'file', name: file.path, reason });
-			for (const name of references) drop(name, 'names an omitted file');
+		const names = [...vars.keys()].sort();
+		const exact = names.filter((name) => vars.get(name) === file.path);
+		const embedding = names.filter((name) => {
+			const value = vars.get(name)!;
+			return (
+				value !== file.path &&
+				(value.includes(file.path) ||
+					value.toLowerCase().includes(encodeURIComponent(file.path).toLowerCase()))
+			);
+		});
+		if (exact.length + embedding.length === 0) {
+			if (!shipped.has(file.path)) {
+				omitted.push({ kind: 'file', name: file.path, reason: 'no variable names this file' });
+			}
 			continue;
 		}
-		const contentBase64 = base64(file.content);
-		for (const envVar of references) {
-			vars.delete(envVar);
-			if (!ENV_NAME.test(envVar)) {
-				omitted.push({ kind: 'variable', name: envVar, reason: 'not a valid variable name' });
-				continue;
-			}
-			const name = fileName(file.path, root, taken);
-			if (!FILE_NAME.test(name)) {
-				omitted.push({ kind: 'file', name: file.path, reason: 'no valid file name' });
-				continue;
-			}
-			files.push({ name, contentBase64, envVar });
+		const reason = deliverable(file);
+		if (reason) {
+			omitted.push({ kind: 'file', name: file.path, reason });
+			for (const name of [...exact, ...embedding]) drop(name, 'names an omitted file');
+			continue;
+		}
+		const relative = file.path.slice(root.length + 1).split('/');
+		const base = segment(relative.pop()!);
+		const name = unique(relative.length > 0 ? `${segment(relative.join('-'))}/${base}` : base);
+		const [envVar = '', ...others] = exact;
+		if (envVar) vars.delete(envVar);
+		for (const variable of [...others, ...embedding]) {
+			vars.set(variable, substitute(vars.get(variable)!, file.path, fileReference(name)));
+		}
+		files.push({ name, contentBase64: base64(file.content), envVar });
+	}
+
+	for (const [name, value] of vars) {
+		if (embedsRendered(value) || directories.has(value)) {
+			drop(name, 'points at a rendered file the service cannot deliver');
 		}
 	}
 	return files;
@@ -278,12 +364,7 @@ function kernelTunnels(
 	const byTarget = new Map<string, KernelEnvironmentTunnel>();
 	for (const tunnel of declared) {
 		const target = `${tunnel.host}:${tunnel.port}`;
-		if (
-			!isHost(tunnel.host) ||
-			!Number.isInteger(tunnel.port) ||
-			tunnel.port < 1 ||
-			tunnel.port > 65535
-		) {
+		if (!isHost(tunnel.host) || !isPort(tunnel.port)) {
 			omitted.push({ kind: 'tunnel', name: target, reason: 'not a DNS name or IP and a port' });
 			continue;
 		}
@@ -314,4 +395,20 @@ function kernelTunnels(
 		});
 	}
 	return tunnels.slice(0, MAX_TUNNELS);
+}
+
+function kernelHosts(
+	declared: readonly SessionHost[],
+	omitted: Omission[],
+): KernelEnvironmentHost[] {
+	const hosts = new Map<string, KernelEnvironmentHost>();
+	for (const { host, port = 443 } of declared) {
+		const name = `${host}:${port}`;
+		if (!isHost(host, true) || !isPort(port)) {
+			omitted.push({ kind: 'host', name, reason: 'not a DNS name, wildcard, or IP and a port' });
+			continue;
+		}
+		hosts.set(name.toLowerCase(), { host: host.toLowerCase(), port });
+	}
+	return [...hosts.values()];
 }

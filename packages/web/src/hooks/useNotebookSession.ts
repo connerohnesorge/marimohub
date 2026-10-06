@@ -60,6 +60,17 @@ function leaveAppVisit(projectId: string, notebookId: string, session: Session |
 		.catch(() => {});
 }
 
+/** Lets the hub save a kernel it can reach only during its owner's requests. */
+function leaveEditor(projectId: string, notebookId: string, session: Session | null) {
+	if (session?.status !== 'running') return;
+	void apiClient
+		.POST('/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave-editor', {
+			params: { path: { pid: projectId, nid: notebookId, sid: session.session_id } },
+			keepalive: true,
+		})
+		.catch(() => {});
+}
+
 /** Why a watched session stopped being renderable — see `ended` below. */
 export type SessionEnded = Session['status'] | 'gone' | 'access_lost' | 'takeover';
 
@@ -446,6 +457,7 @@ export function useNotebookSession(
 		mountedRef.current = true;
 		const leave = () => {
 			if (mode === 'app') leaveAppVisit(projectId, notebookId, sessionRef.current);
+			else leaveEditor(projectId, notebookId, sessionRef.current);
 		};
 		const onPageHide = (event: PageTransitionEvent) => {
 			if (!event.persisted) leave();

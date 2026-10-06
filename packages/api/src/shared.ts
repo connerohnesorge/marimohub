@@ -59,6 +59,7 @@ import type {
 	JobRun,
 	UserId,
 } from '@marimo-hub/core';
+import { isKernelApp } from './kernelApps';
 import type { ApiDeps, HonoEnv } from './context';
 import { describeError, logEvent } from './log';
 
@@ -513,6 +514,7 @@ export function sessionRetirer(deps: ApiDeps): SessionRetirer {
 export async function retireLiveApps(
 	deps: ApiDeps,
 	pid: ProjectId,
+	actor: { id: UserId },
 	scope?: (session: Session) => boolean,
 ): Promise<void> {
 	let apps: Session[];
@@ -535,6 +537,7 @@ export async function retireLiveApps(
 	// Per-app, so one failure cannot strand the apps behind it.
 	for (const s of apps) {
 		try {
+			if (await stopForeignManagedSession(deps, s, actor)) continue;
 			const { session, transitioned } = await deps.services.sessions.beginTerminating(
 				pid,
 				s.session_id,
@@ -639,14 +642,17 @@ export async function cancelJobRuns(
 }
 
 /**
- * Stop a live session that runs in another user's managed-environment kernel
- * before retiring it. Nobody but the owner can read that kernel, so nothing is
- * captured; the provider stops it with the caller's own credential, and a
- * refusal propagates so the session keeps running. Returns whether it stopped
- * the sandbox, which the caller passes to the retirer as `sandboxStopped`.
+ * Stop a live session that runs in another user's managed-environment kernel.
+ * Nobody but the owner can read that kernel, so the provider stops it with the
+ * caller's own credential; the kernel service saves its notebooks first and
+ * runs no cell. A refusal propagates and the session keeps running. The record
+ * is then retired without touching the sandbox: its workspace and editor claim
+ * stay until a reclaim with the owner's own credential (the owner's next start,
+ * or background work) captures and destroys it. Returns false when the caller
+ * should retire the session as usual.
  */
-export async function stopForeignManagedSandbox(
-	deps: Pick<ApiDeps, 'compute'>,
+export async function stopForeignManagedSession(
+	deps: ApiDeps,
 	session: Session,
 	actor: { id: UserId },
 ): Promise<boolean> {
@@ -654,7 +660,19 @@ export async function stopForeignManagedSandbox(
 	if (session.status !== 'running' && session.status !== 'starting') return false;
 	const provider = sessionCompute(deps.compute, session);
 	if (provider.capabilities?.managedEnvironment !== true) return false;
+	const { sessions } = deps.services;
+	const { project_id: pid, session_id: sid } = session;
+	if (isKernelApp(deps, session)) {
+		// Only its viewer's token closes it. Ending the record stops the hub serving
+		// it; the viewer's next request closes it in the kernel service.
+		const { session: terminating } = await sessions.beginTerminating(pid, sid);
+		await sessionRetirer(deps).retire(terminating, { teardown: false });
+		return true;
+	}
 	await provider.create(session.sandbox_id, { owner: sessionOwner(session) }).destroy();
+	await sessions.markAdminStopped(pid, sid, new Date().toISOString());
+	const { session: terminating } = await sessions.beginTerminating(pid, sid);
+	await sessionRetirer(deps).retire(terminating, { teardown: false });
 	return true;
 }
 

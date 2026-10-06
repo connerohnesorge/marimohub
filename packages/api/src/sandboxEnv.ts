@@ -1,11 +1,14 @@
 import {
 	exchangeFederatedStorageSessionEnv,
+	mergeSessionNetworks,
 	UnavailableError,
 	ValidationError,
 } from '@marimo-hub/core';
 import type {
+	JobDefinition,
 	Project,
 	ProjectId,
+	RunId,
 	SessionEnv,
 	SessionRender,
 	UserId,
@@ -22,15 +25,14 @@ import { errorMetadata, logEvent } from './log';
  * same resolved secrets an app session would carry.
  */
 
-/** `add` wins variable collisions, and its S3 credentials take precedence. */
+/** `add` wins variable collisions, and its AWS credentials take precedence. */
 export function mergeSessionEnv(base: SessionEnv | undefined, add: SessionEnv): SessionEnv {
+	const network = mergeSessionNetworks(base?.network, add.network);
 	return {
 		files: [...(base?.files ?? []), ...(add.files ?? [])],
 		vars: { ...base?.vars, ...add.vars },
 		defaults: { ...base?.defaults, ...add.defaults },
-		tunnels: [...(base?.tunnels ?? []), ...(add.tunnels ?? [])],
-		s3: [...(base?.s3 ?? []), ...(add.s3 ?? [])],
-		unrelayable: [...(base?.unrelayable ?? []), ...(add.unrelayable ?? [])],
+		...(network ? { network } : {}),
 	};
 }
 
@@ -110,13 +112,26 @@ export async function resolveJobSandboxEnv(
 	context: JobRunContext,
 ): Promise<SessionEnv | undefined> {
 	const { run, job, project } = context;
-	const userId = run.triggered_by ?? job.created_by;
+	return resolveJobRunEnv(deps, {
+		project,
+		job,
+		runId: run.run_id,
+		userId: run.triggered_by ?? job.created_by,
+	});
+}
+
+/** A job run's env, attributed to the run and to the principal it acts for. */
+export async function resolveJobRunEnv(
+	deps: Pick<ApiDeps, 'wif' | 'integrations' | 'services'>,
+	input: { project: Project; job: JobDefinition; runId: RunId; userId: UserId },
+): Promise<SessionEnv | undefined> {
+	const { project, job, runId, userId } = input;
 	const identity = await deps.services.identities.get(userId).catch(() => null);
-	const fields = { project_id: run.project_id, job_id: run.job_id, run_id: run.run_id };
+	const fields = { project_id: project.id, job_id: job.id, run_id: runId };
 	const [wifEnv, render] = await Promise.all([
 		resolveFederatedEnv(deps, {
 			project,
-			workload: { kind: 'job-run', id: run.run_id },
+			workload: { kind: 'job-run', id: runId },
 			restricted: false,
 			onError: (err) =>
 				logEvent({
@@ -128,7 +143,7 @@ export async function resolveJobSandboxEnv(
 		}),
 		resolveIntegrationRender(deps, {
 			projectId: project.id,
-			workload: { kind: 'job-run', id: run.run_id },
+			workload: { kind: 'job-run', id: runId },
 			principal: { userId, email: identity?.email ?? '' },
 			restricted: false,
 			onRendered: (rendered) => {

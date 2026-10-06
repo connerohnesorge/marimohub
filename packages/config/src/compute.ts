@@ -821,6 +821,7 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 					stripHeaderPrefixes: sandboxStripHeaders(env).prefixes,
 					workdir: env.MARIMOHUB_COMPUTE_WORKDIR,
 					ownerEmail: opts?.ownerEmail,
+					tokenAudience: env.MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE?.trim() || undefined,
 				});
 			} catch (cause) {
 				throw new ConfigError(
@@ -828,10 +829,19 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 					{ variable: 'MARIMOHUB_COMPUTE_EXTERNAL_URL', docs },
 				);
 			}
-			if (!fallbackBackend) return external;
+			const enrolledUsers = parseList(env.MARIMOHUB_COMPUTE_EXTERNAL_USERS);
+			if (!fallbackBackend) {
+				if (enrolledUsers) {
+					throw new ConfigError(
+						'MARIMOHUB_COMPUTE_EXTERNAL_USERS needs MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND for everyone it does not list',
+						{ variable: 'MARIMOHUB_COMPUTE_EXTERNAL_USERS', docs },
+					);
+				}
+				return external;
+			}
 			// The fallback is wired exactly as if it were the selected backend.
 			const fallback = makeCompute({ ...env, MARIMOHUB_COMPUTE_BACKEND: fallbackBackend }, opts);
-			return new ExternalKernelRouter(external, fallback);
+			return new ExternalKernelRouter(external, fallback, { enrolledUsers });
 		}
 		case 'cloudflare':
 			throw new ConfigError(
