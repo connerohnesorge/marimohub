@@ -15,6 +15,7 @@ import type {
 	SessionAwsAccess,
 	SessionHost,
 	SessionTunnel,
+	SessionTunnelCredential,
 } from '@marimo-hub/core/ports/integrations';
 import type { ManagedSessionEnvironment } from '@marimo-hub/core/ports/sandbox';
 
@@ -34,6 +35,13 @@ export interface KernelEnvironmentTunnel {
 	hostVars: string[];
 	portVars: string[];
 	urlVars: string[];
+	/** `postgres`: the service signs in upstream with these and keeps them. */
+	protocol?: 'postgres';
+	user?: string;
+	password?: string;
+	database?: string;
+	sslmode?: string;
+	rootCaBase64?: string;
 }
 
 export interface KernelEnvironmentHost {
@@ -172,6 +180,9 @@ export function toKernelEnvironment(
 	}
 	for (const [name, value] of Object.entries(network.relayEnv)) vars.set(name, value);
 	const aws = kernelAws(network.aws, omitted);
+	for (const tunnel of network.tunnels) {
+		if (tunnel.credential) brokerCredential(tunnel, tunnel.credential, vars);
+	}
 
 	const relayed = new Map(network.relayFiles.map((file) => [file.path, file.content]));
 	const rendered = environment.files.map((file) => ({
@@ -355,7 +366,47 @@ function kernelFiles(
 	return files;
 }
 
-/** Each tunnel keeps the variables that still carry it after everything above. */
+/** What the kernel sees in place of a password the service keeps. */
+export const BROKERED_PASSWORD = 'kira-brokered';
+
+/**
+ * The service signs in upstream and answers the kernel's client without a
+ * password, over loopback without TLS. So the password becomes a placeholder,
+ * and the kernel's side asks for no TLS and names no CA file (left unreferenced,
+ * the CA file is not sent).
+ */
+function brokerCredential(
+	tunnel: SessionTunnel,
+	credential: SessionTunnelCredential,
+	vars: Map<string, string>,
+): void {
+	for (const name of tunnel.urlVars) {
+		const value = vars.get(name);
+		if (value === undefined) continue;
+		let url: URL;
+		try {
+			url = new URL(value);
+		} catch {
+			continue;
+		}
+		if (url.password) url.password = BROKERED_PASSWORD;
+		url.searchParams.delete('sslrootcert');
+		url.searchParams.set('sslmode', 'disable');
+		vars.set(name, url.toString());
+	}
+	for (const name of credential.passwordVars) {
+		if (vars.get(name) === credential.password) vars.set(name, BROKERED_PASSWORD);
+	}
+	for (const name of credential.sslmodeVars) {
+		if (vars.has(name)) vars.set(name, 'disable');
+	}
+	for (const name of credential.rootCertVars) vars.delete(name);
+}
+
+/**
+ * Each tunnel keeps the variables that still carry it after everything above.
+ * A tunnel with a credential is never merged: each sign-in gets its own relay.
+ */
 function kernelTunnels(
 	declared: readonly SessionTunnel[],
 	env: Record<string, string>,
@@ -375,6 +426,23 @@ function kernelTunnels(
 		const urlVars = keep(tunnel.urlVars, (value) => urlCarries(value, tunnel.host, tunnel.port));
 		if (hostVars.length + portVars.length + urlVars.length === 0) {
 			omitted.push({ kind: 'tunnel', name: target, reason: 'no variable carries it any more' });
+			continue;
+		}
+		const { credential } = tunnel;
+		if (credential) {
+			byTarget.set(`${target}#${byTarget.size}`, {
+				host: tunnel.host,
+				port: tunnel.port,
+				hostVars,
+				portVars,
+				urlVars,
+				protocol: credential.protocol,
+				user: credential.user,
+				password: credential.password,
+				database: credential.database,
+				sslmode: credential.sslmode,
+				rootCaBase64: credential.rootCa ? base64(credential.rootCa) : '',
+			});
 			continue;
 		}
 		const merged = byTarget.get(target);

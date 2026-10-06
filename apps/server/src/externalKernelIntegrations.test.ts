@@ -73,10 +73,11 @@ const googleAuth = ['oauth2.googleapis.com:443', 'www.googleapis.com:443'];
 describe('integrations delivered to an external kernel (environment v2)', () => {
 	it.each([
 		['postgres', {}, { ...none, tunnels: ['db.internal:5432'] }],
+		// The CA travels with the tunnel's credential; the kernel names no CA file.
 		[
 			'postgres',
 			{ ssl: { mode: 'verify-full', ca_bundle: 'PEM' } },
-			{ ...none, files: ['postgres/prod-ca.pem PGSSLROOTCERT'], tunnels: ['db.internal:5432'] },
+			{ ...none, tunnels: ['db.internal:5432'] },
 		],
 		['mysql', {}, { ...none, tunnels: ['mysql.internal:3306'] }],
 		[
@@ -315,12 +316,6 @@ describe('integrations delivered to an external kernel (environment v2)', () => 
 	});
 
 	it('puts a delivered CA or key file where a URL embeds its path', () => {
-		const postgres = deliver([
-			render('postgres', { ssl: { mode: 'verify-full', ca_bundle: 'PEM' } }),
-		]);
-		expect(postgres.body.env?.MARIMOHUB_PG_PROD_URL).toContain(
-			'sslrootcert=${KIRA_FILE:postgres/prod-ca.pem}',
-		);
 		const mongo = deliver([render('mongodb', { tls: { mode: 'enabled', ca_bundle: 'PEM' } })]);
 		expect(mongo.body.env?.MARIMOHUB_MONGODB_PROD_URL).toContain(
 			'tlsCAFile=${KIRA_FILE:mongodb/prod-ca.pem}',
@@ -336,6 +331,63 @@ describe('integrations delivered to an external kernel (environment v2)', () => 
 			render('trino', { tls: { verification: 'custom_ca', ca_bundle: 'PEM' } }),
 		]);
 		expect(trino.body.env?.MARIMOHUB_TRINO_PROD_URL).toContain('${KIRA_FILE:trino/prod-ca.pem}');
+	});
+
+	describe('Postgres sign-in through the service', () => {
+		it('sends the credential and TLS settings with the tunnel, never the password in env', () => {
+			const result = deliver([
+				render('postgres', {
+					ssl: { mode: 'verify-full', ca_bundle: 'PEM' },
+					ambient_env: true,
+				}),
+			]);
+
+			expect(result.body.tunnels).toEqual([
+				{
+					host: 'db.internal',
+					port: 5432,
+					hostVars: ['MARIMOHUB_PG_PROD_HOST', 'PGHOST'],
+					portVars: ['MARIMOHUB_PG_PROD_PORT', 'PGPORT'],
+					urlVars: ['MARIMOHUB_PG_PROD_URL'],
+					protocol: 'postgres',
+					user: 'svc user',
+					password: 'p@ss:word',
+					database: 'analytics',
+					sslmode: 'verify-full',
+					rootCaBase64: Buffer.from('PEM').toString('base64'),
+				},
+			]);
+			const env = result.body.env ?? {};
+			expect(JSON.stringify(env)).not.toContain('p@ss');
+			expect(JSON.stringify(env)).not.toContain(encodeURIComponent('p@ss:word'));
+			// The hop to the service is loopback without TLS; TLS runs upstream.
+			expect(env.MARIMOHUB_PG_PROD_URL).toBe(
+				'postgresql://svc%20user:kira-brokered@db.internal:5432/analytics?sslmode=disable',
+			);
+			expect(env).toMatchObject({
+				MARIMOHUB_PG_PROD_PASSWORD: 'kira-brokered',
+				PGPASSWORD: 'kira-brokered',
+				PGSSLMODE: 'disable',
+			});
+			expect(env).not.toHaveProperty('PGSSLROOTCERT');
+		});
+
+		it('relays each sign-in on its own tunnel, even to the same server', () => {
+			const result = deliver([
+				render('postgres', {}, 'reader'),
+				render('postgres', { username: 'writer', password: 'other-secret' }, 'writer'),
+			]);
+
+			expect(
+				(result.body.tunnels ?? []).map(({ host, port, user }) => `${user}@${host}:${port}`),
+			).toEqual(['svc user@db.internal:5432', 'writer@db.internal:5432']);
+		});
+
+		it('leaves Redshift on a plain tunnel: its driver cannot turn TLS off for the loopback hop', () => {
+			const result = deliver([render('redshift')]);
+
+			expect(result.body.tunnels?.[0]).not.toHaveProperty('protocol');
+		});
 	});
 
 	it('never puts AWS keys in env, and federated credentials win S3 with their expiry', () => {

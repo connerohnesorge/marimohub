@@ -137,6 +137,13 @@ service applies it to that workspace only, never to the user's other notebooks.
   the port, or a URL: PostgreSQL, MySQL, SQL Server, Redshift, ClickHouse,
   Trino, Spark Connect, and the Iceberg SQL catalog and Hive metastore (through
   `PYICEBERG_CATALOG__<NAME>__URI`, which overrides the YAML). At most 16.
+- A PostgreSQL tunnel also carries the sign-in: `protocol: "postgres"`, `user`,
+  `password`, `database`, `sslmode` (the integration's), and `rootCaBase64` (its
+  CA bundle, or empty). The service signs in upstream over TLS and keeps the
+  password. The kernel's side gets `kira-brokered` wherever the password was,
+  and `sslmode=disable` with no CA file, because its hop to the service is
+  loopback. Each PostgreSQL integration gets its own tunnel. Redshift stays a
+  plain tunnel: its driver always asks for TLS, and a URL cannot turn that off.
 - HTTPS services go to `hosts`, so TLS stays end to end with the real name:
   Databricks, Snowflake (`*.snowflakecomputing.com`), BigQuery, GCS, Azure Blob,
   MotherDuck (`*.motherduck.com` and `extensions.duckdb.org`), Weights & Biases,
