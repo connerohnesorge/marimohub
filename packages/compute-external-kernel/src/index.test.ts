@@ -694,6 +694,26 @@ describe('ExternalKernelCompute', () => {
 			await expect(applied).rejects.toThrow(/\(invalid_environment\)\.$/);
 		});
 
+		it('refuses a session with an integration the service cannot serve, before sending anything', async () => {
+			makeProvider();
+			const applied = asOwner(() =>
+				provider.create(SANDBOX, owned).applyEnvironment!({
+					...empty,
+					vars: { A: '1' },
+					network: {
+						...network,
+						unrelayable: [{ integration: 'queries', kind: 'athena', reason: 'ambient AWS' }],
+					},
+				}),
+			);
+
+			await expect(applied).rejects.toBeInstanceOf(ValidationError);
+			await expect(applied).rejects.toThrow(
+				'The integration "queries" (kind athena) is not available on your Kira kernel yet.',
+			);
+			expect(service.requests).toEqual([]);
+		});
+
 		it("never sends another user's environment to the owner's kernel", async () => {
 			makeProvider();
 			await expect(
@@ -791,6 +811,38 @@ describe('ExternalKernelCompute', () => {
 			await expect(asViewer(() => session.readFile('/workspace/notebook.py'))).rejects.toThrow(
 				/app session/,
 			);
+		});
+
+		it('refuses an app whose integrations the service cannot serve, before sending anything', async () => {
+			makeProvider();
+			const refused = asViewer(() =>
+				provider.startApp({
+					sandboxId: SANDBOX,
+					authorEmail: OWNER_EMAIL,
+					app: 'nb-0123456789abcdef' as never,
+					version: 'v1',
+					notebook: 'notebook.py',
+					files: [],
+					environment: {
+						vars: {},
+						files: [],
+						network: {
+							tunnels: [],
+							hosts: [],
+							mongodb: [],
+							aws: [],
+							relayEnv: {},
+							relayFiles: [],
+							unrelayable: [{ integration: 'lake', kind: 'iceberg_hive', reason: 'kerberos' }],
+						},
+					},
+				}),
+			);
+
+			await expect(refused).rejects.toThrow(
+				'The integration "lake" (kind iceberg_hive) is not available on your Kira kernel yet.',
+			);
+			expect(service.requests).toEqual([]);
 		});
 
 		it("is undefined when the author has no kernel, so the hub's pool serves the app", async () => {

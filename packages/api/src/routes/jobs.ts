@@ -7,6 +7,7 @@ import {
 	bytesToBase64,
 	ConflictError,
 	createRunId,
+	DomainError,
 	managedSessionEnvironment,
 	MAX_ARTIFACT_BYTES,
 	NotFoundError,
@@ -453,7 +454,25 @@ app.openapi(getKernelRunSpec, async (c) => {
 	}
 	const runId = createRunId();
 	const env = await resolveJobRunEnv(deps, { project, job, runId, userId: job.created_by });
-	const environment = deps.compute.kernelJobs?.environment(managedSessionEnvironment(env)) ?? {};
+	let environment: unknown;
+	try {
+		environment = deps.compute.kernelJobs?.environment(managedSessionEnvironment(env)) ?? {};
+	} catch (error) {
+		// The service only learns the run cannot start; the run history tells the author why.
+		if (error instanceof DomainError) {
+			const now = new Date().toISOString();
+			await deps.services.jobRuns.recordKernelRun({
+				job,
+				runId,
+				status: 'failed',
+				startedAt: now,
+				finishedAt: now,
+				error: { code: error.code, message: error.message },
+				timeoutSeconds: jobTimeoutSeconds(deps, job),
+			});
+		}
+		throw error;
+	}
 	return c.json(
 		{
 			success: true as const,

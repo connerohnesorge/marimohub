@@ -56,7 +56,7 @@ import type {
 import { listFilesFailure, readFileFailure } from '@marimo-hub/core/ports/sandbox';
 import { EndUserCredentials } from './credentials';
 import type { EndUserCredential } from './credentials';
-import { RESERVED_PATHS, toKernelEnvironment } from './environment';
+import { refuseUndeliverable, RESERVED_PATHS, toKernelEnvironment } from './environment';
 
 export { EndUserCredentials, readEndUserCredential } from './credentials';
 export type { EndUserCredential } from './credentials';
@@ -480,6 +480,7 @@ class ExternalKernelSandbox implements SandboxInstance {
 				{ channel: 'warn' },
 			);
 		}
+		refuseUndeliverable(omitted);
 		if (Object.keys(body).length === 0) return;
 		const response = await this.provider.call(`${this.workspaceUrl}/environment`, {
 			method: 'PUT',
@@ -648,6 +649,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 				{ channel: 'warn' },
 			);
 		}
+		refuseUndeliverable(omitted);
 		const response = await this.call(`${this.baseUrl}/apps/sessions`, {
 			method: 'POST',
 			credential: this.credentials.forOwner(undefined),

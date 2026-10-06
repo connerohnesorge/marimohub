@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServices, JobId, UnavailableError } from '@marimo-hub/core';
+import { createServices, JobId, UnavailableError, ValidationError } from '@marimo-hub/core';
 import type {
 	KernelJobs,
 	ManagedSessionEnvironment,
@@ -170,6 +170,31 @@ describe("Jobs fired by their author's personal kernel", () => {
 			expect(spec.run_id).toMatch(/^run_/);
 			await expectError(await as(EDITOR)('GET', `/jobs/${keyOf(job.id)}/run-spec`), 404);
 			await expectError(await as()('GET', `/jobs/not-a-key/run-spec`), 404);
+		});
+
+		it("record a failed run naming integrations the author's kernel cannot serve", async () => {
+			const job = await createScheduled();
+			const refusal =
+				'The integration "queries" (kind athena) is not available on your Kira kernel yet.';
+			kernelJobs.environment.mockImplementationOnce(() => {
+				throw new ValidationError(refusal);
+			});
+
+			const failed = await expectError(
+				await as()('GET', `/jobs/${keyOf(job.id)}/run-spec`),
+				422,
+				'VALIDATION_ERROR',
+			);
+
+			expect(failed.message).toBe(refusal);
+			const runs = await services.jobRuns.listRuns(pid, nid as never, JobId.parse(job.id));
+			expect(runs).toMatchObject([
+				{
+					status: 'failed',
+					runner: 'kernel',
+					error: { code: 'VALIDATION_ERROR', message: refusal },
+				},
+			]);
 		});
 
 		it('refuse a disabled job or one that runs on the hub with 409', async () => {
