@@ -13,7 +13,7 @@ import {
 	SubdomainExposure,
 	UnavailableError,
 } from '@marimo-hub/core';
-import type { Authenticator, TokenGrant, UserId } from '@marimo-hub/core';
+import type { Authenticator, SandboxRouting, TokenGrant, UserId } from '@marimo-hub/core';
 import {
 	ACTOR,
 	localResourceSecurity,
@@ -168,6 +168,51 @@ describe('authorizeProxyRequest', () => {
 			expect(new Headers(upstream.mock.calls[0][1]?.headers).get('authorization')).toBe(
 				'Bearer end-user',
 			);
+		} finally {
+			upstream.mockRestore();
+		}
+	});
+
+	it("shapes a routed session's upstream with its own backend's hook, not the default's", async () => {
+		const services = createServices(bucket);
+		const current = await services.sessions.getSession(pid, sessionId as never);
+		const sessionOn = async (computeBackend?: string) => {
+			const created = await services.sessions.createSession({
+				notebook_id: current.notebook_id,
+				project_id: pid,
+				user_id: ACTOR,
+				sandbox_id: 'sb-0123456789abcdef' as never,
+				...(computeBackend ? { compute_backend: computeBackend } : {}),
+			});
+			await services.sessions.setRunning(pid, created.session_id, '/proxy/x/', false, ORIGIN);
+			return signProxyToken(pid, created.session_id, SECRET);
+		};
+		const personalResolve = vi.fn(async ({ headers }: { headers: Headers }) => ({
+			url: 'http://per-user.internal/root',
+			headers: new Headers(headers),
+		}));
+		const personal = { ...makeFakeCompute(), resolveKernelProxyTarget: personalResolve };
+		const regular = makeFakeCompute();
+		const routedDeps = {
+			...deps(ACTOR),
+			compute: {
+				...regular,
+				routing: {
+					selectEditBackend: vi.fn<SandboxRouting['selectEditBackend']>(),
+					backend: (name: string | undefined) => (name === 'personal' ? personal : regular),
+				},
+			},
+		};
+		const app = new Hono();
+		app.use('*', sandboxProxyMiddleware(routedDeps));
+		const upstream = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('kernel'));
+		try {
+			await app.request(`https://hub.example.com/proxy/${await sessionOn('personal')}/`);
+			await app.request(`https://hub.example.com/proxy/${await sessionOn()}/`);
+
+			expect(personalResolve).toHaveBeenCalledOnce();
+			expect(String(upstream.mock.calls[0][0])).toBe('http://per-user.internal/root');
+			expect(String(upstream.mock.calls[1][0]).startsWith(`${ORIGIN}/proxy/`)).toBe(true);
 		} finally {
 			upstream.mockRestore();
 		}

@@ -4,6 +4,7 @@ import {
 	DomainError,
 	SessionId,
 	sessionMode,
+	sessionCompute,
 	sessionOwner,
 	sleep,
 	withAbortSignal,
@@ -171,7 +172,9 @@ export async function startMcpSession(input: {
 					try {
 						const outcome = session.sandbox_id
 							? await bootstrapKernel(
-									deps.compute.create(session.sandbox_id, { owner: sessionOwner(session) }),
+									sessionCompute(deps.compute, session).create(session.sandbox_id, {
+										owner: sessionOwner(session),
+									}),
 									{ timeoutMs, inspectOnly: waitSeconds === 0, signal },
 								)
 							: { status: 'unavailable' as const };

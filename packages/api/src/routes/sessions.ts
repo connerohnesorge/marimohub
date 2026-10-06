@@ -53,6 +53,7 @@ import {
 	SandboxProvisioner,
 	SESSION_MODES,
 	SessionId,
+	sessionCompute,
 	sessionMode,
 	sessionOwner,
 	sessionWorkspaceDir,
@@ -914,7 +915,9 @@ async function inspectEditorActivity(deps: ApiDeps, session: Session) {
 	}
 	const basePath = kernelBasePathFromUrl(session.sandbox_url);
 	const active = await kernelActiveConnections(
-		deps.compute.create(session.sandbox_id, { owner: sessionOwner(session) }),
+		sessionCompute(deps.compute, session).create(session.sandbox_id, {
+			owner: sessionOwner(session),
+		}),
 		basePath,
 	);
 	const checkedAt = new Date().toISOString();
@@ -1387,8 +1390,6 @@ export async function startNotebookSession(input: {
 		sandbox.computeProfileOverride === 'editors' && profileOverrideEligible,
 		() => logStoredConfigFallback('compute_profile'),
 	);
-	const provisioner = new SandboxProvisioner(compute);
-
 	const editorReuse =
 		mode === 'edit'
 			? await sessions.findReusableEditor(pid, nid, user.id, sharing, ephemeral)
@@ -1512,12 +1513,21 @@ export async function startNotebookSession(input: {
 		? (await sessions.findReusableEditor(pid, nid, user.id, 'exclusive', true)).session
 		: undefined;
 
+	// Chosen with the caller's own credential before anything is recorded. A
+	// failed choice fails the start; it never falls through to another backend.
+	const sessionBackend =
+		mode === 'edit' && compute.routing
+			? await compute.routing.selectEditBackend({ userId: user.id, email: user.email })
+			: undefined;
+	const sessionProvider = sessionCompute(compute, { compute_backend: sessionBackend });
+	const provisioner = new SandboxProvisioner(sessionProvider);
+
 	let sandboxId = admission?.member.sandbox_id ?? createSandboxId();
 	const sessionId = admission?.member.session_id ?? createSessionId();
 	let warmClaim: WarmPoolClaim | undefined;
 	// A managed-environment kernel takes no hub-injected credential of any kind,
 	// so none is minted for it: no kernel token, AI token, WIF exchange, or render.
-	const managedEnvironment = compute.capabilities?.managedEnvironment === true;
+	const managedEnvironment = sessionProvider.capabilities?.managedEnvironment === true;
 	const kernelAuthToken =
 		sandbox.auth === 'on' && !managedEnvironment ? createKernelAuthToken() : undefined;
 
@@ -1556,6 +1566,7 @@ export async function startNotebookSession(input: {
 		notebook_id: nid,
 		user_id: user.id,
 		mode,
+		...(sessionBackend ? { compute_backend: sessionBackend } : {}),
 	});
 	try {
 		if (replacementTarget) {
@@ -1566,7 +1577,7 @@ export async function startNotebookSession(input: {
 		}
 		const restoreFilesystemSnapshot =
 			!ephemeral && workspacePolicy.restoreFilesystemSnapshot
-				? await resolveRestoreSnapshot(compute, notebooks, pid, nid, {
+				? await resolveRestoreSnapshot(sessionProvider, notebooks, pid, nid, {
 						sharing: mode === 'edit' ? sharing : 'shared',
 						userId: user.id,
 					})
@@ -1586,6 +1597,8 @@ export async function startNotebookSession(input: {
 				enforceSessionCap(deps, mode, pid, user.id, temporaryToRetire?.session_id),
 			)
 			.step('warm_sandbox', async () => {
+				// Warm sandboxes belong to the default backend.
+				if (sessionBackend) return;
 				warmClaim = await deps.warmPool?.claim({
 					profile: requestedComputeProfile.name,
 					image,
@@ -1618,6 +1631,7 @@ export async function startNotebookSession(input: {
 						project_id: pid,
 						user_id: user.id,
 						sandbox_id: sandboxId,
+						compute_backend: sessionBackend,
 						kernel_auth_token: kernelAuthToken,
 						compute_profile: appliedComputeProfile.name,
 						compute_resources: appliedComputeProfile.resources,
@@ -1892,7 +1906,9 @@ export async function startNotebookSession(input: {
 				},
 				compensate: async () => {
 					if (warmClaim) return;
-					await compute.create(sandboxId, { owner: { projectId: pid, userId: user.id } }).destroy();
+					await sessionProvider
+						.create(sandboxId, { owner: { projectId: pid, userId: user.id } })
+						.destroy();
 					await recordSandboxCleanup();
 				},
 			})
@@ -2053,7 +2069,9 @@ export async function startNotebookSession(input: {
 		const config = sandbox.surfaces?.[id];
 		return config && (config.start === 'eager' || requestedSurfaces.includes(id));
 	});
-	if (mode === 'edit' && surfaceGrant && eagerSurfaces.length > 0 && updated) {
+	// A routed backend without a second port would only log a failure per start.
+	const eagerSupported = !sessionBackend || sessionProvider.capabilities?.multiPort === true;
+	if (mode === 'edit' && surfaceGrant && eagerSurfaces.length > 0 && updated && eagerSupported) {
 		updated = await beginSessionSurfaces({
 			deps,
 			session: updated,

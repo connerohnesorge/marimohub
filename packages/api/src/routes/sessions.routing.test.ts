@@ -1,0 +1,193 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createServices, ForbiddenError } from '@marimo-hub/core';
+import type {
+	EndUserPrincipal,
+	MarimoLaunchSpec,
+	NotebookId,
+	ProjectId,
+	SandboxInstance,
+	SandboxProvider,
+	Session,
+	SessionId,
+} from '@marimo-hub/core';
+import { ACTOR, fakeComputeFrom, makeFakeSandbox } from '@marimo-hub/core/testing';
+import type { MemoryBucket } from '@marimo-hub/core/testing';
+import { createInitializedBucket, createTestApi, expectOk } from '../testing';
+
+const PERSONAL = 'personal';
+
+/**
+ * A routing provider over two fakes: `personal` is a managed-environment
+ * kernel, the default is a regular sandbox backend.
+ */
+function routedCompute(select: (owner: EndUserPrincipal) => Promise<string | undefined>) {
+	const regular = makeFakeSandbox();
+	const regularProvider = fakeComputeFrom(regular.instance, {
+		capabilities: { multiPort: true },
+	});
+	const managed = makeFakeSandbox();
+	const launches: MarimoLaunchSpec[] = [];
+	const personalInstance: SandboxInstance = {
+		...managed.instance,
+		supportsBucketMount: false,
+		ready: async () => {},
+		exec: vi.fn(async () => {
+			throw new Error('exec must not run in a managed kernel');
+		}),
+		launchMarimo: async (spec) => {
+			launches.push(spec);
+		},
+		ensureDirectories: async () => {},
+	};
+	const personalProvider = fakeComputeFrom(personalInstance, {
+		capabilities: { multiPort: false, managedEnvironment: true },
+	});
+	const regularCreate = vi.spyOn(regularProvider, 'create');
+	const personalCreate = vi.spyOn(personalProvider, 'create');
+	const selectEditBackend = vi.fn(select);
+	const compute: SandboxProvider = {
+		capabilities: regularProvider.capabilities,
+		create: (id, options) => regularProvider.create(id, options),
+		proxy: async () => null,
+		routing: {
+			selectEditBackend,
+			backend: (name) => {
+				if (name === undefined) return regularProvider;
+				if (name === PERSONAL) return personalProvider;
+				throw new Error(`unknown backend ${name}`);
+			},
+		},
+	};
+	return {
+		compute,
+		selectEditBackend,
+		regular: { calls: regular.calls, create: regularCreate },
+		personal: { calls: managed.calls, create: personalCreate, launches },
+	};
+}
+
+describe('Session start on a routing compute provider', () => {
+	let bucket: MemoryBucket;
+	let pid: ProjectId;
+	let nid: NotebookId;
+
+	beforeEach(async () => {
+		bucket = await createInitializedBucket();
+		const services = createServices(bucket);
+		const project = await services.projects.createProject({ name: 'P', description: 'd' }, ACTOR);
+		pid = project.id as ProjectId;
+		const notebook = await services.notebooks.createNotebook(
+			pid,
+			{ title: 'NB', description: 'd', code: 'import marimo as mo' },
+			ACTOR,
+		);
+		nid = notebook.id as NotebookId;
+	});
+
+	async function storedSession(id: string): Promise<Session> {
+		return createServices(bucket).sessions.getSession(pid, id as SessionId);
+	}
+
+	it('runs an edit session on the backend chosen for the caller and records it', async () => {
+		const routed = routedCompute(async () => PERSONAL);
+		const { request } = createTestApi({ bucket, userId: ACTOR, compute: routed.compute });
+
+		const data = await expectOk<Session>(
+			await request('POST', `/projects/${pid}/notebooks/${nid}/sessions`),
+		);
+
+		expect(data.status).toBe('running');
+		expect(routed.selectEditBackend).toHaveBeenCalledWith({
+			userId: ACTOR,
+			email: `${ACTOR}@example.com`,
+		});
+		expect((await storedSession(data.session_id)).compute_backend).toBe(PERSONAL);
+		expect(routed.personal.launches).toHaveLength(1);
+		expect(routed.regular.create).not.toHaveBeenCalled();
+
+		await expectOk(
+			await request('DELETE', `/projects/${pid}/notebooks/${nid}/sessions/${data.session_id}`),
+		);
+		expect(routed.personal.calls.destroy).toBe(1);
+		expect(routed.regular.create).not.toHaveBeenCalled();
+	});
+
+	it('runs the session on the default backend when no backend is chosen', async () => {
+		const routed = routedCompute(async () => {});
+		const { request } = createTestApi({ bucket, userId: ACTOR, compute: routed.compute });
+
+		const data = await expectOk<Session>(
+			await request('POST', `/projects/${pid}/notebooks/${nid}/sessions`),
+		);
+
+		expect(data.status).toBe('running');
+		expect((await storedSession(data.session_id)).compute_backend).toBeUndefined();
+		expect(routed.regular.calls.startProcess).toHaveLength(1);
+		expect(routed.personal.create).not.toHaveBeenCalled();
+	});
+
+	it('fails the start without provisioning anywhere when the choice fails', async () => {
+		const routed = routedCompute(async () => {
+			throw new ForbiddenError('owner_mismatch');
+		});
+		const { request } = createTestApi({ bucket, userId: ACTOR, compute: routed.compute });
+
+		const res = await request('POST', `/projects/${pid}/notebooks/${nid}/sessions`);
+
+		expect(res.status).toBe(403);
+		expect(routed.regular.create).not.toHaveBeenCalled();
+		expect(routed.personal.create).not.toHaveBeenCalled();
+		expect(await createServices(bucket).sessions.listActiveByProject(pid)).toEqual([]);
+	});
+
+	it('never starts a surface in a routed kernel that cannot expose one', async () => {
+		const routed = routedCompute(async () => PERSONAL);
+		const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+		try {
+			const { request } = createTestApi({
+				bucket,
+				userId: ACTOR,
+				compute: routed.compute,
+				deps: {
+					sandbox: {
+						bucket: { name: 'test', endpoint: '' },
+						hostname: 'localhost',
+						workdir: '/workspace',
+						persistWorkspace: 'source',
+						surfaces: {
+							vscode: {
+								flavor: 'code-server',
+								start: 'eager',
+								port: 8443,
+								settings: {},
+								extensionGallery: 'openvsx',
+								embed: 'tab',
+							},
+						},
+					},
+				},
+			});
+
+			const data = await expectOk<Session>(
+				await request('POST', `/projects/${pid}/notebooks/${nid}/sessions`, {
+					surfaces: ['vscode'],
+				}),
+			);
+
+			expect(data.status).toBe('running');
+			expect(data.surfaces?.vscode).toBeUndefined();
+			const started = await request(
+				'POST',
+				`/projects/${pid}/notebooks/${nid}/sessions/${data.session_id}/surfaces/vscode`,
+			);
+			expect(started.status).toBe(409);
+			expect(((await started.json()) as { error: { code: string } }).error.code).toBe(
+				'SURFACE_UNSUPPORTED_PROVIDER',
+			);
+			expect(routed.personal.calls.startProcess).toEqual([]);
+			expect(routed.regular.create).not.toHaveBeenCalled();
+		} finally {
+			log.mockRestore();
+		}
+	});
+});

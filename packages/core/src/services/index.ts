@@ -222,7 +222,7 @@ export { ReconciliationService } from './runtime/ReconciliationService';
 export type { ActiveSandboxSource, ReconcileResult } from './runtime/ReconciliationService';
 export { SandboxDiagnosticLease } from './runtime/SandboxDiagnosticLease';
 export { kernelActiveConnections, SessionLifecycleService } from './runtime/sessionLifecycle';
-export { sessionOwner } from './runtime/sessionOwner';
+export { sessionCompute, sessionOwner } from './runtime/sessionOwner';
 export type {
 	ConnectionProbe,
 	SessionLifecycleConfig,

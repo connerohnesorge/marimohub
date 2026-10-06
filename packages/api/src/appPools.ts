@@ -7,6 +7,7 @@ import {
 	NotFoundError,
 	ProjectId,
 	SessionRetirer,
+	sessionCompute,
 	sessionOwner,
 } from '@marimo-hub/core';
 import type { ApiDeps } from './context';
@@ -46,7 +47,9 @@ export async function sweepAppPools(
 						)
 							return 0;
 						const connections = await kernelActiveConnections(
-							deps.compute.create(member.sandbox_id, { owner: sessionOwner(session) }),
+							sessionCompute(deps.compute, session).create(member.sandbox_id, {
+								owner: sessionOwner(session),
+							}),
 							kernelBasePathFromUrl(session.sandbox_url),
 						);
 						const idleTimeout = pool.policy.idleMs;

@@ -207,6 +207,9 @@ export class ReconciliationService {
 			try {
 				const sandboxId = session.sandbox_id;
 				if (!sandboxId) continue;
+				// A routing provider enumerates only its default backend; a sandbox on a
+				// routed backend is never in `active`, which is not evidence it is gone.
+				if (session.compute_backend && this.compute.routing) continue;
 
 				const isLive = session.status === 'running' || session.status === 'starting';
 

@@ -70,6 +70,17 @@ authenticated `/api/v1` request, so the provider can read the caller's token.
 `proxy`-exposure kernel request, HTTP and WebSocket, after the hub has
 authorized it. `compute-external-kernel` implements all of these.
 
+A provider can front more than one backend with `routing`.
+`routing.selectEditBackend(owner)` runs inside the owner's request at each edit
+session start and names the backend, or returns `undefined` for the default;
+it throws when it cannot choose, and the start then fails. The session records
+the name in `compute_backend`, and every later operation on the session goes
+through `sessionCompute(compute, session)`, which returns
+`routing.backend(name)`. The routing provider itself serves everything else
+(apps, jobs, warm pools, previews, `listActive`) from its default backend, so
+reconciliation skips sessions on a named backend. `ExternalKernelRouter` routes
+between a user's external kernel and a fallback backend.
+
 At startup, the loader validates the five required `Bucket` methods and its CAS
 safety contract. For compute, it validates `create` and `proxy`, plus optional
 methods when present. It validates the first `SandboxInstance` after the provider

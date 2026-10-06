@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createNotebookId, createProjectId, createSandboxId, createVersionId } from '../../ids';
 import type { SandboxId } from '../../ids';
 import { paths } from '../../paths';
-import type { SandboxInstance, SandboxProvider } from '../../ports/sandbox';
+import type { SandboxInstance, SandboxProvider, SandboxRouting } from '../../ports/sandbox';
 import type { Session } from '../../schema';
 
 import { CatalogService } from '../catalog/CatalogService';
@@ -462,6 +462,33 @@ describe('ReconciliationService', () => {
 		expect(compute.destroyed).toEqual([]);
 		const stored = await sessions.getSession(projectId, session.session_id);
 		expect(stored.status).toBe('failed');
+	});
+
+	it('Rule 2: never fails a session on a routed backend the provider cannot enumerate', async () => {
+		const routed = Object.assign(compute, {
+			routing: {
+				selectEditBackend: vi.fn<SandboxRouting['selectEditBackend']>(),
+				backend: () => compute,
+			},
+		});
+		reconciler = new ReconciliationService(sessions, notebooks, routed, bucket, 'source');
+		const session = await sessions.createSession({
+			notebook_id: notebookId,
+			project_id: projectId,
+			user_id: ACTOR,
+			sandbox_id: goneId,
+			compute_backend: 'external-kernel',
+		});
+		await sessions.setRunning(projectId, session.session_id, 'https://kernel.example');
+		const unrouted = await createSession(healthyId);
+		await sessions.setRunning(projectId, unrouted.session_id, 'https://kernel.example');
+		compute.active = [];
+
+		const result = await reconciler.reconcile();
+
+		expect(result.markedDead).toBe(1);
+		expect((await sessions.getSession(projectId, session.session_id)).status).toBe('running');
+		expect((await sessions.getSession(projectId, unrouted.session_id)).status).toBe('failed');
 	});
 
 	it('Rule 2: leaves a fresh starting record alone while its provision is in flight', async () => {

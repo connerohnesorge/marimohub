@@ -375,9 +375,30 @@ export interface KernelProxyTarget {
 	headers: Headers;
 }
 
+/**
+ * Per-user backend selection for a provider that fronts more than one backend.
+ * The provider itself is the default backend for everything that is not a
+ * routed edit session: apps, jobs, warm pools, previews, and its `listActive`.
+ */
+export interface SandboxRouting {
+	/**
+	 * Name the backend for a new edit session of `owner`, called inside the
+	 * owner's own request. `undefined` selects the default backend. Throws when
+	 * the choice cannot be made; callers must not fall back on an error.
+	 */
+	selectEditBackend(owner: EndUserPrincipal): Promise<string | undefined>;
+	/**
+	 * The provider behind a name `selectEditBackend` returned, as recorded on the
+	 * session; `undefined` is the default backend. Throws for an unknown name.
+	 */
+	backend(name: string | undefined): SandboxProvider;
+}
+
 export interface SandboxProvider {
 	/** Opt-in requires strict reconnect and idempotent destruction by the original sandbox ID. */
 	readonly warmPool?: WarmPoolSupport;
+	/** Present on a provider that routes edit sessions between backends per user. */
+	readonly routing?: SandboxRouting;
 	readonly capabilities?: {
 		multiPort: boolean;
 		/** Applies resources.cpu and resources.memoryBytes from compute profiles. */

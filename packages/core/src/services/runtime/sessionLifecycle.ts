@@ -9,7 +9,7 @@ import { mapWithConcurrency } from '../../concurrency';
 import { Millis } from '../../duration';
 import type { NotebookId, SessionId } from '../../ids';
 import type { SandboxInstance, SandboxProvider } from '../../ports/sandbox';
-import { sessionOwner } from './sessionOwner';
+import { sessionCompute, sessionOwner } from './sessionOwner';
 import { createSlidingWindowBudget } from '../../rateLimit';
 import type { Session } from '../../schema';
 import type { NotebookService } from '../content/NotebookService';
@@ -192,7 +192,9 @@ export class SessionLifecycleService {
 
 		await mapWithConcurrency(candidates, SESSION_SWEEP_CONCURRENCY, async (s) => {
 			try {
-				const sandbox = this.compute.create(s.sandbox_id!, { owner: sessionOwner(s) });
+				const sandbox = sessionCompute(this.compute, s).create(s.sandbox_id!, {
+					owner: sessionOwner(s),
+				});
 
 				const pool = sessionMode(s) === 'app' ? await readPool(s.project_id, s.notebook_id) : null;
 				if (pool) expireAppPresence(pool, now);
