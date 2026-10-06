@@ -40,10 +40,15 @@ everyone the external service has no kernel for:
 MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND=kubernetes
 # Configure the fallback with its own variables, as if it were MARIMOHUB_COMPUTE_BACKEND.
 MARIMOHUB_COMPUTE_IMAGE=ghcr.io/example/marimo-kernel:1
+# Only these users ask the service; everyone else uses the fallback directly.
+MARIMOHUB_COMPUTE_EXTERNAL_USERS=ada@example.com,grace@example.com
 ```
 
-At every edit session start, the hub asks `GET /kernel` with the signed-in
-user's own token. It does not cache the answer.
+With `MARIMOHUB_COMPUTE_EXTERNAL_USERS`, a user who is not listed never
+contacts the external service: their sessions start on the fallback even while
+the service is down or rolling out. For a listed user (or every user, when the
+list is unset), the hub asks `GET /kernel` at every edit session start with that
+request's own token. It does not cache the answer.
 
 - `200`: the session runs in the user's personal kernel.
 - `404 {"error":{"code":"no_kernel"}}`: the session runs on the fallback
@@ -180,11 +185,9 @@ and reason, never by value. A `400 invalid_environment` fails the session start.
 - Without `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND`, users without a
   kernel see `no_kernel` and must start their kernel in the external service
   first.
-- A request without the token header (for example from an MCP client with a
-  hub token) starts an edit session only while the hub still holds an
-  unexpired token from the same user's earlier requests. Otherwise the start
-  fails, even with a fallback: the hub cannot ask the service whether the user
-  has a kernel.
+- A request reaches a personal kernel only with its own token. A request
+  without one (for example an API client with a hub token) fails for a listed
+  user with sign-in guidance; see [Signing in API and MCP clients](#signing-in-api-and-mcp-clients).
 
 #### Protocol
 

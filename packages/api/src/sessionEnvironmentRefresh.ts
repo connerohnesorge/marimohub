@@ -33,7 +33,14 @@ export interface EnvironmentRefresh {
 export function scheduleEnvironmentRefresh(refresh: EnvironmentRefresh, expiresAt: number): void {
 	const now = refresh.now ?? Date.now;
 	const delay = Math.max(MIN_DELAY_MS, Math.floor((expiresAt - now()) * REFRESH_AT));
-	const timer = setTimeout(() => void refreshEnvironment(refresh, expiresAt), delay);
+	later(refresh, () => refreshEnvironment(refresh, expiresAt), delay);
+}
+
+/** The session's request is long over when this runs; the provider uses its background credential. */
+function later(refresh: EnvironmentRefresh, work: () => Promise<void>, delay: number): void {
+	const { compute } = refresh.deps;
+	const outside = compute.outsideRequest?.bind(compute);
+	const timer = setTimeout(() => void (outside ? outside(work) : work()), delay);
 	timer.unref?.();
 }
 
@@ -62,11 +69,11 @@ async function refreshEnvironment(refresh: EnvironmentRefresh, expiresAt: number
 			...errorMetadata(error),
 		});
 		if (now() < expiresAt) {
-			const timer = setTimeout(
-				() => void refreshEnvironment(refresh, expiresAt),
+			later(
+				refresh,
+				() => refreshEnvironment(refresh, expiresAt),
 				Math.min(RETRY_DELAY_MS, Math.max(1, expiresAt - now())),
 			);
-			timer.unref?.();
 		}
 	}
 }

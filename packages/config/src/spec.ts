@@ -1073,6 +1073,20 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 							'Backend that runs edit sessions for users the external service answers `404 no_kernel` for, and every app, job, warm pool, and preview. It is configured with its own variables, exactly as if it were `MARIMOHUB_COMPUTE_BACKEND`. Any other answer from the service fails the session start; it never falls back. Unset: every edit session needs a personal kernel.',
 						example: 'kubernetes',
 					},
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_USERS',
+						name: 'Users with a personal kernel',
+						description:
+							'Comma-separated emails of the users who have a personal kernel. With a fallback backend, everyone else goes straight to the fallback and never contacts the external service, so its outages and rollouts cannot block them. Listed users still fall back on `404 no_kernel` and fail on any other error. Unset: every user asks the service.',
+						example: 'ada@example.com,grace@example.com',
+					},
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE',
+						name: 'Kernel token audience',
+						description:
+							'Audience the external service accepts. A request token without it (for example a CLI token for another client) is treated as missing and never forwarded, and the request fails with sign-in guidance. Unset: any token is forwarded.',
+						example: 'marimohub',
+					},
 				],
 			},
 			{

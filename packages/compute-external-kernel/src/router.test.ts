@@ -140,6 +140,51 @@ describe('ExternalKernelRouter', () => {
 		).rejects.toThrow(/unreachable/);
 	});
 
+	describe('with a list of enrolled users', () => {
+		const stranger: EndUserPrincipal = {
+			userId: 'user-stranger' as UserId,
+			email: 'x@example.com',
+		};
+
+		function enrolledRouter(baseUrl: string) {
+			const { fallback } = fallbackProvider();
+			const external = new ExternalKernelCompute({ baseUrl, now: () => NOW });
+			return new ExternalKernelRouter(external, fallback, {
+				enrolledUsers: [' Owner@Example.com '],
+			});
+		}
+
+		it('sends everyone else to the fallback without contacting the service, even when it is down', async () => {
+			for (const router of [
+				enrolledRouter(baseUrl),
+				enrolledRouter('http://127.0.0.1:1/api/external-kernel/v1'),
+			]) {
+				await expect(
+					router.withEndUserRequest(new Request('http://hub.example/'), stranger, () =>
+						router.routing.selectEditBackend(stranger),
+					),
+				).resolves.toBeUndefined();
+			}
+			expect(seen).toHaveLength(0);
+		});
+
+		it('asks the service for a listed user, and fails clearly when it is down', async () => {
+			const router = enrolledRouter(baseUrl);
+			await expect(asOwner(router, () => router.routing.selectEditBackend(owner))).resolves.toBe(
+				EXTERNAL_KERNEL_BACKEND,
+			);
+			answer = { status: 404, body: { error: { code: 'no_kernel' } } };
+			await expect(
+				asOwner(router, () => router.routing.selectEditBackend(owner)),
+			).resolves.toBeUndefined();
+
+			const down = enrolledRouter('http://127.0.0.1:1/api/external-kernel/v1');
+			await expect(asOwner(down, () => down.routing.selectEditBackend(owner))).rejects.toThrow(
+				/unreachable/,
+			);
+		});
+	});
+
 	it('names each backend and refuses an unknown one', () => {
 		const { router, external, fallback } = makeRouter();
 		expect(router.routing.backend(undefined)).toBe(fallback);

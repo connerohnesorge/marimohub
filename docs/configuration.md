@@ -297,6 +297,8 @@ Attaches every edit session to the signed-in user's own long-lived marimo server
 | `MARIMOHUB_COMPUTE_EXTERNAL_URL` | Base URL of the external kernel API, reachable from the hub. | Yes | — | `http://kira-app.kira.svc.cluster.local:8080/api/external-kernel/v1` |
 | `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER` | Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there. | — | `x-pantheon-bearer` | — |
 | `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND` | Backend that runs edit sessions for users the external service answers `404 no_kernel` for, and every app, job, warm pool, and preview. It is configured with its own variables, exactly as if it were `MARIMOHUB_COMPUTE_BACKEND`. Any other answer from the service fails the session start; it never falls back. Unset: every edit session needs a personal kernel. | — | — | `kubernetes` |
+| `MARIMOHUB_COMPUTE_EXTERNAL_USERS` | Comma-separated emails of the users who have a personal kernel. With a fallback backend, everyone else goes straight to the fallback and never contacts the external service, so its outages and rollouts cannot block them. Listed users still fall back on `404 no_kernel` and fail on any other error. Unset: every user asks the service. | — | — | `ada@example.com,grace@example.com` |
+| `MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE` | Audience the external service accepts. A request token without it (for example a CLI token for another client) is treated as missing and never forwarded, and the request fails with sign-in guidance. Unset: any token is forwarded. | — | — | `marimohub` |
 
 ### Local (dev only)
 

@@ -518,6 +518,59 @@ describe('ExternalKernelCompute', () => {
 		).rejects.toThrow(/No end-user credential/);
 	});
 
+	it("uses only a request's own token, never the cache, for the owner's request", async () => {
+		makeProvider();
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		await asOwner(() => provider.create(SANDBOX, owned).ready!());
+		service.requests.length = 0;
+
+		// An API client signed in without a kernel token gets guidance, not the browser's token.
+		await expect(asOwner(() => provider.create(SANDBOX, owned).ready!(), '')).rejects.toThrow(
+			/carried no x-pantheon-bearer header/,
+		);
+		expect(service.requests).toEqual([]);
+		// Background work still uses the cached token.
+		await provider.create(SANDBOX, owned).destroy();
+		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
+			`Bearer ${ownerToken}`,
+		]);
+	});
+
+	it('treats a token for another audience as missing, so it is never forwarded', async () => {
+		provider = new ExternalKernelCompute({
+			baseUrl: service.baseUrl,
+			now: () => clock,
+			tokenAudience: 'marimohub',
+		});
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		const cliToken = jwt({ email: OWNER_EMAIL, exp: NOW / 1000 + 3600, aud: ['pantheon-cli'] });
+		const hubToken = jwt({ email: OWNER_EMAIL, exp: NOW / 1000 + 3600, aud: 'marimohub' });
+
+		await expect(asOwner(() => provider.create(SANDBOX, owned).ready!(), cliToken)).rejects.toThrow(
+			/not issued for the kernel service/,
+		);
+		expect(service.requests).toEqual([]);
+		await asOwner(() => provider.create(SANDBOX, owned).ready!(), hubToken);
+		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
+			`Bearer ${hubToken}`,
+		]);
+	});
+
+	it('runs hub-initiated work outside the request, on the cached token', async () => {
+		makeProvider();
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		await asOwner(() => provider.create(SANDBOX, owned).ready!());
+		service.requests.length = 0;
+
+		await provider.withEndUserRequest(browserRequest(adminToken), admin, () =>
+			provider.outsideRequest(() => provider.create(SANDBOX, owned).destroy()),
+		);
+
+		expect(service.requests.map(({ method, headers }) => [method, headers.authorization])).toEqual([
+			['DELETE', `Bearer ${ownerToken}`],
+		]);
+	});
+
 	it('attaches only to a workspace that exists', async () => {
 		makeProvider();
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };

@@ -461,6 +461,12 @@ export interface SandboxProvider {
 		next: () => Promise<T>,
 	): Promise<T>;
 	/**
+	 * Run hub-initiated work (a timer, a sweep) outside the request it was
+	 * scheduled from, so it uses only credentials the provider keeps for
+	 * background work.
+	 */
+	outsideRequest?<T>(work: () => Promise<T>): Promise<T>;
+	/**
 	 * Shape the upstream of an authorized `proxy`-exposure kernel request, HTTP or
 	 * WebSocket. Without it the hub forwards to the origin plus the full inbound
 	 * path, authenticated by the session's kernel token.

@@ -143,6 +143,8 @@ describe('buildConfigSummary', () => {
 			'MARIMOHUB_SECRETS_KUBERNETES_CACHE_TTL_SECONDS',
 			// Egress-policy toggle, not private key material.
 			'MARIMOHUB_NOTIFY_ALLOW_PRIVATE',
+			// The audience a kernel token must carry, not a token.
+			'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_AUDIENCE',
 			// Name of the request header that carries user tokens, not a token.
 			'MARIMOHUB_COMPUTE_EXTERNAL_TOKEN_HEADER',
 		]);

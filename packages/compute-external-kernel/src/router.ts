@@ -20,22 +20,43 @@ export const EXTERNAL_KERNEL_BACKEND = 'external-kernel';
  * cached. Only the service's `404 no_kernel` selects the fallback; a refused,
  * missing, or expired token, or an unreachable service, fails the start.
  */
+export interface ExternalKernelRouterOptions {
+	/**
+	 * Emails of the users who have a personal kernel. Everyone else goes straight
+	 * to the fallback and never contacts the service, so its outages cannot block
+	 * them. Unset: every user asks the service.
+	 */
+	enrolledUsers?: readonly string[];
+}
+
 export class ExternalKernelRouter implements SandboxProvider {
 	readonly routing: SandboxRouting;
+	private readonly enrolled?: ReadonlySet<string>;
 
 	constructor(
 		readonly external: ExternalKernelCompute,
 		readonly fallback: SandboxProvider,
+		options: ExternalKernelRouterOptions = {},
 	) {
+		this.enrolled = options.enrolledUsers
+			? new Set(options.enrolledUsers.map((email) => email.trim().toLowerCase()))
+			: undefined;
 		this.routing = {
-			selectEditBackend: async (owner: EndUserPrincipal) =>
-				(await this.external.hasKernel(owner.userId)) ? EXTERNAL_KERNEL_BACKEND : undefined,
+			selectEditBackend: async (owner: EndUserPrincipal) => {
+				if (!this.isEnrolled(owner.email)) return;
+				return (await this.external.hasKernel(owner.userId)) ? EXTERNAL_KERNEL_BACKEND : undefined;
+			},
 			backend: (name) => {
 				if (name === undefined) return this.fallback;
 				if (name === EXTERNAL_KERNEL_BACKEND) return this.external;
 				throw new Error(`Unknown compute backend on session record: ${name}`);
 			},
 		};
+	}
+
+	/** Whether `email` may have a personal kernel, so the service must be asked. */
+	isEnrolled(email: string): boolean {
+		return !this.enrolled || this.enrolled.has(email.trim().toLowerCase());
 	}
 
 	get capabilities(): SandboxProvider['capabilities'] {
@@ -66,6 +87,10 @@ export class ExternalKernelRouter implements SandboxProvider {
 
 	proxy(request: Request): Promise<Response | null> {
 		return this.fallback.proxy(request);
+	}
+
+	outsideRequest<T>(work: () => Promise<T>): Promise<T> {
+		return this.external.outsideRequest(work);
 	}
 
 	withEndUserRequest<T>(

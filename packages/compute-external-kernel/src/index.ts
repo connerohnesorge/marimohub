@@ -76,6 +76,11 @@ export interface ExternalKernelComputeOptions {
 	 * it, nobody but the owner can stop the owner's sessions.
 	 */
 	ownerEmail?: (owner: UserId) => Promise<string | undefined>;
+	/**
+	 * The audience the service accepts. A token without it is treated as absent,
+	 * so it is never forwarded. Unset: any token is forwarded.
+	 */
+	tokenAudience?: string;
 }
 
 export const DEFAULT_TOKEN_HEADER = 'x-pantheon-bearer';
@@ -550,6 +555,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 		this.credentials = new EndUserCredentials(
 			(options.tokenHeader ?? DEFAULT_TOKEN_HEADER).toLowerCase(),
 			options.now,
+			options.tokenAudience,
 		);
 		this.stripHeaderPrefixes = (options.stripHeaderPrefixes ?? DEFAULT_STRIP_HEADER_PREFIXES).map(
 			(prefix) => prefix.toLowerCase(),
@@ -634,6 +640,10 @@ export class ExternalKernelCompute implements SandboxProvider {
 		next: () => Promise<T>,
 	): Promise<T> {
 		return this.credentials.run(request, principal, next);
+	}
+
+	outsideRequest<T>(work: () => Promise<T>): Promise<T> {
+		return this.credentials.outsideRequest(work);
 	}
 
 	async resolveKernelProxyTarget(input: KernelProxyRequest): Promise<KernelProxyTarget> {

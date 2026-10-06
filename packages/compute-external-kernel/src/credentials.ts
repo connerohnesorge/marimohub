@@ -11,7 +11,7 @@ export interface EndUserCredential {
 	email: string;
 }
 
-type Rejection = 'missing' | 'malformed' | 'expired' | 'email_mismatch';
+type Rejection = 'missing' | 'malformed' | 'expired' | 'email_mismatch' | 'audience';
 
 type ReadResult = { credential: EndUserCredential } | { rejection: Rejection };
 
@@ -35,6 +35,8 @@ const REJECTION_DETAIL: Record<Rejection, (header: string) => string> = {
 	expired: (header) => `the token in the ${header} header has expired`,
 	email_mismatch: (header) =>
 		`the email in the ${header} token does not match the signed-in hub user`,
+	audience: (header) =>
+		`the token in the ${header} header was not issued for the kernel service; sign in with a token for its audience`,
 };
 
 function decodeJwtClaims(token: string): Record<string, unknown> | undefined {
@@ -59,6 +61,7 @@ export function readEndUserCredential(
 	header: string,
 	principal: EndUserPrincipal,
 	now: number,
+	audience?: string,
 ): ReadResult {
 	const raw = request.headers.get(header)?.trim();
 	if (!raw) return { rejection: 'missing' };
@@ -72,6 +75,11 @@ export function readEndUserCredential(
 	const email = principal.email.toLowerCase();
 	if (typeof claims.email === 'string' && claims.email.toLowerCase() !== email) {
 		return { rejection: 'email_mismatch' };
+	}
+	// A token for another client (a CLI's own audience) would only earn a 401.
+	const audiences = typeof claims.aud === 'string' ? [claims.aud] : claims.aud;
+	if (audience && !(Array.isArray(audiences) && audiences.includes(audience))) {
+		return { rejection: 'audience' };
 	}
 	return { credential: { token, expiresAt, email } };
 }
@@ -90,10 +98,11 @@ export class EndUserCredentials {
 	constructor(
 		readonly header: string,
 		private readonly now: () => number = Date.now,
+		private readonly audience?: string,
 	) {}
 
 	run<T>(request: Request, principal: EndUserPrincipal, next: () => Promise<T>): Promise<T> {
-		const read = readEndUserCredential(request, this.header, principal, this.now());
+		const read = readEndUserCredential(request, this.header, principal, this.now(), this.audience);
 		// Refresh only users who already drive a kernel, so the cache never grows
 		// to every user who merely browses the hub.
 		if ('credential' in read && this.cache.has(principal.userId)) {
@@ -107,18 +116,18 @@ export class EndUserCredentials {
 	 * from this request, never a cached one.
 	 */
 	forRequest(request: Request, principal: EndUserPrincipal): EndUserCredential {
-		const read = readEndUserCredential(request, this.header, principal, this.now());
+		const read = readEndUserCredential(request, this.header, principal, this.now(), this.audience);
 		if ('rejection' in read) return this.unavailable(read.rejection);
 		this.remember(principal.userId, read.credential);
 		return read.credential;
 	}
 
 	/**
-	 * The credential for an operation on `owner`'s sandbox: the owner's token from
-	 * the owner's own request, or, with no request in progress (a background
-	 * sweep), the owner's cached token. A request from anyone else is refused
-	 * before anything is sent: their token cannot reach the owner's kernel, and
-	 * the owner's cached token is never lent to them.
+	 * The credential for an operation on `owner`'s sandbox: within a request, that
+	 * request's own token, which must be the owner's; with no request in progress
+	 * (background work), the owner's cached token. A request never borrows the
+	 * cache, so an API or MCP client needs its own token, and a request from
+	 * anyone else is refused before anything is sent.
 	 */
 	forOwner(owner: UserId | undefined): EndUserCredential {
 		const context = this.context.getStore();
@@ -128,22 +137,19 @@ export class EndUserCredentials {
 				"This session runs in another user's personal kernel; only its owner can reach it.",
 			);
 		}
-		let rejection: Rejection | undefined;
-		if (context && context.userId === userId) {
-			if ('credential' in context.read) {
-				const { credential } = context.read;
-				if (credential.expiresAt - EXPIRY_SKEW_MS > this.now()) {
-					this.remember(context.userId, credential);
-					return credential;
-				}
-				rejection = 'expired';
-			} else {
-				rejection = context.read.rejection;
-				// A token for someone else is a refusal, not a reason to use the cache.
-				if (rejection === 'email_mismatch') this.unavailable(rejection);
-			}
+		if (context) {
+			if ('rejection' in context.read) return this.unavailable(context.read.rejection);
+			const { credential } = context.read;
+			if (credential.expiresAt - EXPIRY_SKEW_MS <= this.now()) return this.unavailable('expired');
+			this.remember(context.userId, credential);
+			return credential;
 		}
-		return (userId ? this.lookup(userId) : undefined) ?? this.unavailable(rejection);
+		return (userId ? this.lookup(userId) : undefined) ?? this.unavailable(undefined);
+	}
+
+	/** Run hub-initiated work (a timer, a sweep) without the request it was scheduled from. */
+	outsideRequest<T>(work: () => Promise<T>): Promise<T> {
+		return this.context.exit(work);
 	}
 
 	/**
