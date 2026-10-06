@@ -565,6 +565,10 @@ export class SessionService {
 		}));
 	}
 
+	async markAdminStopped(projectId: ProjectId, id: SessionId, at: string): Promise<Session> {
+		return this.mutate(projectId, id, (session) => ({ ...session, admin_stopped_at: at }));
+	}
+
 	/** Refresh a running session's heartbeat (keeps it off the TTL reaper).
 	 * Coalesced to ~1 write/60s; never revives a terminal/terminating session.
 	 * Provisioning owns the `starting` to `running` transition so a heartbeat

@@ -233,7 +233,7 @@ describe("Another user's session in a personal kernel", () => {
 
 	const sessionsPath = (suffix = '') => `/projects/${pid}/notebooks/${nid}/sessions${suffix}`;
 
-	it('stops it through the provider alone, capturing nothing', async () => {
+	it("stops it through the provider alone and keeps the saved workspace for the owner's capture", async () => {
 		const { routed, owner, other } = apis();
 		const started = await expectOk<Session>(await owner('POST', sessionsPath()));
 		routed.personal.calls.readFile.length = 0;
@@ -242,12 +242,52 @@ describe("Another user's session in a personal kernel", () => {
 
 		expect(routed.personal.instance.destroy).toHaveBeenCalledOnce();
 		expect(routed.personal.calls.readFile).toEqual([]);
-		const stored = await createServices(bucket).sessions.getSession(
+		const services = createServices(bucket);
+		const stored = await services.sessions.getSession(pid, started.session_id as SessionId);
+		expect(stored.status).toBe('terminated');
+		expect(stored.admin_stopped_at).toBeDefined();
+		// Not reclaimed: the claim holds the notebook until the workspace is captured.
+		expect(stored.sandbox_reclaimed_at).toBeUndefined();
+		expect((await services.sessions.getEditorClaim(pid, nid))?.session_id).toBe(started.session_id);
+	});
+
+	it("captures the stopped workspace with the owner's own request before a new start", async () => {
+		const { routed, owner, other } = apis();
+		const started = await expectOk<Session>(await owner('POST', sessionsPath()));
+		await expectOk(await other('DELETE', sessionsPath(`/${started.session_id}`)));
+		routed.personal.calls.readFile.length = 0;
+		vi.mocked(routed.personal.instance.destroy).mockClear();
+
+		const restarted = await expectOk<Session>(await owner('POST', sessionsPath()));
+
+		expect(restarted.session_id).not.toBe(started.session_id);
+		// The capture read the saved notebook, then the old workspace was destroyed.
+		expect(routed.personal.calls.readFile).toContain('/workspace/notebook.py');
+		expect(routed.personal.instance.destroy).toHaveBeenCalledOnce();
+		const old = await createServices(bucket).sessions.getSession(
 			pid,
 			started.session_id as SessionId,
 		);
+		expect(old.sandbox_reclaimed_at).toBeDefined();
+	});
+
+	it("stops another user's live temporary session through the provider when the notebook is deleted", async () => {
+		const { routed, owner, other } = apis();
+		await expectOk<Session>(await owner('POST', sessionsPath()));
+		const temporary = await expectOk<Session>(
+			await other('POST', sessionsPath(), { edit_intent: 'temporary' }),
+		);
+		vi.mocked(routed.personal.instance.destroy).mockClear();
+
+		await expectOk(await owner('DELETE', `/projects/${pid}/notebooks/${nid}`));
+
+		expect(routed.personal.instance.destroy).toHaveBeenCalledOnce();
+		const stored = await createServices(bucket).sessions.getSession(
+			pid,
+			temporary.session_id as SessionId,
+		);
 		expect(stored.status).toBe('terminated');
-		expect(stored.sandbox_reclaimed_at).toBeDefined();
+		expect(stored.admin_stopped_at).toBeDefined();
 	});
 
 	it('leaves it running when the provider refuses the stop', async () => {

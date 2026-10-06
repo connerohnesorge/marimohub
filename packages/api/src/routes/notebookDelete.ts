@@ -36,6 +36,6 @@ export async function deleteNotebookAndRetire(
 				}),
 		);
 	}
-	await retireLiveApps(deps, project.id, (session) => session.notebook_id === notebookId);
+	await retireLiveApps(deps, project.id, user, (session) => session.notebook_id === notebookId);
 	await cancelJobRuns(deps, project.id, user.id, notebookId);
 }

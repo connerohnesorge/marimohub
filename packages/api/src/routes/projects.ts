@@ -476,7 +476,7 @@ app.openapi(deleteProject, async (c) => {
 			}),
 		);
 	}
-	await retireLiveApps(deps, pid);
+	await retireLiveApps(deps, pid, user);
 	await cancelJobRuns(deps, pid, user.id);
 	return c.json({ success: true }, 200);
 });

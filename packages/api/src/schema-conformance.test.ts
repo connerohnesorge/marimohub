@@ -152,6 +152,7 @@ describe('schema conformance: api response shapes vs core public shapes', () => 
 			'last_snapshot_at',
 			'sandbox_reclaimed_at',
 			'takeover_capture_completed_at',
+			'admin_stopped_at',
 		];
 		// `can` is response-only: the caller's evaluated grants, computed per
 		// request — never stored on the record.

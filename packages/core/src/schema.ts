@@ -814,6 +814,12 @@ export const SessionSchema = z.looseObject({
 	 */
 	takeover_capture_completed_at: z.iso.datetime().optional(),
 	/**
+	 * Another user stopped this session through its kernel service, which saved
+	 * the open notebooks into the workspace before closing them. Reclaiming the
+	 * sandbox then captures that workspace before destroying it.
+	 */
+	admin_stopped_at: z.iso.datetime().optional(),
+	/**
 	 * A discard-only session. This includes viewer throwaways and explicit
 	 * temporary editors: nothing is written back at teardown — no version,
 	 * HTML/session snapshot, workspace mirror, or FS snapshot. Absent means the

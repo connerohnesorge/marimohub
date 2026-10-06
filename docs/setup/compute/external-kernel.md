@@ -81,13 +81,19 @@ Header stripping applies to kernel traffic on both backends.
   anything, and it never uses the owner's cached token on that caller's
   behalf. A token whose email differs from the signed-in user is refused,
   never replaced by a cached one.
-- Stopping another user's session (`DELETE` on the session or the MCP
-  `stop_session` tool, which project managers and super admins may use on an
-  exclusive editor) calls `POST /admin/kernels/stop` with the caller's own
-  token. The service accepts it only from its administrators; a refusal leaves
-  the session running. The hub captures nothing from the session first, so
-  edits after its last periodic capture are not saved by the hub. The route
-  names the owner by the hub email in the owner's identity record.
+- Stopping another user's session (`DELETE` on the session, the MCP
+  `stop_session` tool, or deleting the notebook or project of a live app or
+  temporary session) calls `POST /admin/kernels/stop` with the caller's own
+  token. The service accepts it only from its administrators, saves the open
+  notebooks into the workspace, and closes them without running a cell. A
+  refusal leaves the session running. The route names the owner by the hub
+  email in the owner's identity record.
+- The hub then ends the session record but keeps the workspace and the editor
+  claim. The saved notebooks reach the hub when the workspace is captured with
+  the owner's own token: at the owner's next start of that notebook, or by
+  background work while the hub holds the owner's token. Only then is the
+  workspace deleted. Until then, other editors see the notebook as still
+  shutting down.
 - Nobody can take over an editor that runs in a personal kernel; the hub does
   not offer it and refuses the request.
 - A proxied browser request always uses the requesting user's own token from
@@ -174,17 +180,17 @@ are relative to the workspace and never contain `..`. Every request carries
 any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch"}}`
 (token email differs from the owner), or `403` (not allowed).
 
-| Request                                                                       | Response                                                                                                                                                           |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /kernel`                                                                 | `200 {"ready": true, "user": "<email>"}`; `404 {"error":{"code":"no_kernel"}}` when the user has no kernel                                                         |
-| `PUT /workspaces/{workspaceId}/files?path=<rel>` (raw body)                   | `2xx`; parent directories are created                                                                                                                              |
-| `PUT /workspaces/{workspaceId}/environment` `{"env","files","tunnels","s3"}`  | `204`; replaces the workspace's whole environment. `400 {"error":{"code":"invalid_environment"}}` for a body outside the limits above                              |
-| `GET /workspaces/{workspaceId}/files?path=<rel>`                              | `200` bytes; `404` missing                                                                                                                                         |
-| `GET /workspaces/{workspaceId}/list?path=<rel>`                               | `200 {"entries":[{"path":"<workspace-relative path>","type":"file"\|"directory","size":<n>}]}` for one level; `404` when the workspace or directory does not exist |
-| `POST /workspaces/{workspaceId}/open` `{"notebook","projectId","notebookId"}` | `200 {"file":"<marimo file key>"}`                                                                                                                                 |
-| `DELETE /workspaces/{workspaceId}`                                            | `2xx` or `404`                                                                                                                                                     |
-| `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`        | `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller.                 |
-| `* /workspaces/{workspaceId}/proxy/{path}`                                    | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                   |
+| Request                                                                       | Response                                                                                                                                                                                                                        |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /kernel`                                                                 | `200 {"ready": true, "user": "<email>"}`; `404 {"error":{"code":"no_kernel"}}` when the user has no kernel                                                                                                                      |
+| `PUT /workspaces/{workspaceId}/files?path=<rel>` (raw body)                   | `2xx`; parent directories are created                                                                                                                                                                                           |
+| `PUT /workspaces/{workspaceId}/environment` `{"env","files","tunnels","s3"}`  | `204`; replaces the workspace's whole environment. `400 {"error":{"code":"invalid_environment"}}` for a body outside the limits above                                                                                           |
+| `GET /workspaces/{workspaceId}/files?path=<rel>`                              | `200` bytes; `404` missing                                                                                                                                                                                                      |
+| `GET /workspaces/{workspaceId}/list?path=<rel>`                               | `200 {"entries":[{"path":"<workspace-relative path>","type":"file"\|"directory","size":<n>}]}` for one level; `404` when the workspace or directory does not exist                                                              |
+| `POST /workspaces/{workspaceId}/open` `{"notebook","projectId","notebookId"}` | `200 {"file":"<marimo file key>"}`                                                                                                                                                                                              |
+| `DELETE /workspaces/{workspaceId}`                                            | `2xx` or `404`                                                                                                                                                                                                                  |
+| `POST /admin/kernels/stop?owner=<owner email>&workspace=<workspaceId>`        | Saves the open notebooks into the workspace, then closes them; runs no cell. `2xx` when the caller is a service administrator, `403` otherwise. Carries the caller's own token, and `X-External-Kernel-Owner` names the caller. |
+| `* /workspaces/{workspaceId}/proxy/{path}`                                    | HTTP and WebSocket proxy to the root of the user's marimo server                                                                                                                                                                |
 
 The hub stores the file key in the session's origin URL and adds
 `file=<key>` to every proxied request that has no `file` parameter. The hub

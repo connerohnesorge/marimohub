@@ -103,7 +103,7 @@ import {
 	SessionResponseSchema,
 	SurfaceResponseSchema,
 	sessionRetirer,
-	stopForeignManagedSandbox,
+	stopForeignManagedSession,
 	SuccessResponseSchema,
 	toComputeResourcesResponse,
 } from '../shared';
@@ -770,11 +770,7 @@ async function admittedSessionNotebooks(
 	return admitted;
 }
 
-async function retireSelectedSession(
-	deps: ApiDeps,
-	selected: Session,
-	opts: { sandboxStopped?: boolean } = {},
-): Promise<void> {
+async function retireSelectedSession(deps: ApiDeps, selected: Session): Promise<void> {
 	const { sessions } = deps.services;
 	const { project_id: pid, notebook_id: nid, session_id: sid } = selected;
 	// Only the winner of the terminating transition performs teardown.
@@ -788,10 +784,7 @@ async function retireSelectedSession(
 			);
 	} finally {
 		// Reconciliation can recover the pool from the terminal session if invalidation fails.
-		await sessionRetirer(deps).retire(session, {
-			teardown: transitioned,
-			sandboxStopped: opts.sandboxStopped,
-		});
+		await sessionRetirer(deps).retire(session, { teardown: transitioned });
 	}
 }
 
@@ -1536,6 +1529,16 @@ export async function startNotebookSession(input: {
 		? (await sessions.findReusableEditor(pid, nid, user.id, 'exclusive', true)).session
 		: undefined;
 
+	// An administrator stopped this user's editor in their kernel, which saved it
+	// into the workspace. Capture it with the owner's own credential before this
+	// session takes the claim, or a newer session would supersede it.
+	if (mode === 'edit' && !ephemeral && existingEditorClaim?.session_id) {
+		const holder = await sessions.getSession(pid, existingEditorClaim.session_id).catch(() => null);
+		if (holder?.user_id === user.id && holder.admin_stopped_at && !holder.sandbox_reclaimed_at) {
+			await sessionRetirer(deps).reclaim(holder, true);
+		}
+	}
+
 	// Chosen with the caller's own credential before anything is recorded. A
 	// failed choice fails the start; it never falls through to another backend.
 	const sessionBackend =
@@ -2200,8 +2203,9 @@ app.openapi(deleteSession, async (c) => {
 	// their own ephemeral session (role re-checked; see assertSessionControl).
 	await assertSessionControl(project, existing, user, deps, labels);
 
-	const sandboxStopped = await stopForeignManagedSandbox(deps, existing, user);
-	await retireSelectedSession(deps, existing, { sandboxStopped });
+	if (!(await stopForeignManagedSession(deps, existing, user))) {
+		await retireSelectedSession(deps, existing);
+	}
 
 	return c.json({ success: true }, 200);
 });

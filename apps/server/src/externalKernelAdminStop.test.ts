@@ -5,7 +5,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApi } from '@marimo-hub/api';
 import { createInitializedBucket, makeTestDeps } from '@marimo-hub/api/testing';
 import { ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
-import { createServices, ProxyExposure, SandboxId } from '@marimo-hub/core';
+import {
+	createServices,
+	paths,
+	ProxyExposure,
+	SandboxId,
+	SessionLifecycleService,
+} from '@marimo-hub/core';
 import type { Authenticator, NotebookId, ProjectId, SessionId, UserId } from '@marimo-hub/core';
 import { ACTOR, uid } from '@marimo-hub/core/testing';
 
@@ -21,6 +27,7 @@ function jwt(email: string): string {
 }
 
 const ownerToken = jwt(OWNER_EMAIL);
+const SAVED_NOTEBOOK = 'import marimo as mo\n# saved by the kernel service before the stop\n';
 const adminToken = jwt(ADMIN_EMAIL);
 
 function authAs(id: UserId, email: string): Authenticator {
@@ -54,6 +61,30 @@ describe("a super admin stopping another user's external-kernel session", () => 
 				const admitted = kiraAdmins.has(claims.email ?? '');
 				res.writeHead(admitted ? 204 : 403, { 'content-type': 'application/json' });
 				res.end(admitted ? undefined : '{"error":{"code":"forbidden"}}');
+				return;
+			}
+			// The workspace after the admin stop: the notebook as the service saved it.
+			if (url.pathname.endsWith('/list')) {
+				const size = Buffer.byteLength(SAVED_NOTEBOOK);
+				res.writeHead(200, { 'content-type': 'application/json' });
+				res.end(
+					JSON.stringify(
+						url.searchParams.get('path')
+							? { entries: [] }
+							: { entries: [{ path: 'notebook.py', type: 'file', size }] },
+					),
+				);
+				return;
+			}
+			if (url.pathname.endsWith('/files')) {
+				const found = url.searchParams.get('path') === 'notebook.py';
+				res.writeHead(found ? 200 : 404, { 'content-type': 'application/octet-stream' });
+				res.end(found ? SAVED_NOTEBOOK : '{"error":{"code":"not_found"}}');
+				return;
+			}
+			if (req.method === 'DELETE') {
+				res.writeHead(204);
+				res.end();
 				return;
 			}
 			res.writeHead(200, { 'content-type': 'application/json' });
@@ -123,12 +154,26 @@ describe("a super admin stopping another user's external-kernel session", () => 
 			);
 		const status = async () =>
 			(await services.sessions.getSession(pid, session.session_id as SessionId)).status;
-		return { compute, stop, status };
+		const sweep = () =>
+			new SessionLifecycleService(services.sessions, services.notebooks, compute, bucket, {
+				idleTimeoutMsByMode: { edit: 3_600_000, app: 3_600_000 },
+				snapshotIntervalMs: 0,
+				extensionMs: 0,
+				connectionAware: false,
+				persistWorkspace: 'source',
+				automaticThumbnails: false,
+				workdir: '/workspace',
+			}).sweep();
+		const savedCode = async () =>
+			(
+				await bucket.get(paths.project(pid).notebook(notebook.id).workspaceFile('notebook.py'))
+			)?.text();
+		return { compute, stop, status, sweep, savedCode };
 	}
 
 	it('calls only the admin stop route, with the admin token', async () => {
 		kiraAdmins.add(ADMIN_EMAIL);
-		const { compute, stop, status } = await runningSession();
+		const { compute, stop, status, sweep, savedCode } = await runningSession();
 
 		const res = await stop();
 
@@ -140,6 +185,19 @@ describe("a super admin stopping another user's external-kernel session", () => 
 		expect(seen[0].url.searchParams.get('owner')).toBe(OWNER_EMAIL.toLowerCase());
 		expect(seen[0].url.searchParams.get('workspace')).toBe(SANDBOX);
 		expect(seen[0].headers.authorization).toBe(`Bearer ${adminToken}`);
+
+		// Background work, outside any request, captures what the service saved
+		// with the owner's own token, then removes the workspace.
+		seen.length = 0;
+		await sweep();
+		expect(await savedCode()).toBe(SAVED_NOTEBOOK);
+		expect(seen.map(({ method, url }) => `${method} ${url.pathname.split('/').at(-1)}`)).toEqual(
+			expect.arrayContaining(['GET list', 'GET files', `DELETE ${SANDBOX}`]),
+		);
+		expect(new Set(seen.map(({ headers }) => headers.authorization))).toEqual(
+			new Set([`Bearer ${ownerToken}`]),
+		);
+		expect(seen.at(-1)?.method).toBe('DELETE');
 		await compute[Symbol.asyncDispose]();
 	});
 

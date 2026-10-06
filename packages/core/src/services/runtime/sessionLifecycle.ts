@@ -262,8 +262,10 @@ export class SessionLifecycleService {
 						) {
 							return;
 						}
+						// The kernel service saved an admin-stopped session's notebooks into its
+						// workspace; they reach the bucket only through this capture.
 						const save =
-							s.status === 'expired' &&
+							(s.status === 'expired' || s.admin_stopped_at !== undefined) &&
 							!pastAuthorizationDeadline &&
 							!superseded &&
 							sessionPersistsEdits(s);
