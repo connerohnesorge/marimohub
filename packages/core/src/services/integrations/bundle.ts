@@ -183,12 +183,24 @@ function bundleNetwork(
 			if (!tunnel.host || !isPort(tunnel.port)) {
 				throw new ValidationError(`Integration "${item.name}" declared an invalid tunnel target.`);
 			}
+			const { credential } = tunnel;
 			const kept: SessionTunnel = {
 				host: tunnel.host,
 				port: tunnel.port,
 				hostVars: tunnel.hostVars.filter(owned),
 				portVars: tunnel.portVars.filter(owned),
 				urlVars: tunnel.urlVars.filter(owned),
+				...(credential
+					? {
+							credential: {
+								...credential,
+								// Replacing the password must not depend on who owns the variable.
+								passwordVars: credential.passwordVars.filter((name) => Object.hasOwn(vars, name)),
+								sslmodeVars: credential.sslmodeVars.filter(owned),
+								rootCertVars: credential.rootCertVars.filter(owned),
+							},
+						}
+					: {}),
 			};
 			if (kept.hostVars.length + kept.portVars.length + kept.urlVars.length > 0) {
 				network.tunnels.push(kept);

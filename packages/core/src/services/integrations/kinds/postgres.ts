@@ -308,6 +308,17 @@ export const postgres = defineIntegration({
 					hostVars: [`MARIMOHUB_PG_${seg}_HOST`, 'PGHOST'],
 					portVars: [`MARIMOHUB_PG_${seg}_PORT`, 'PGPORT'],
 					urlVars: [`MARIMOHUB_PG_${seg}_URL`],
+					credential: {
+						protocol: 'postgres',
+						user: config.username,
+						password: config.password,
+						database: config.database,
+						sslmode: config.ssl.mode,
+						...(caBundle ? { rootCa: caBundle } : {}),
+						passwordVars: [`MARIMOHUB_PG_${seg}_PASSWORD`, 'PGPASSWORD'],
+						sslmodeVars: ['PGSSLMODE'],
+						rootCertVars: ['PGSSLROOTCERT'],
+					},
 				},
 			],
 		};
