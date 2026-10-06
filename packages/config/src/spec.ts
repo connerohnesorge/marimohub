@@ -1066,6 +1066,13 @@ export const CONFIG_SPEC: ConfigGroup[] = [
 							"Request header that carries the signed-in user's own JWT, set by the gateway in front of the hub. Use `authorization` when the gateway forwards a bearer token there.",
 						default: 'x-pantheon-bearer',
 					},
+					{
+						id: 'MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND',
+						name: 'Fallback backend for users without a kernel',
+						description:
+							'Backend that runs edit sessions for users the external service answers `404 no_kernel` for, and every app, job, warm pool, and preview. It is configured with its own variables, exactly as if it were `MARIMOHUB_COMPUTE_BACKEND`. Any other answer from the service fails the session start; it never falls back. Unset: every edit session needs a personal kernel.',
+						example: 'kubernetes',
+					},
 				],
 			},
 			{

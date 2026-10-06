@@ -8,7 +8,11 @@ import { createWandbCompute } from '@marimo-hub/compute-coreweave/wandb';
 import { DockerCompute } from '@marimo-hub/compute-container/docker';
 import { PodmanCompute } from '@marimo-hub/compute-container/podman';
 import { E2bCompute } from '@marimo-hub/compute-e2b';
-import { DEFAULT_TOKEN_HEADER, ExternalKernelCompute } from '@marimo-hub/compute-external-kernel';
+import {
+	DEFAULT_TOKEN_HEADER,
+	ExternalKernelCompute,
+	ExternalKernelRouter,
+} from '@marimo-hub/compute-external-kernel';
 import { FargateCompute, validateFargateTaskDefinition } from '@marimo-hub/compute-fargate';
 import {
 	KubernetesCompute,
@@ -42,6 +46,28 @@ export function computeBackend(env: Env): string | undefined {
 		remediation: `Set it to one of: ${COMPUTE_BACKENDS}.`,
 		docs: 'docs/configuration.md',
 	});
+}
+
+const NOT_A_FALLBACK = new Set(['external-kernel', 'none', 'noop', 'cloudflare']);
+
+/** The backend that serves external-kernel users without a personal kernel, if any. */
+export function externalKernelFallback(env: Env): string | undefined {
+	if (computeBackend(env) !== 'external-kernel') return;
+	return parseEnum(env, 'MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND', {
+		allowed: COMPUTE_BACKEND_VALUES.filter((value) => !NOT_A_FALLBACK.has(value)),
+		remediation:
+			'Name the backend that runs sessions for users without a personal kernel, for example kubernetes, or unset it.',
+		docs: 'docs/setup/compute/external-kernel.md',
+	});
+}
+
+/**
+ * The backend behind everything that is not a routed edit session: apps, jobs,
+ * warm pools, previews, images, and compute profiles. With an external-kernel
+ * fallback that is the fallback; otherwise the selected backend.
+ */
+export function defaultComputeBackend(env: Env): string | undefined {
+	return externalKernelFallback(env) ?? computeBackend(env);
 }
 
 /** Parse a `"start-end"` port range (e.g. `2718-2723`); undefined if unset. */
@@ -182,7 +208,7 @@ export function resolveLifetimeBackstop(
  * backends with no image concept (local/none/noop).
  */
 export function resolveSandboxImages(env: Env): string[] {
-	switch (computeBackend(env)) {
+	switch (defaultComputeBackend(env)) {
 		case undefined:
 		case 'local':
 		case 'none':
@@ -210,7 +236,7 @@ export function resolveSandboxImages(env: Env): string[] {
  */
 export function usesSandboxNativeObjectStorage(env: Env): boolean {
 	return (
-		computeBackend(env) === 'coreweave' &&
+		defaultComputeBackend(env) === 'coreweave' &&
 		parseList(env.MARIMOHUB_COMPUTE_COREWEAVE_OBJECT_STORAGE_BUCKETS) !== undefined
 	);
 }
@@ -756,7 +782,8 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 		}
 		case 'external-kernel': {
 			const docs = 'docs/setup/compute/external-kernel.md';
-			if (env.MARIMOHUB_COMPUTE_IMAGE?.trim()) {
+			const fallbackBackend = externalKernelFallback(env);
+			if (env.MARIMOHUB_COMPUTE_IMAGE?.trim() && !fallbackBackend) {
 				throw new ConfigError(
 					'MARIMOHUB_COMPUTE_IMAGE is not supported by the external-kernel backend; the external service owns the kernel image',
 					{
@@ -779,8 +806,9 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 			}
 			const url = computeVar(env, 'MARIMOHUB_COMPUTE_EXTERNAL_URL', 'external-kernel');
 			const tokenHeader = externalTokenHeader(env);
+			let external: ExternalKernelCompute;
 			try {
-				return new ExternalKernelCompute({
+				external = new ExternalKernelCompute({
 					baseUrl: url,
 					tokenHeader,
 					stripHeaderPrefixes: sandboxStripHeaders(env).prefixes,
@@ -792,6 +820,10 @@ export function makeCompute(env: Env, opts?: ComputeOptions): SandboxProvider {
 					{ variable: 'MARIMOHUB_COMPUTE_EXTERNAL_URL', docs },
 				);
 			}
+			if (!fallbackBackend) return external;
+			// The fallback is wired exactly as if it were the selected backend.
+			const fallback = makeCompute({ ...env, MARIMOHUB_COMPUTE_BACKEND: fallbackBackend }, opts);
+			return new ExternalKernelRouter(external, fallback);
 		}
 		case 'cloudflare':
 			throw new ConfigError(

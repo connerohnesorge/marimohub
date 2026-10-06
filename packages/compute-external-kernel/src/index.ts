@@ -44,6 +44,7 @@ import type { EndUserCredential } from './credentials';
 
 export { EndUserCredentials, readEndUserCredential } from './credentials';
 export type { EndUserCredential } from './credentials';
+export { EXTERNAL_KERNEL_BACKEND, ExternalKernelRouter } from './router';
 
 export interface ExternalKernelComputeOptions {
 	/** Base URL of the external kernel API, e.g. `http://kira.example/api/external-kernel/v1`. */
@@ -502,6 +503,27 @@ export class ExternalKernelCompute implements SandboxProvider {
 
 	async proxy(): Promise<Response | null> {
 		return null;
+	}
+
+	/**
+	 * Whether `owner` has a personal kernel, asked with the owner's own token.
+	 * Only `404 no_kernel` means no; every other failure throws.
+	 */
+	async hasKernel(owner: UserId): Promise<boolean> {
+		const response = await this.call(`${this.baseUrl}/kernel`, {
+			credential: this.credentials.forOwner(owner),
+			action: 'checking for a personal kernel',
+			allow: [404],
+		});
+		if (response.status !== 404) {
+			await discard(response);
+			return true;
+		}
+		if ((await errorCode(response.clone())) === 'no_kernel') {
+			await discard(response);
+			return false;
+		}
+		throw await serviceError(response, 'checking for a personal kernel');
 	}
 
 	withEndUserRequest<T>(

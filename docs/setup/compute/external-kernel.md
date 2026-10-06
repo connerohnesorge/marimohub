@@ -25,9 +25,35 @@ MARIMOHUB_EDITOR_SANDBOX_SHARING=exclusive
 
 Configuration fails unless exposure is `proxy` and editor sandboxes are
 `exclusive`. Each session runs in its owner's kernel, so another user cannot
-attach to it. Do not set `MARIMOHUB_COMPUTE_IMAGE`; the external service owns
-the kernel image. `MARIMOHUB_COMPUTE_WORKDIR` (default `/workspace`) only names
-the hub-side root that maps to each workspace.
+attach to it. Without a fallback backend, do not set `MARIMOHUB_COMPUTE_IMAGE`;
+the external service owns the kernel image. `MARIMOHUB_COMPUTE_WORKDIR` (default
+`/workspace`) only names the hub-side root that maps to each workspace.
+
+#### Users without a personal kernel
+
+Set `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND` to keep a regular backend for
+everyone the external service has no kernel for:
+
+```bash
+MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND=kubernetes
+# Configure the fallback with its own variables, as if it were MARIMOHUB_COMPUTE_BACKEND.
+MARIMOHUB_COMPUTE_IMAGE=ghcr.io/example/marimo-kernel:1
+```
+
+At every edit session start, the hub asks `GET /kernel` with the signed-in
+user's own token. It does not cache the answer.
+
+- `200`: the session runs in the user's personal kernel.
+- `404 {"error":{"code":"no_kernel"}}`: the session runs on the fallback
+  backend, exactly as it would without the external kernel.
+- Anything else (`401`, `403`, any other `404`, `5xx`, an unreachable service,
+  or a missing or expired token): the start fails with that error. The hub
+  never falls back on an error.
+
+The session records which backend it runs on, and every later operation on it
+(capture, teardown, proxying, surfaces) uses that backend. Apps, jobs, warm
+pools, data previews, compute profiles, and images always use the fallback.
+Header stripping applies to kernel traffic on both backends.
 
 #### Security model
 
@@ -80,8 +106,14 @@ the hub-side root that maps to each workspace.
 - Background capture or teardown after the owner's token expires with no newer
   request. The call fails and the next sweep retries it once the owner uses the
   hub again. The service owns the kernel's own lifecycle.
-- A fallback to another backend for users without a kernel. Those users see
-  `no_kernel` and must start their kernel in the external service first.
+- Without `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND`, users without a
+  kernel see `no_kernel` and must start their kernel in the external service
+  first.
+- A request without the token header (for example from an MCP client with a
+  hub token) starts an edit session only while the hub still holds an
+  unexpired token from the same user's earlier requests. Otherwise the start
+  fails, even with a fallback: the hub cannot ask the service whether the user
+  has a kernel.
 
 #### Protocol
 
