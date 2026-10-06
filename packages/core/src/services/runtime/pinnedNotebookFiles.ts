@@ -33,6 +33,8 @@ export async function pinnedNotebookFiles(
 	projectId: ProjectId,
 	notebookId: NotebookId,
 	versionId?: VersionId,
+	/** Paths the receiving backend owns: left out like the sandbox's own. */
+	reservedPaths: readonly string[] = [],
 ): Promise<PinnedNotebookFiles | undefined> {
 	const source = await notebooks.getNotebookSource(projectId, notebookId);
 	if (!workspaceSourcePolicy(source).persistSessionEdits) return undefined;
@@ -54,6 +56,7 @@ export async function pinnedNotebookFiles(
 		},
 		exec: async () => execResult(true, '', ''),
 		ensureDirectories: async () => {},
+		reservedPaths,
 	};
 	await restoreWorkspace(collector, bucket, nb.workspacePrefix, ROOT, {
 		excludeRelativeRoots: ['notebook.py', 'pyproject.toml'],

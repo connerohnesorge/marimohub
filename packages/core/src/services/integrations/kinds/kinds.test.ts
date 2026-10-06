@@ -11,7 +11,7 @@ import type {
 import { bundleIntegrations as bundleWorkloadIntegrations, INTEGRATIONS_DIR } from '../bundle';
 import { parseAuthoringWithPlaceholders, SECRET_MARK } from '../secretFields';
 import type { IntegrationDefinition, RenderInput } from '../sdk';
-import { athena } from './awsQueryEngines';
+import { athena, redshift } from './awsQueryEngines';
 import { bigquery } from './bigquery';
 import { customEnv } from './customEnv';
 import { isIpAddressHost, isValidS3Bucket } from './common';
@@ -3916,13 +3916,33 @@ describe('network declarations', () => {
 		'%#: tunnels the server each client dials through the variables that carry it',
 		(def, host, port, hostVars, portVars, urlVars) => {
 			const output = renderFixture(def as IntegrationDefinition);
-			expect(output.tunnels).toEqual([{ host, port, hostVars, portVars, urlVars }]);
+			expect(output.tunnels).toEqual([
+				expect.objectContaining({ host, port, hostVars, portVars, urlVars }),
+			]);
 			const env = { ...output.env, ...output.discoveryEnv };
 			for (const name of hostVars.filter((n) => n in env)) expect(env[name]).toBe(host);
 			for (const name of portVars.filter((n) => n in env)) expect(env[name]).toBe(String(port));
 			for (const name of urlVars) expect(env[name]).toContain(`${host}:${port}`);
 		},
 	);
+
+	it("hands a relay Postgres's sign-in and TLS settings, and only Postgres's", () => {
+		const output = renderFixture(postgres, { ssl: { mode: 'verify-ca', ca_bundle: 'PEM' } });
+		expect(output.tunnels?.[0].credential).toEqual({
+			protocol: 'postgres',
+			user: expect.any(String),
+			password: expect.any(String),
+			database: expect.any(String),
+			sslmode: 'verify-ca',
+			rootCa: 'PEM',
+			passwordVars: ['MARIMOHUB_PG_PROD_PASSWORD', 'PGPASSWORD'],
+			sslmodeVars: ['PGSSLMODE'],
+			rootCertVars: ['PGSSLROOTCERT'],
+		});
+		for (const def of [mysql, sqlserver, redshift, trino, pyspark]) {
+			expect(renderFixture(def as IntegrationDefinition).tunnels?.[0].credential).toBeUndefined();
+		}
+	});
 
 	it('names MongoDB URLs, mongodb+srv included, for the relay to resolve', () => {
 		for (const scheme of ['mongodb+srv', 'mongodb']) {

@@ -104,8 +104,12 @@ function batchByBytes<T extends { size: number }>(items: readonly T[], maxBytes:
 /** What a workspace restore needs from a sandbox. */
 export type WorkspaceRestoreTarget = Pick<
 	SandboxInstance,
-	'writeFiles' | 'exec' | 'ensureDirectories'
+	'writeFiles' | 'exec' | 'ensureDirectories' | 'reservedPaths'
 >;
+
+function underRoot(rel: string, roots: readonly string[]): boolean {
+	return roots.some((root) => rel === root || rel.startsWith(`${root}/`));
+}
 
 async function createSandboxDirectories(
 	sandbox: WorkspaceRestoreTarget,
@@ -214,6 +218,7 @@ export async function restoreWorkspace(
 	// before `bucket.get()` buffers its body — the size check must never use the
 	// fetched object.
 	const objects = await listAllObjects(bucket, sourcePrefix);
+	const excluded = [...(options.excludeRelativeRoots ?? []), ...(sandbox.reservedPaths ?? [])];
 	const wanted: { key: string; dest: string; size: number }[] = [];
 	const directories: string[] = [];
 	for (const obj of objects) {
@@ -222,13 +227,7 @@ export async function restoreWorkspace(
 		const markerDirectory = workspaceDirectoryFromMarkerPath(rel);
 		if (markerDirectory !== null) {
 			if (!markerDirectory || isGitHooksPath(markerDirectory)) continue;
-			if (
-				options.excludeRelativeRoots?.some(
-					(root) => markerDirectory === root || markerDirectory.startsWith(`${root}/`),
-				)
-			) {
-				continue;
-			}
+			if (underRoot(markerDirectory, excluded)) continue;
 			if (!isSafeWorkspacePath(markerDirectory) || isWorkspaceInternalPath(markerDirectory)) {
 				if (options.requireComplete) {
 					throw new Error(`restoreWorkspace: unsafe workspace path: ${markerDirectory}`);
@@ -239,12 +238,7 @@ export async function restoreWorkspace(
 			directories.push(`${workingDir}/${markerDirectory}`);
 			continue;
 		}
-		if (
-			isGitHooksPath(rel) ||
-			options.excludeRelativeRoots?.some((root) => rel === root || rel.startsWith(`${root}/`))
-		) {
-			continue;
-		}
+		if (isGitHooksPath(rel) || underRoot(rel, excluded)) continue;
 		// A poisoned key (e.g. from a compromised/synced source) whose relative path
 		// carries `..`/absolute/backslash segments would escape workingDir once
 		// concatenated. Reject or skip it — the sandbox working dir is a hard boundary.
@@ -336,6 +330,7 @@ export async function captureWorkspace(
 ): Promise<void> {
 	if (!supportsBoundedReads(sandbox)) return;
 	const nb = paths.project(projectId).notebook(notebookId);
+	const reserved = sandbox.reservedPaths ?? [];
 
 	// Relative paths currently present in the sandbox working dir, excluding source
 	// files and regenerable artifacts. Used to upload files and drive mirror-deletes.
@@ -376,7 +371,12 @@ export async function captureWorkspace(
 		};
 		for (const file of listing.files) {
 			const rel = file.relativePath;
-			if (!isSafeWorkspacePath(rel) || isWorkspaceInternalPath(rel) || isCaptureExcluded(rel)) {
+			if (
+				!isSafeWorkspacePath(rel) ||
+				isWorkspaceInternalPath(rel) ||
+				isCaptureExcluded(rel) ||
+				underRoot(rel, reserved)
+			) {
 				continue;
 			}
 			const group = gitGroupOf(rel);
@@ -473,7 +473,8 @@ export async function captureWorkspace(
 	const existingKeys = await listAllKeys(bucket, nb.workspacePrefix);
 	const staleKeys = existingKeys.filter((key) => {
 		const rel = key.slice(nb.workspacePrefix.length);
-		if (!rel || isMirrorProtected(rel)) return false;
+		// The backend hides its own paths, so their absence says nothing.
+		if (!rel || isMirrorProtected(rel) || underRoot(rel, reserved)) return false;
 		if (isGitHooksPath(rel)) return true;
 		const group = gitGroupOf(rel);
 		if (group !== null && retainedGitGroups.has(group)) return false;

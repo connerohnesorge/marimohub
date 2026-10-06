@@ -333,6 +333,29 @@ export interface SessionTunnel {
 	portVars: string[];
 	/** Variables whose value is a URL whose authority ends in `host:port`. */
 	urlVars: string[];
+	/** Present when a relay may sign in to the database itself, keeping the password. */
+	credential?: SessionTunnelCredential;
+}
+
+/**
+ * A Postgres sign-in a relay performs upstream, so the password and the TLS
+ * settings stay out of the kernel. Named variables carry the values the relay
+ * must replace on the kernel's side.
+ */
+export interface SessionTunnelCredential {
+	protocol: 'postgres';
+	user: string;
+	password: string;
+	database: string;
+	sslmode: 'disable' | 'allow' | 'prefer' | 'require' | 'verify-ca' | 'verify-full';
+	/** PEM bundle the upstream server's certificate is verified against. */
+	rootCa?: string;
+	/** Variables whose value is exactly the password. */
+	passwordVars: string[];
+	/** Variables whose value is the sslmode. */
+	sslmodeVars: string[];
+	/** Variables whose value is the path of the CA file. */
+	rootCertVars: string[];
 }
 
 /** An HTTPS (or other TLS) service reached by name, so TLS stays end to end. */

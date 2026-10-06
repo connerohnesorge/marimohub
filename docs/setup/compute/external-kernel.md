@@ -137,6 +137,13 @@ service applies it to that workspace only, never to the user's other notebooks.
   the port, or a URL: PostgreSQL, MySQL, SQL Server, Redshift, ClickHouse,
   Trino, Spark Connect, and the Iceberg SQL catalog and Hive metastore (through
   `PYICEBERG_CATALOG__<NAME>__URI`, which overrides the YAML). At most 16.
+- A PostgreSQL tunnel also carries the sign-in: `protocol: "postgres"`, `user`,
+  `password`, `database`, `sslmode` (the integration's), and `rootCaBase64` (its
+  CA bundle, or empty). The service signs in upstream over TLS and keeps the
+  password. The kernel's side gets `kira-brokered` wherever the password was,
+  and `sslmode=disable` with no CA file, because its hop to the service is
+  loopback. Each PostgreSQL integration gets its own tunnel. Redshift stays a
+  plain tunnel: its driver always asks for TLS, and a URL cannot turn that off.
 - HTTPS services go to `hosts`, so TLS stays end to end with the real name:
   Databricks, Snowflake (`*.snowflakecomputing.com`), BigQuery, GCS, Azure Blob,
   MotherDuck (`*.motherduck.com` and `extensions.duckdb.org`), Weights & Biases,
@@ -204,7 +211,8 @@ who may open it, exactly as for pooled apps.
 
 - The hub sends `POST /apps/sessions` with the viewer's own token;
   `X-External-Kernel-Owner` names the author (the user who saved the version).
-  The body is `session` (the hub's id, which the service must use), `app` (the
+  The body is `session` (the hub's sandbox id, which the service must use and
+  echo: `sb-` and 16 characters of `0-9a-z`, matching `^sb-[0-9a-z]{16}$`), `app` (the
   notebook id), `version`, `notebook`, `files` (`path`, `contentBase64`; the
   version's notebook and `pyproject.toml` over the workspace mirror, at most
   32 MiB), and `environment` (the viewer's integrations, in the workspace
@@ -356,6 +364,12 @@ any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch
 | `DELETE /apps/sessions/{session}`                                                               | `2xx` or `404`                                                                                                                                                                                                                  |
 | `PUT /jobs/{jobKey}` `{"schedule","timezone","enabled"}`                                        | `2xx`; registers or replaces the author's scheduled job (see [Scheduled jobs](#scheduled-jobs))                                                                                                                                 |
 | `DELETE /jobs/{jobKey}`                                                                         | `2xx` or `404`                                                                                                                                                                                                                  |
+
+The service writes a workspace's environment to `.env` and
+`.kira-integrations/`. Its file routes answer `403` for those paths and its
+listings leave them out. The hub never restores them into a workspace, never
+sends them with an app or job, and never deletes the stored copies of a user's
+own `.env` because they are missing from a listing.
 
 The hub stores the file key in the session's origin URL and adds
 `file=<key>` to every proxied request that has no `file` parameter. The hub
