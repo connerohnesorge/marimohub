@@ -19,6 +19,12 @@ import type {
 } from '@marimo-hub/core/ports/integrations';
 import type { ManagedSessionEnvironment } from '@marimo-hub/core/ports/sandbox';
 
+/**
+ * Where the service writes a workspace's environment. Its file routes refuse
+ * these paths and its listings leave them out.
+ */
+export const RESERVED_PATHS: readonly string[] = ['.env', '.kira-integrations'];
+
 export interface KernelEnvironmentFile {
 	/** A file name, optionally under one directory. */
 	name: string;

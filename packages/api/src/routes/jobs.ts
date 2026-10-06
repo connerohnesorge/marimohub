@@ -443,6 +443,8 @@ app.openapi(getKernelRunSpec, async (c) => {
 		deps.services.notebooks,
 		job.project_id,
 		job.notebook_id,
+		undefined,
+		deps.compute.kernelJobs?.reservedPaths,
 	);
 	if (!pinned) {
 		throw new ConflictError(

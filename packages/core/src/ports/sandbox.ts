@@ -224,6 +224,12 @@ export interface ManagedSessionEnvironment {
 export interface SandboxInstance {
 	/** Whether `mountBucket` is a real backend capability rather than a copy fallback signal. */
 	readonly supportsBucketMount?: boolean;
+	/**
+	 * Workspace-relative paths the backend owns (a file, or a directory and all
+	 * below it). It refuses reads and writes there and leaves them out of
+	 * listings, so the hub never restores them and never mirror-deletes them.
+	 */
+	readonly reservedPaths?: readonly string[];
 	resolveProcessPath?(path: string): string;
 	isPortReady?(port: number, options?: Omit<WaitForPortOptions, 'timeout'>): Promise<boolean>;
 	/**
@@ -436,6 +442,8 @@ export interface KernelJobSchedule {
  * request and uses only the author's credential.
  */
 export interface KernelJobs {
+	/** Workspace paths the service owns; a run's files never include them. */
+	readonly reservedPaths?: readonly string[];
 	/** Whether `author`'s scheduled jobs run in their kernel. Throws when that cannot be told. */
 	runsJobsOf(author: EndUserPrincipal): Promise<boolean>;
 	register(author: UserId, jobKey: string, schedule: KernelJobSchedule): Promise<void>;
@@ -465,6 +473,8 @@ export interface KernelAppStart {
  */
 export interface KernelApps {
 	readonly backend: string;
+	/** Workspace paths the service owns; a session's files never include them. */
+	readonly reservedPaths?: readonly string[];
 	/** False sends the author's apps to the hub without asking the kernel service. */
 	mayRunAppsOf(authorEmail: string): boolean;
 	/** Starts the session inside the viewer's request; undefined when the author has no kernel. */

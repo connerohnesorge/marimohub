@@ -364,6 +364,12 @@ any endpoint can answer `401` (bad token), `403 {"error":{"code":"owner_mismatch
 | `PUT /jobs/{jobKey}` `{"schedule","timezone","enabled"}`                                        | `2xx`; registers or replaces the author's scheduled job (see [Scheduled jobs](#scheduled-jobs))                                                                                                                                 |
 | `DELETE /jobs/{jobKey}`                                                                         | `2xx` or `404`                                                                                                                                                                                                                  |
 
+The service writes a workspace's environment to `.env` and
+`.kira-integrations/`. Its file routes answer `403` for those paths and its
+listings leave them out. The hub never restores them into a workspace, never
+sends them with an app or job, and never deletes the stored copies of a user's
+own `.env` because they are missing from a listing.
+
 The hub stores the file key in the session's origin URL and adds
 `file=<key>` to every proxied request that has no `file` parameter. The hub
 strips its own `/proxy/<token>` prefix, because one server serves every

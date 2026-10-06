@@ -56,7 +56,14 @@ export async function startKernelApp(
 	const { version } = await notebooks.getVersion(project.id, nid, versionId);
 	const author = await identities.get(version.author).catch(() => null);
 	if (!author?.email || !kernelApps.mayRunAppsOf(author.email)) return undefined;
-	const pinned = await pinnedNotebookFiles(deps.bucket, notebooks, project.id, nid, versionId);
+	const pinned = await pinnedNotebookFiles(
+		deps.bucket,
+		notebooks,
+		project.id,
+		nid,
+		versionId,
+		kernelApps.reservedPaths,
+	);
 	if (!pinned) return undefined;
 
 	const sessionId = createSessionId();

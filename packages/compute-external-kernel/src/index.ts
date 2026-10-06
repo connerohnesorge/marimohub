@@ -56,7 +56,7 @@ import type {
 import { listFilesFailure, readFileFailure } from '@marimo-hub/core/ports/sandbox';
 import { EndUserCredentials } from './credentials';
 import type { EndUserCredential } from './credentials';
-import { toKernelEnvironment } from './environment';
+import { RESERVED_PATHS, toKernelEnvironment } from './environment';
 
 export { EndUserCredentials, readEndUserCredential } from './credentials';
 export type { EndUserCredential } from './credentials';
@@ -174,6 +174,7 @@ function concatBytes(chunks: Uint8Array[], length: number): Uint8Array {
 
 class ExternalKernelSandbox implements SandboxInstance {
 	readonly supportsBucketMount = false;
+	readonly reservedPaths = RESERVED_PATHS;
 	private fileKey?: string;
 
 	constructor(

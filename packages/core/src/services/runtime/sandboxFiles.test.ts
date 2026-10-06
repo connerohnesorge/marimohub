@@ -81,6 +81,25 @@ describe('restoreWorkspace', () => {
 		expect(fs.has('.git/HEAD')).toBe(false);
 	});
 
+	it("never writes the backend's reserved paths", async () => {
+		const { nb } = nbCtx();
+		const bucket = new MemoryBucket();
+		await bucket.put(nb.workspaceFile('app.py'), 'print(1)');
+		await bucket.put(nb.workspaceFile('.env'), 'TOKEN=user-owned');
+		await bucket.put(nb.workspaceFile('.kira-integrations/pg.json'), '{}');
+		await bucket.put(nb.workspaceFile('docs/.env'), "nested is the user's");
+		const { instance, fs } = makeFsSandbox();
+
+		await restoreWorkspace(
+			Object.assign(instance, { reservedPaths: ['.env', '.kira-integrations'] }),
+			bucket,
+			nb.workspacePrefix,
+			MOUNT,
+		);
+
+		expect([...fs.keys()].sort()).toEqual(['app.py', 'docs/.env']);
+	});
+
 	it('never restores stored Git hooks, at any depth', async () => {
 		const { nb } = nbCtx();
 		const bucket = new MemoryBucket();
@@ -549,6 +568,32 @@ describe('captureWorkspace', () => {
 		// Source files were left untouched by the mirror-delete.
 		expect(await bucket.get(nb.code)).not.toBeNull();
 		expect(await bucket.get(nb.deps)).not.toBeNull();
+	});
+
+	it("keeps the stored copies of the backend's reserved paths, which it never lists", async () => {
+		const { projectId, notebookId, nb } = nbCtx();
+		const bucket = new MemoryBucket();
+		await bucket.put(nb.workspaceFile('.env'), 'TOKEN=user-owned');
+		await bucket.put(nb.workspaceFile('.kira-integrations/pg.json'), '{}');
+		await bucket.put(nb.workspaceFile('data/old.csv'), 'stale');
+		const { instance } = makeFsSandbox({
+			files: { 'notebook.py': 'import marimo', '.env': 'KIRA=its-own' },
+		});
+
+		await captureWorkspace(
+			Object.assign(instance, { reservedPaths: ['.env', '.kira-integrations'] }),
+			bucket,
+			projectId,
+			notebookId,
+			MOUNT,
+			'workspace',
+		);
+
+		expect(decode(await (await bucket.get(nb.workspaceFile('.env')))!.bytes())).toBe(
+			'TOKEN=user-owned',
+		);
+		expect(await bucket.get(nb.workspaceFile('.kira-integrations/pg.json'))).not.toBeNull();
+		expect(await bucket.get(nb.workspaceFile('data/old.csv'))).toBeNull();
 	});
 
 	it('source mode still mirror-deletes stale runtime data (downgrade from workspace)', async () => {

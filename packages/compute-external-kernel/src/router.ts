@@ -12,7 +12,7 @@ import type {
 	SandboxProvider,
 	SandboxRouting,
 } from '@marimo-hub/core/ports/sandbox';
-import { toKernelEnvironment } from './environment';
+import { RESERVED_PATHS, toKernelEnvironment } from './environment';
 import type { ExternalKernelCompute } from './index';
 
 /** The name sessions on the external kernel record as their `compute_backend`. */
@@ -108,10 +108,12 @@ export class ExternalKernelRouter implements SandboxProvider {
 		};
 		this.kernelApps = {
 			backend: EXTERNAL_KERNEL_APP_BACKEND,
+			reservedPaths: RESERVED_PATHS,
 			mayRunAppsOf: (authorEmail) => this.isEnrolled(authorEmail),
 			start: (input) => this.external.startApp(input),
 		};
 		this.kernelJobs = {
+			reservedPaths: RESERVED_PATHS,
 			runsJobsOf: async (author) =>
 				this.isEnrolled(author.email) && (await this.external.hasKernel(author.userId)),
 			register: (author, jobKey, schedule) => this.external.registerJob(author, jobKey, schedule),

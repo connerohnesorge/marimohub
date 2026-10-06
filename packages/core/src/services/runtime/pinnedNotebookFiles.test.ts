@@ -36,6 +36,20 @@ describe('pinnedNotebookFiles', () => {
 		expect(pinned!.files.map((f) => f.path)).not.toContain('.git/hooks/pre-commit');
 	});
 
+	it('leaves out the paths the receiving backend owns', async () => {
+		const { env, pid, nid, nb } = await notebook();
+		await env.bucket.put(nb.workspaceFile('.env'), 'TOKEN=user-owned');
+		await env.bucket.put(nb.workspaceFile('data.csv'), 'a,b');
+
+		const pinned = await pinnedNotebookFiles(env.bucket, env.notebooks, pid, nid, undefined, [
+			'.env',
+		]);
+
+		const sent = pinned!.files.map((f) => f.path);
+		expect(sent).toContain('data.csv');
+		expect(sent).not.toContain('.env');
+	});
+
 	it('is undefined for a notebook synced from Git', async () => {
 		const { env, pid, nid } = await notebook();
 		vi.spyOn(env.notebooks, 'getNotebookSource').mockResolvedValue({
