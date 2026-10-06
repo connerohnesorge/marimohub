@@ -174,8 +174,7 @@ let provider: ExternalKernelCompute;
 
 beforeAll(() => service.start());
 afterAll(() => service.stop());
-afterEach(async () => {
-	await provider?.[Symbol.asyncDispose]();
+afterEach(() => {
 	service.requests.length = 0;
 	service.files.clear();
 	service.workspaces.clear();
@@ -265,7 +264,7 @@ describe('ExternalKernelCompute', () => {
 		);
 	});
 
-	it("refuses a token for someone else in the owner's own request instead of using the cache", async () => {
+	it("refuses another user's token in the owner's request", async () => {
 		makeProvider();
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
 		await asOwner(() => provider.create(SANDBOX, owned).ready!());
@@ -436,6 +435,7 @@ describe('ExternalKernelCompute', () => {
 			managedEnvironment: true,
 			sessionEnvironment: true,
 			exclusiveEditors: true,
+			requestCredentials: true,
 		});
 		expect(service.requests).toHaveLength(0);
 	});
@@ -490,38 +490,27 @@ describe('ExternalKernelCompute', () => {
 		).rejects.toThrow(/edit sessions only/);
 	});
 
-	it("keeps only the owner's token in memory for background calls, until it expires", async () => {
+	it('keeps no token between requests, so work outside a request sends nothing', async () => {
 		makeProvider();
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
 		await asOwner(() => provider.create(SANDBOX, owned).ready!());
-		// A later request from the owner refreshes the cached token.
-		await asOwner(async () => {}, ownerLaterToken);
+		service.requests.length = 0;
 
-		await provider.create(SANDBOX, owned).destroy();
-		const deletes = service.requests.filter((request) => request.method === 'DELETE');
-		expect(deletes.map((request) => request.headers.authorization)).toEqual([
+		await expect(provider.create(SANDBOX, owned).destroy()).rejects.toThrow(
+			/no request from the kernel's owner is in progress/,
+		);
+		expect(service.requests).toEqual([]);
+	});
+
+	it("uses only each request's own token", async () => {
+		makeProvider();
+		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
+		await asOwner(() => provider.create(SANDBOX, owned).ready!());
+		await asOwner(() => provider.create(SANDBOX, owned).destroy(), ownerLaterToken);
+		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
+			`Bearer ${ownerToken}`,
 			`Bearer ${ownerLaterToken}`,
 		]);
-
-		clock = NOW + 7200_000;
-		await expect(provider.create(SANDBOX, owned).destroy()).rejects.toThrow(
-			/No end-user credential/,
-		);
-	});
-
-	it('does not cache tokens of users who never drive a kernel', async () => {
-		makeProvider();
-		await provider.withEndUserRequest(browserRequest(adminToken), admin, async () => {});
-
-		await expect(
-			provider.create(SANDBOX, { owner: { projectId: PROJECT, userId: ADMIN } }).destroy(),
-		).rejects.toThrow(/No end-user credential/);
-	});
-
-	it("uses only a request's own token, never the cache, for the owner's request", async () => {
-		makeProvider();
-		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
-		await asOwner(() => provider.create(SANDBOX, owned).ready!());
 		service.requests.length = 0;
 
 		// An API client signed in without a kernel token gets guidance, not the browser's token.
@@ -529,11 +518,6 @@ describe('ExternalKernelCompute', () => {
 			/carried no x-pantheon-bearer header/,
 		);
 		expect(service.requests).toEqual([]);
-		// Background work still uses the cached token.
-		await provider.create(SANDBOX, owned).destroy();
-		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
-			`Bearer ${ownerToken}`,
-		]);
 	});
 
 	it('treats a token for another audience as missing, so it is never forwarded', async () => {
@@ -553,21 +537,6 @@ describe('ExternalKernelCompute', () => {
 		await asOwner(() => provider.create(SANDBOX, owned).ready!(), hubToken);
 		expect(service.requests.map(({ headers }) => headers.authorization)).toEqual([
 			`Bearer ${hubToken}`,
-		]);
-	});
-
-	it('runs hub-initiated work outside the request, on the cached token', async () => {
-		makeProvider();
-		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
-		await asOwner(() => provider.create(SANDBOX, owned).ready!());
-		service.requests.length = 0;
-
-		await provider.withEndUserRequest(browserRequest(adminToken), admin, () =>
-			provider.outsideRequest(() => provider.create(SANDBOX, owned).destroy()),
-		);
-
-		expect(service.requests.map(({ method, headers }) => [method, headers.authorization])).toEqual([
-			['DELETE', `Bearer ${ownerToken}`],
 		]);
 	});
 
@@ -684,8 +653,8 @@ describe('ExternalKernelCompute', () => {
 	describe("another user's request on the owner's sandbox", () => {
 		const owned = { owner: { projectId: PROJECT, userId: OWNER } };
 
-		/** The owner drove their kernel, so their token is cached for background work. */
-		async function withCachedOwnerToken() {
+		/** The owner drove their kernel first. */
+		async function afterOwnerRequest() {
 			makeProvider();
 			await asOwner(() => provider.create(SANDBOX, owned).ready!());
 			service.requests.length = 0;
@@ -696,7 +665,7 @@ describe('ExternalKernelCompute', () => {
 		}
 
 		it('stops the session through the admin route with only the caller token', async () => {
-			await withCachedOwnerToken();
+			await afterOwnerRequest();
 
 			await asAdmin(() => provider.create(SANDBOX, owned).destroy());
 
@@ -711,8 +680,8 @@ describe('ExternalKernelCompute', () => {
 			expect(stop.headers['x-external-kernel-owner']).toBe(ADMIN_EMAIL);
 		});
 
-		it('never sends any token to the data routes or replays the cached owner token', async () => {
-			await withCachedOwnerToken();
+		it("never sends any token to the data routes or reuses the owner's token", async () => {
+			await afterOwnerRequest();
 			const sandbox = provider.create(SANDBOX, owned);
 			const operations: [string, () => Promise<unknown>][] = [
 				['ready', () => sandbox.ready!()],
@@ -741,7 +710,7 @@ describe('ExternalKernelCompute', () => {
 		});
 
 		it('fails closed when the service refuses the caller as an admin', async () => {
-			await withCachedOwnerToken();
+			await afterOwnerRequest();
 			service.admins.clear();
 
 			await expect(asAdmin(() => provider.create(SANDBOX, owned).destroy())).rejects.toThrow(
@@ -753,7 +722,7 @@ describe('ExternalKernelCompute', () => {
 		});
 
 		it('sends nothing when the caller has no token or the owner cannot be named', async () => {
-			await withCachedOwnerToken();
+			await afterOwnerRequest();
 			await expect(
 				asAdmin(() => provider.create(SANDBOX, owned).destroy(), ''),
 			).rejects.toBeInstanceOf(UnavailableError);
@@ -765,16 +734,6 @@ describe('ExternalKernelCompute', () => {
 				/only the owner can stop/,
 			);
 			expect(service.requests).toEqual([]);
-		});
-
-		it("still lets background work close the workspace with the owner's cached token", async () => {
-			await withCachedOwnerToken();
-
-			await provider.create(SANDBOX, owned).destroy();
-
-			expect(
-				service.requests.map((request) => [request.method, request.headers.authorization]),
-			).toEqual([['DELETE', `Bearer ${ownerToken}`]]);
 		});
 	});
 
@@ -831,7 +790,7 @@ describe('ExternalKernelCompute', () => {
 			expect(target.headers.get('x-external-kernel-owner')).toBe(OWNER_EMAIL);
 		});
 
-		it("never falls back to the owner's cached token for a proxied request", async () => {
+		it("never uses the owner's earlier token for a proxied request", async () => {
 			makeProvider();
 			await asOwner(() =>
 				provider.create(SANDBOX, { owner: { projectId: PROJECT, userId: OWNER } }).ready!(),

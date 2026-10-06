@@ -441,6 +441,13 @@ export interface SandboxProvider {
 		 * sessions are claimed exclusively whatever the deployment's editor sharing.
 		 */
 		exclusiveEditors?: boolean;
+		/**
+		 * The provider keeps no credential between requests: only a request from the
+		 * sandbox's owner (or an admin, to stop it) can reach a sandbox. Background
+		 * sweeps leave these sessions alone, and the owner's own requests save and
+		 * settle them instead (`SessionLifecycleService.attend`).
+		 */
+		requestCredentials?: boolean;
 	};
 	create(id: SandboxId, options?: CreateSandboxOptions): SandboxInstance;
 	/** Attach without creating; a missing or stopped sandbox must fail on first use. */
@@ -460,12 +467,6 @@ export interface SandboxProvider {
 		principal: EndUserPrincipal,
 		next: () => Promise<T>,
 	): Promise<T>;
-	/**
-	 * Run hub-initiated work (a timer, a sweep) outside the request it was
-	 * scheduled from, so it uses only credentials the provider keeps for
-	 * background work.
-	 */
-	outsideRequest?<T>(work: () => Promise<T>): Promise<T>;
 	/**
 	 * Shape the upstream of an authorized `proxy`-exposure kernel request, HTTP or
 	 * WebSocket. Without it the hub forwards to the origin plus the full inbound

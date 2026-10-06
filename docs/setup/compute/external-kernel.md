@@ -76,16 +76,13 @@ Header stripping applies to kernel traffic on both backends.
 - The hub refuses a token that is not a JWT, that has expired, or whose `email`
   claim differs from the signed-in hub user. It does not verify signatures; the
   service does.
-- Background work (periodic capture, idle teardown) needs a token while no
-  request from the owner is in flight. The hub keeps each kernel user's newest
-  token in process memory, keyed by hub user id, and drops it at its `exp`. It
-  never persists the token. Tokens of users who never start a kernel are not
-  kept.
+- The hub keeps no token between requests. A token is used only while the
+  request that carried it, and the work that request started, are running.
+  Work outside a request (the maintenance sweeps, a replica without user
+  traffic) cannot reach a personal kernel and fails with a clear error.
 - A request from anyone but the owner (an `/api/v1` request or an MCP tool
   call) never reaches the owner's kernel. The hub refuses it before sending
-  anything, and it never uses the owner's cached token on that caller's
-  behalf. A token whose email differs from the signed-in user is refused,
-  never replaced by a cached one.
+  anything. A token whose email differs from the signed-in user is refused.
 - Stopping another user's session (`DELETE` on the session, the MCP
   `stop_session` tool, or deleting the notebook or project of a live app or
   temporary session) calls `POST /admin/kernels/stop` with the caller's own
@@ -95,22 +92,21 @@ Header stripping applies to kernel traffic on both backends.
   email in the owner's identity record.
 - The hub then ends the session record but keeps the workspace and the editor
   claim. The saved notebooks reach the hub when the workspace is captured with
-  the owner's own token: at the owner's next start of that notebook, or by
-  background work while the hub holds the owner's token. Only then is the
-  workspace deleted. Until then, other editors see the notebook as still
-  shutting down.
+  the owner's own token: at the owner's next heartbeat from an open editor, or
+  at the owner's next start of that notebook. Only then is the workspace
+  deleted. Until then, other editors see the notebook as still shutting down.
 - Nobody can take over an editor that runs in a personal kernel; the hub does
   not offer it and refuses the request.
 - A proxied browser request always uses the requesting user's own token from
   that request. The hub refuses a request from anyone but the session owner
-  before it reaches the service, and never substitutes a cached token.
+  before it reaches the service.
 - Proxied browser requests lose cookies, `Authorization`, the token header,
   `MARIMOHUB_SANDBOX_STRIP_HEADERS`, and every header that matches
   `MARIMOHUB_SANDBOX_STRIP_HEADER_PREFIXES` before the hub sets the bearer and
   the owner header. The hub applies the same filter to kernels on every other
   backend, so no notebook code sees a viewer's token.
 - Accepted residual risk: a compromised hub process can replay the tokens of
-  users who are using it at that moment, until those tokens expire.
+  requests it is serving, until those tokens expire.
 - The hub writes only the notebook workspace into the kernel: no setup
   commands, kernel auth token, AI token, or marimo configuration. It refuses any
   file path outside the workdir. Integrations and workload identity go to the
@@ -154,8 +150,8 @@ service applies it to that workspace only, never to the user's other notebooks.
   kernel: credential variables are withheld, Athena gets a keyless URL, and the
   Iceberg YAML is sent without its key properties.
 - Before workload identity credentials expire, at 80% of their remaining
-  lifetime, the API pod that started the session renders the environment again
-  and sends it again, until the session ends.
+  lifetime, the owner's next heartbeat renders the environment again and sends
+  it again. An editor that is closed gets no refresh, so its credentials lapse.
 
 These cannot be relayed and are reported instead: Athena or Glue/DynamoDB with
 ambient AWS credentials, AWS profile or role credentials, S3 remote signing,
@@ -168,6 +164,35 @@ DuckLake render nothing for kernels on any backend.
 Each left-out item is logged as `external_kernel_environment_omitted` by name
 and reason, never by value. A `400 invalid_environment` fails the session start.
 
+#### Saving and ending sessions
+
+The maintenance sweeps never touch these sessions, because they hold no token.
+The owner's own requests do the same work instead, with the owner's token:
+
+- Each heartbeat from the owner's open editor (every 2 minutes) saves the
+  notebook once `MARIMOHUB_SESSION_SNAPSHOT_INTERVAL_SECONDS` has passed,
+  extends the session at its deadline while the editor is open, and settles a
+  session that has already ended: it captures the workspace, deletes it, and
+  releases the editor claim.
+- Closing or leaving the editor page sends
+  `POST …/sessions/{sid}/leave-editor`, which saves at once.
+- Starting the notebook again first settles the owner's previous session on it.
+
+What changes compared with other backends:
+
+- Periodic saves happen only while the owner's editor is open. Closing the page
+  saves once; edits made after that in the kernel (for example by a running
+  cell) reach the hub only when the owner comes back.
+- An idle or expired session is captured and its workspace deleted at the
+  owner's next heartbeat or start of that notebook, not by the sweep. Until
+  then it keeps the editor claim, so other users cannot edit the notebook and
+  cannot take it over. The service's own idle policy decides when the kernel
+  itself stops.
+- A session past its authorization deadline is ended without a save at the
+  owner's next request.
+- Connection counts are unknown (the service runs no commands), so a session is
+  extended at its deadline while its heartbeat is fresh.
+
 #### What does not work
 
 - Managed AI and hub-rendered marimo configuration. The hub mints neither for
@@ -179,9 +204,8 @@ and reason, never by value. A `400 invalid_environment` fails the session start.
   backend), sandbox data previews, connection-aware idle detection, proposal
   capture from Git, and MCP code execution.
 - Warm pools and compute profiles.
-- Background capture or teardown after the owner's token expires with no newer
-  request. The call fails and the next sweep retries it once the owner uses the
-  hub again. The service owns the kernel's own lifecycle.
+- Saving, ending, or refreshing credentials without a request from the owner.
+  See [Saving and ending sessions](#saving-and-ending-sessions).
 - Without `MARIMOHUB_COMPUTE_EXTERNAL_FALLBACK_BACKEND`, users without a
   kernel see `no_kernel` and must start their kernel in the external service
   first.

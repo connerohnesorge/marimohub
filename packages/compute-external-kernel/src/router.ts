@@ -89,10 +89,6 @@ export class ExternalKernelRouter implements SandboxProvider {
 		return this.fallback.proxy(request);
 	}
 
-	outsideRequest<T>(work: () => Promise<T>): Promise<T> {
-		return this.external.outsideRequest(work);
-	}
-
 	withEndUserRequest<T>(
 		request: Request,
 		principal: EndUserPrincipal,
@@ -105,9 +101,6 @@ export class ExternalKernelRouter implements SandboxProvider {
 	}
 
 	async [Symbol.asyncDispose](): Promise<void> {
-		await Promise.all([
-			this.external[Symbol.asyncDispose](),
-			this.fallback[Symbol.asyncDispose]?.(),
-		]);
+		await this.fallback[Symbol.asyncDispose]?.();
 	}
 }

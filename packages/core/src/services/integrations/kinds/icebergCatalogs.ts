@@ -33,7 +33,12 @@ const SQL_DEFAULT_PORTS: Record<string, number> = { postgres: 5432, postgresql: 
 
 /** A catalog database or metastore reached through its URI variable, which a relay rewrites. */
 function uriTunnel(instanceName: string, uri: string, defaultPort?: number): IcebergNetwork {
-	const parsed = URL.parse(uri);
+	let parsed: URL | undefined;
+	try {
+		parsed = new URL(uri);
+	} catch {
+		parsed = undefined;
+	}
 	const port = Number(parsed?.port) || defaultPort;
 	if (!parsed?.hostname || !port) {
 		return { unrelayable: ['the catalog URI names no host and port'] };

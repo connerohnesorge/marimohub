@@ -495,9 +495,9 @@ class ExternalKernelSandbox implements SandboxInstance {
 	}
 
 	/**
-	 * The owner, or background work with the owner's cached token, closes the
-	 * workspace. Anyone else's request goes to the admin stop route with that
-	 * caller's own token, which the service accepts only from its admins.
+	 * The owner's request closes the workspace. Anyone else's request goes to the
+	 * admin stop route with that caller's own token, which the service accepts
+	 * only from its admins.
 	 */
 	async destroy(): Promise<void> {
 		const requester = this.provider.credentials.foreignRequester(this.owner);
@@ -532,6 +532,7 @@ export class ExternalKernelCompute implements SandboxProvider {
 		managedEnvironment: true,
 		sessionEnvironment: true,
 		exclusiveEditors: true,
+		requestCredentials: true,
 	} as const;
 	readonly baseUrl: string;
 	readonly workdir: string;
@@ -642,10 +643,6 @@ export class ExternalKernelCompute implements SandboxProvider {
 		return this.credentials.run(request, principal, next);
 	}
 
-	outsideRequest<T>(work: () => Promise<T>): Promise<T> {
-		return this.credentials.outsideRequest(work);
-	}
-
 	async resolveKernelProxyTarget(input: KernelProxyRequest): Promise<KernelProxyTarget> {
 		if (input.principal.userId !== input.ownerUserId) {
 			throw new ForbiddenError(
@@ -682,10 +679,6 @@ export class ExternalKernelCompute implements SandboxProvider {
 		headers.set('authorization', `Bearer ${credential.token}`);
 		headers.set(OWNER_HEADER, credential.email);
 		return { url: target.toString(), headers };
-	}
-
-	async [Symbol.asyncDispose](): Promise<void> {
-		this.credentials.clear();
 	}
 
 	async call(url: string, options: CallOptions): Promise<Response> {

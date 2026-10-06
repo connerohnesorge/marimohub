@@ -4934,6 +4934,45 @@
 			"accepts_idempotency_key": false
 		},
 		{
+			"id": "sessions.leaveEditor",
+			"command": ["sessions", "leaveEditor"],
+			"method": "POST",
+			"path": "/api/v1/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave-editor",
+			"summary": "Report that an editor is closing",
+			"description": "Saves the notebook now when only the session owner's requests can reach its kernel, because the hub cannot save it later. Otherwise does nothing.",
+			"parameters": [
+				{
+					"name": "nid",
+					"cli_name": "nid",
+					"in": "path",
+					"required": true,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "pid",
+					"cli_name": "pid",
+					"in": "path",
+					"required": true,
+					"value_type": "string",
+					"repeatable": false
+				},
+				{
+					"name": "sid",
+					"cli_name": "sid",
+					"in": "path",
+					"required": true,
+					"value_type": "string",
+					"repeatable": false
+				}
+			],
+			"destructive": false,
+			"paginated": false,
+			"response_kind": "json",
+			"accepts_if_match": false,
+			"accepts_idempotency_key": false
+		},
+		{
 			"id": "sessions.list",
 			"command": ["sessions", "list"],
 			"method": "GET",

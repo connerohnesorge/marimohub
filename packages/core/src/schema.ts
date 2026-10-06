@@ -820,6 +820,11 @@ export const SessionSchema = z.looseObject({
 	 */
 	admin_stopped_at: z.iso.datetime().optional(),
 	/**
+	 * When the credentials delivered to a kernel that keeps them must be sent
+	 * again. The owner's next request at or after this time re-renders them.
+	 */
+	environment_refresh_at: z.iso.datetime().optional(),
+	/**
 	 * A discard-only session. This includes viewer throwaways and explicit
 	 * temporary editors: nothing is written back at teardown — no version,
 	 * HTML/session snapshot, workspace mirror, or FS snapshot. Absent means the

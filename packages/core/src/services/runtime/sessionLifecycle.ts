@@ -112,6 +112,33 @@ export interface SweepResult {
 	reclaimed: number;
 }
 
+interface UpkeepContext {
+	now: number;
+	liveNotebooks: ReadonlySet<NotebookId>;
+	readPool: ReturnType<AppPoolStore['reader']>;
+	thumbnailDeadlineAt: number;
+	result: SweepResult;
+	saveNow?: boolean;
+}
+
+function emptySweepResult(): SweepResult {
+	return { snapshotted: 0, extended: 0, reapedExpired: 0, reapedIdle: 0, reclaimed: 0 };
+}
+
+function needsUpkeep(s: Session): boolean {
+	return (
+		!!s.sandbox_id && (s.status === 'running' || (isTerminal(s.status) && !s.sandbox_reclaimed_at))
+	);
+}
+
+function livePersistingNotebooks(sessions: readonly Session[]): Set<NotebookId> {
+	return new Set(
+		sessions
+			.filter((s) => (s.status === 'running' || s.status === 'starting') && sessionPersistsEdits(s))
+			.map((s) => s.notebook_id),
+	);
+}
+
 /**
  * Record-driven session lifecycle sweep: graceful lifetime teardown, idle
  * reaping, connection-aware deadline extension, and the periodic snapshot floor.
@@ -154,7 +181,6 @@ export class SessionLifecycleService {
 	async sweep(now = Date.now()): Promise<SweepResult> {
 		const thumbnailDeadlineAt = Date.now() + THUMBNAIL_MAINTENANCE_BUDGET_MS;
 		const sessions = await this.sessions.listSessions();
-		const readPool = new AppPoolStore(this.bucket).reader();
 		// Candidates: `running` sessions, plus any terminal record still holding a
 		// sandbox_id that has not been confirmed destroyed. The `expired` ones are
 		// the stale-heartbeat reaper's leak (record flipped, sandbox never touched);
@@ -164,193 +190,21 @@ export class SessionLifecycleService {
 		// its provision is in flight (a snapshot mid-restore could mirror-delete
 		// not-yet-restored workspace files); a wedged provision reaches this sweep
 		// once the stale reaper flips it to `expired`.
-		const candidates = sessions.filter(
-			(s) =>
-				s.sandbox_id &&
-				(s.status === 'running' || (isTerminal(s.status) && !s.sandbox_reclaimed_at)),
-		);
+		const candidates = sessions.filter(needsUpkeep);
 		// Notebooks that currently have a live PERSISTING session. An older (expired)
 		// sandbox for one of these must never commit: its content is stale by
 		// definition and would clobber the live session's head version. App sessions
 		// never write back, so they must not count — a long-lived shared app must
 		// not suppress the save of an expired edit session on its notebook.
-		const liveNotebooks = new Set<NotebookId>(
-			sessions
-				.filter(
-					(s) => (s.status === 'running' || s.status === 'starting') && sessionPersistsEdits(s),
-				)
-				.map((s) => s.notebook_id),
-		);
-
-		const result: SweepResult = {
-			snapshotted: 0,
-			extended: 0,
-			reapedExpired: 0,
-			reapedIdle: 0,
-			reclaimed: 0,
-		};
+		const liveNotebooks = livePersistingNotebooks(sessions);
+		const readPool = new AppPoolStore(this.bucket).reader();
+		const result = emptySweepResult();
 
 		await mapWithConcurrency(candidates, SESSION_SWEEP_CONCURRENCY, async (s) => {
 			try {
-				const sandbox = sessionCompute(this.compute, s).create(s.sandbox_id!, {
-					owner: sessionOwner(s),
-				});
-
-				const pool = sessionMode(s) === 'app' ? await readPool(s.project_id, s.notebook_id) : null;
-				if (pool) expireAppPresence(pool, now);
-				const poolMember = pool?.members.find((member) => member.session_id === s.session_id);
-				const hasAppUsers = pool !== null && appOccupancy(pool, s.session_id) > 0;
-				const heartbeatStale =
-					!hasAppUsers &&
-					now - Date.parse(s.last_heartbeat) > this.cfg.idleTimeoutMsByMode[sessionMode(s)];
-				const pastDeadline = !!s.expires_at && now >= Date.parse(s.expires_at);
-				const pastAuthorizationDeadline = isPastAuthorizationDeadline(s, now);
-
-				// Only probe when a reap decision hinges on it (cost control: one exec per
-				// near-deadline/stale session per sweep, nothing for healthy ones). Only an
-				// `expired` record can still have a live kernel among the terminal ones.
-				// Informational counts for apps/shared editors feed the "~N connected"
-				// stop-confirm hint, but refresh on the slower cadence below.
-				let active: number | null = null;
-				const reapCandidate =
-					s.status === 'expired' ||
-					(s.status === 'running' && (pastDeadline || pastAuthorizationDeadline || heartbeatStale));
-				const connectionCountCheck =
-					s.status === 'running' &&
-					(sessionModePolicy(s).sharedApp ||
-						(sessionPersistsEdits(s) && (s.editor_sandbox_sharing ?? 'shared') === 'shared'));
-				const connectionCountDue =
-					this.cfg.connectionAware &&
-					connectionCountCheck &&
-					this.connectionProbeBudget.consume(s.session_id, now);
-				if (this.cfg.connectionAware && (reapCandidate || connectionCountDue)) {
-					active = await this.probe(sandbox, kernelBasePathFromUrl(s.sandbox_url));
-					// A null probe is "unknown" — leave the last stamp rather than write a
-					// lie. An unchanged count is skipped too: no CAS/ETag churn against
-					// heartbeats for the steady state.
-					if (connectionCountCheck && active !== null && active !== s.active_connections) {
-						await this.sessions
-							.markConnections(s.project_id, s.session_id, active, new Date(now).toISOString())
-							.catch(() => {});
-					}
-				}
-				const hasEditors = (active ?? 0) > 0;
-
-				if (isTerminal(s.status)) {
-					const superseded = liveNotebooks.has(s.notebook_id);
-					if (s.status === 'expired' && hasEditors && !pastAuthorizationDeadline) {
-						// Editors can still be connected to an `expired` record's kernel —
-						// heartbeats travel browser→API while the websocket goes browser→kernel
-						// directly, so an API-path outage or a throttled background tab stalls
-						// heartbeats without ending the session. Keep the kernel alive for them
-						// (the snapshot below bounds loss) and reclaim once they disconnect —
-						// but never snapshot once a newer live session owns the notebook.
-						if (superseded) return;
-					} else {
-						// A provision that outlived the heartbeat TTL can be flipped `expired`
-						// while still restoring files — leave it alone until safely past the
-						// provision window (a teardown mid-restore mirror-deletes bucket keys).
-						// A `ready` marimo surface is only set after restore completes, so a
-						// record that reached it and has no connected editors can go now:
-						// otherwise it keeps the editor claim and blocks reopening the notebook.
-						const idleAfterProvision = s.surfaces?.marimo?.status === 'ready' && active === 0;
-						if (
-							s.status === 'expired' &&
-							!pastAuthorizationDeadline &&
-							!idleAfterProvision &&
-							now - Date.parse(s.started_at) < RECLAIM_PROVISION_GRACE_MS
-						) {
-							return;
-						}
-						// The kernel service saved an admin-stopped session's notebooks into its
-						// workspace; they reach the bucket only through this capture.
-						const save =
-							(s.status === 'expired' || s.admin_stopped_at !== undefined) &&
-							!pastAuthorizationDeadline &&
-							!superseded &&
-							sessionPersistsEdits(s);
-						// Only `expired` reclaims are counted: for terminated/failed records the
-						// confirm-destroy is a routine no-op, not a recovered leak.
-						if (
-							(await this.retirer.reclaim(s, save, thumbnailDeadlineAt)) &&
-							s.status === 'expired'
-						) {
-							result.reclaimed++;
-						}
-						return;
-					}
-				} else {
-					// A null probe is "unknown", not "no editors": with a fresh heartbeat,
-					// extend at the deadline rather than killing a possibly-live editor on a
-					// probe hiccup. Idle reaping already requires the stale heartbeat as
-					// corroboration that the kernel is really gone.
-					const mayHaveEditors =
-						hasEditors ||
-						hasAppUsers ||
-						(this.cfg.connectionAware && active === null && !heartbeatStale);
-
-					if (pastAuthorizationDeadline) {
-						if (await this.gracefulTeardown(s, false, thumbnailDeadlineAt)) result.reapedExpired++;
-						return;
-					}
-
-					if (!poolMember && heartbeatStale && !hasEditors) {
-						if (await this.gracefulTeardown(s, true, thumbnailDeadlineAt)) result.reapedIdle++;
-						return;
-					}
-					if (pastDeadline) {
-						if (mayHaveEditors) {
-							// Slide the deadline; the user keeps editing. Falls through to the
-							// snapshot so long-lived sessions still hit the durability floor.
-							await this.sessions
-								.extendExpiry(
-									s.project_id,
-									s.session_id,
-									new Date(now + this.cfg.extensionMs).toISOString(),
-								)
-								.catch(() => {});
-							result.extended++;
-						} else if (!poolMember) {
-							// Pool retirement must CAS-fence admission before teardown.
-							if (await this.gracefulTeardown(s, true, thumbnailDeadlineAt)) result.reapedExpired++;
-							return;
-						}
-					}
-				}
-
-				// Periodic snapshot floor: even a residual hard kill (the provider
-				// backstop, node loss, OOM) loses at most one interval of notebook edits.
-				// Source-only (`includeWorkspace: false`): a full workspace mirror every
-				// interval is too expensive; the mirror still refreshes at teardown.
-				const snapshotDueByCadence =
-					sessionPersistsEdits(s) &&
-					this.cfg.snapshotIntervalMs > 0 &&
-					now - Date.parse(s.last_snapshot_at ?? s.started_at) >= this.cfg.snapshotIntervalMs;
-				const snapshotDue =
-					snapshotDueByCadence && (await this.sessions.ownsEditorClaim(s).catch(() => false));
-				if (snapshotDue) {
-					const saved = await this.provisioner
-						.captureSession(
-							sandbox,
-							this.notebooks,
-							this.bucket,
-							s.project_id,
-							s.notebook_id,
-							s.user_id,
-							this.cfg.persistWorkspace,
-							this.cfg.workdir,
-							{ includeWorkspace: false },
-						)
-						.catch(() => null); // failed save: retry next sweep
-					if (saved !== null) {
-						// Also advances for remote sources (saved === false, nothing to
-						// persist), so they are re-checked per interval, not per sweep.
-						await this.sessions
-							.markSnapshotted(s.project_id, s.session_id, new Date(now).toISOString())
-							.catch(() => {});
-						if (saved) result.snapshotted++;
-					}
-				}
+				// Only the owner's own requests can reach these; see `attend`.
+				if (sessionCompute(this.compute, s).capabilities?.requestCredentials) return;
+				await this.upkeep(s, { now, liveNotebooks, readPool, thumbnailDeadlineAt, result });
 			} catch (error) {
 				logOperationalError(
 					'session_sweep_failed',
@@ -361,6 +215,192 @@ export class SessionLifecycleService {
 		});
 
 		return result;
+	}
+
+	/**
+	 * The sweep's upkeep for one session, run inside a request from its owner:
+	 * for a provider with `requestCredentials` this is the only time the hub can
+	 * save, extend, or settle the session. `saveNow` saves without waiting for
+	 * the snapshot cadence (the owner's editor is leaving).
+	 */
+	async attend(
+		session: Session,
+		options: { saveNow?: boolean; now?: number } = {},
+	): Promise<SweepResult> {
+		const now = options.now ?? Date.now();
+		const result = emptySweepResult();
+		if (!needsUpkeep(session)) return result;
+		const projectSessions = await this.sessions.listActiveByProject(session.project_id);
+		await this.upkeep(session, {
+			now,
+			liveNotebooks: livePersistingNotebooks(projectSessions),
+			readPool: new AppPoolStore(this.bucket).reader(),
+			thumbnailDeadlineAt: Date.now() + THUMBNAIL_MAINTENANCE_BUDGET_MS,
+			result,
+			saveNow: options.saveNow,
+		});
+		return result;
+	}
+
+	private async upkeep(s: Session, ctx: UpkeepContext): Promise<void> {
+		const { now, liveNotebooks, readPool, thumbnailDeadlineAt, result } = ctx;
+		const sandbox = sessionCompute(this.compute, s).create(s.sandbox_id!, {
+			owner: sessionOwner(s),
+		});
+
+		const pool = sessionMode(s) === 'app' ? await readPool(s.project_id, s.notebook_id) : null;
+		if (pool) expireAppPresence(pool, now);
+		const poolMember = pool?.members.find((member) => member.session_id === s.session_id);
+		const hasAppUsers = pool !== null && appOccupancy(pool, s.session_id) > 0;
+		const heartbeatStale =
+			!hasAppUsers &&
+			now - Date.parse(s.last_heartbeat) > this.cfg.idleTimeoutMsByMode[sessionMode(s)];
+		const pastDeadline = !!s.expires_at && now >= Date.parse(s.expires_at);
+		const pastAuthorizationDeadline = isPastAuthorizationDeadline(s, now);
+
+		// Only probe when a reap decision hinges on it (cost control: one exec per
+		// near-deadline/stale session per sweep, nothing for healthy ones). Only an
+		// `expired` record can still have a live kernel among the terminal ones.
+		// Informational counts for apps/shared editors feed the "~N connected"
+		// stop-confirm hint, but refresh on the slower cadence below.
+		let active: number | null = null;
+		const reapCandidate =
+			s.status === 'expired' ||
+			(s.status === 'running' && (pastDeadline || pastAuthorizationDeadline || heartbeatStale));
+		const connectionCountCheck =
+			s.status === 'running' &&
+			(sessionModePolicy(s).sharedApp ||
+				(sessionPersistsEdits(s) && (s.editor_sandbox_sharing ?? 'shared') === 'shared'));
+		const connectionCountDue =
+			this.cfg.connectionAware &&
+			connectionCountCheck &&
+			this.connectionProbeBudget.consume(s.session_id, now);
+		if (this.cfg.connectionAware && (reapCandidate || connectionCountDue)) {
+			active = await this.probe(sandbox, kernelBasePathFromUrl(s.sandbox_url));
+			// A null probe is "unknown" — leave the last stamp rather than write a
+			// lie. An unchanged count is skipped too: no CAS/ETag churn against
+			// heartbeats for the steady state.
+			if (connectionCountCheck && active !== null && active !== s.active_connections) {
+				await this.sessions
+					.markConnections(s.project_id, s.session_id, active, new Date(now).toISOString())
+					.catch(() => {});
+			}
+		}
+		const hasEditors = (active ?? 0) > 0;
+
+		if (isTerminal(s.status)) {
+			const superseded = liveNotebooks.has(s.notebook_id);
+			if (s.status === 'expired' && hasEditors && !pastAuthorizationDeadline) {
+				// Editors can still be connected to an `expired` record's kernel —
+				// heartbeats travel browser→API while the websocket goes browser→kernel
+				// directly, so an API-path outage or a throttled background tab stalls
+				// heartbeats without ending the session. Keep the kernel alive for them
+				// (the snapshot below bounds loss) and reclaim once they disconnect —
+				// but never snapshot once a newer live session owns the notebook.
+				if (superseded) return;
+			} else {
+				// A provision that outlived the heartbeat TTL can be flipped `expired`
+				// while still restoring files — leave it alone until safely past the
+				// provision window (a teardown mid-restore mirror-deletes bucket keys).
+				// A `ready` marimo surface is only set after restore completes, so a
+				// record that reached it and has no connected editors can go now:
+				// otherwise it keeps the editor claim and blocks reopening the notebook.
+				const idleAfterProvision = s.surfaces?.marimo?.status === 'ready' && active === 0;
+				if (
+					s.status === 'expired' &&
+					!pastAuthorizationDeadline &&
+					!idleAfterProvision &&
+					now - Date.parse(s.started_at) < RECLAIM_PROVISION_GRACE_MS
+				) {
+					return;
+				}
+				// The kernel service saved an admin-stopped session's notebooks into its
+				// workspace; they reach the bucket only through this capture.
+				const save =
+					(s.status === 'expired' || s.admin_stopped_at !== undefined) &&
+					!pastAuthorizationDeadline &&
+					!superseded &&
+					sessionPersistsEdits(s);
+				// Only `expired` reclaims are counted: for terminated/failed records the
+				// confirm-destroy is a routine no-op, not a recovered leak.
+				if ((await this.retirer.reclaim(s, save, thumbnailDeadlineAt)) && s.status === 'expired') {
+					result.reclaimed++;
+				}
+				return;
+			}
+		} else {
+			// A null probe is "unknown", not "no editors": with a fresh heartbeat,
+			// extend at the deadline rather than killing a possibly-live editor on a
+			// probe hiccup. Idle reaping already requires the stale heartbeat as
+			// corroboration that the kernel is really gone.
+			const mayHaveEditors =
+				hasEditors ||
+				hasAppUsers ||
+				(this.cfg.connectionAware && active === null && !heartbeatStale);
+
+			if (pastAuthorizationDeadline) {
+				if (await this.gracefulTeardown(s, false, thumbnailDeadlineAt)) result.reapedExpired++;
+				return;
+			}
+
+			if (!poolMember && heartbeatStale && !hasEditors) {
+				if (await this.gracefulTeardown(s, true, thumbnailDeadlineAt)) result.reapedIdle++;
+				return;
+			}
+			if (pastDeadline) {
+				if (mayHaveEditors) {
+					// Slide the deadline; the user keeps editing. Falls through to the
+					// snapshot so long-lived sessions still hit the durability floor.
+					await this.sessions
+						.extendExpiry(
+							s.project_id,
+							s.session_id,
+							new Date(now + this.cfg.extensionMs).toISOString(),
+						)
+						.catch(() => {});
+					result.extended++;
+				} else if (!poolMember) {
+					// Pool retirement must CAS-fence admission before teardown.
+					if (await this.gracefulTeardown(s, true, thumbnailDeadlineAt)) result.reapedExpired++;
+					return;
+				}
+			}
+		}
+
+		// Periodic snapshot floor: even a residual hard kill (the provider
+		// backstop, node loss, OOM) loses at most one interval of notebook edits.
+		// Source-only (`includeWorkspace: false`): a full workspace mirror every
+		// interval is too expensive; the mirror still refreshes at teardown.
+		const snapshotDueByCadence =
+			sessionPersistsEdits(s) &&
+			(ctx.saveNow === true ||
+				(this.cfg.snapshotIntervalMs > 0 &&
+					now - Date.parse(s.last_snapshot_at ?? s.started_at) >= this.cfg.snapshotIntervalMs));
+		const snapshotDue =
+			snapshotDueByCadence && (await this.sessions.ownsEditorClaim(s).catch(() => false));
+		if (snapshotDue) {
+			const saved = await this.provisioner
+				.captureSession(
+					sandbox,
+					this.notebooks,
+					this.bucket,
+					s.project_id,
+					s.notebook_id,
+					s.user_id,
+					this.cfg.persistWorkspace,
+					this.cfg.workdir,
+					{ includeWorkspace: false },
+				)
+				.catch(() => null); // failed save: retry next sweep
+			if (saved !== null) {
+				// Also advances for remote sources (saved === false, nothing to
+				// persist), so they are re-checked per interval, not per sweep.
+				await this.sessions
+					.markSnapshotted(s.project_id, s.session_id, new Date(now).toISOString())
+					.catch(() => {});
+				if (saved) result.snapshotted++;
+			}
+		}
 	}
 
 	/**

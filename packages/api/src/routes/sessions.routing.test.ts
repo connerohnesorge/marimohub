@@ -45,7 +45,12 @@ function routedCompute(select: (owner: EndUserPrincipal) => Promise<string | und
 		}),
 	};
 	const personalProvider = fakeComputeFrom(personalInstance, {
-		capabilities: { multiPort: false, managedEnvironment: true, exclusiveEditors: true },
+		capabilities: {
+			multiPort: false,
+			managedEnvironment: true,
+			exclusiveEditors: true,
+			requestCredentials: true,
+		},
 	});
 	const regularCreate = vi.spyOn(regularProvider, 'create');
 	const personalCreate = vi.spyOn(personalProvider, 'create');

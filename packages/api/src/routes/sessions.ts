@@ -50,6 +50,7 @@ import {
 	saga,
 	MODE_POLICY,
 	isPastAuthorizationDeadline,
+	isTerminal,
 	SandboxProvisioner,
 	SESSION_MODES,
 	SessionId,
@@ -81,7 +82,12 @@ import {
 } from '../notifications';
 import type { ApiDeps, SandboxConfig } from '../context';
 import { mergeSessionEnv, resolveFederatedEnv, resolveIntegrationRender } from '../sandboxEnv';
-import { scheduleEnvironmentRefresh, sessionEnvExpiry } from '../sessionEnvironmentRefresh';
+import {
+	attendOwnerSession,
+	environmentRefreshAt,
+	needsOwnerRequests,
+	settleOwnerSession,
+} from '../ownerSessionUpkeep';
 import {
 	assertProjectRole,
 	assertSessionAccess,
@@ -290,6 +296,22 @@ const leaveAppVisit = createRoute({
 		200: jsonContent(SuccessResponseSchema, 'Visit released'),
 		...commonErrors(),
 		...errorResponses(400, 403, 404),
+	},
+});
+
+const leaveEditorSession = createRoute({
+	method: 'post',
+	path: '/projects/{pid}/notebooks/{nid}/sessions/{sid}/leave-editor',
+	operationId: 'sessions.leaveEditor',
+	tags: ['Sessions'],
+	summary: 'Report that an editor is closing',
+	description:
+		"Saves the notebook now when only the session owner's requests can reach its kernel, because the hub cannot save it later. Otherwise does nothing.",
+	request: { params: SessionIdParam },
+	responses: {
+		200: jsonContent(SuccessResponseSchema, 'Noted'),
+		...commonErrors(),
+		...errorResponses(403, 404),
 	},
 });
 
@@ -1530,13 +1552,19 @@ export async function startNotebookSession(input: {
 		? (await sessions.findReusableEditor(pid, nid, user.id, 'exclusive', true)).session
 		: undefined;
 
-	// An administrator stopped this user's editor in their kernel, which saved it
-	// into the workspace. Capture it with the owner's own credential before this
-	// session takes the claim, or a newer session would supersede it.
+	// The owner's previous editor ended (expired, or an administrator stopped it)
+	// in a kernel only the owner's requests reach. Capture it with this request's
+	// token before this session takes the claim, or the new session would
+	// supersede it.
 	if (mode === 'edit' && !ephemeral && existingEditorClaim?.session_id) {
 		const holder = await sessions.getSession(pid, existingEditorClaim.session_id).catch(() => null);
-		if (holder?.user_id === user.id && holder.admin_stopped_at && !holder.sandbox_reclaimed_at) {
-			await sessionRetirer(deps).reclaim(holder, true);
+		if (
+			holder?.user_id === user.id &&
+			isTerminal(holder.status) &&
+			!holder.sandbox_reclaimed_at &&
+			needsOwnerRequests(deps, holder)
+		) {
+			await settleOwnerSession(deps, holder);
 		}
 	}
 
@@ -2100,34 +2128,12 @@ export async function startNotebookSession(input: {
 		observer.flush();
 	}
 
-	// Federated credentials expire mid-session; a provider that keeps them gets a
-	// fresh environment before they do.
-	const credentialsExpire = sessionEnvExpiry(deliveredEnv);
-	if (managedEnvironment && !withholdSessionEnv && credentialsExpire !== undefined && updated) {
-		const workload = { kind: 'session' as const, id: updated.session_id };
-		scheduleEnvironmentRefresh(
-			{
-				deps,
-				session: updated,
-				resolve: async () => {
-					const [wifEnv, integrationEnv] = await Promise.all([
-						resolveFederatedEnv(deps, {
-							project,
-							workload,
-							restricted: restrictedViewerCredentials,
-						}),
-						resolveIntegrationRender(deps, {
-							projectId: pid,
-							workload,
-							principal: { userId: user.id, email: user.email },
-							restricted: restrictedViewerCredentials,
-						}),
-					]);
-					return integrationEnv ? mergeSessionEnv(integrationEnv, wifEnv ?? {}) : wifEnv;
-				},
-			},
-			credentialsExpire,
-		);
+	// Credentials a kernel keeps expire mid-session; the owner's requests send
+	// them again from this time on (see `attendOwnerSession`).
+	const refreshAt =
+		managedEnvironment && !withholdSessionEnv ? environmentRefreshAt(deliveredEnv) : undefined;
+	if (refreshAt && updated) {
+		updated = await sessions.scheduleEnvironmentRefresh(pid, updated.session_id, refreshAt);
 	}
 
 	if (replacingAfterTakeover && temporaryToRetire) {
@@ -2278,6 +2284,7 @@ app.openapi(heartbeatSession, async (c) => {
 	}
 
 	const updated = await sessions.heartbeat(pid, sid);
+	attendOwnerSession(deps, { project, user, session: updated });
 	const response = toSessionResponse(
 		updated,
 		await sessionGrantsFor(project, user, updated, deps, labels),
@@ -2288,6 +2295,21 @@ app.openapi(heartbeatSession, async (c) => {
 		{ success: true, data: terminalApp ? withoutConnectionUrls(response) : response },
 		200,
 	);
+});
+
+app.openapi(leaveEditorSession, async (c) => {
+	const deps = c.get('deps');
+	const user = c.get('user');
+	const { pid, nid, sid } = c.req.valid('param');
+	const project = await loadSessionProject(deps.services.projects, pid, user, deps);
+	const session = await deps.services.sessions.getSession(pid, sid);
+	if (session.notebook_id !== nid || sessionMode(session) !== 'edit') {
+		throw new NotFoundError(`Session ${sid} not found`);
+	}
+	const labels = await assertSessionNotebookVisible(deps, project, session, user);
+	await assertSessionAccess(project, session, user, deps, labels);
+	attendOwnerSession(deps, { project, user, session, saveNow: true });
+	return c.json({ success: true as const }, 200);
 });
 
 app.openapi(leaveAppVisit, async (c) => {

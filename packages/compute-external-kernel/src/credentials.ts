@@ -20,14 +20,8 @@ interface RequestContext {
 	read: ReadResult;
 }
 
-interface CacheEntry {
-	credential: EndUserCredential;
-	timer: ReturnType<typeof setTimeout>;
-}
-
 // A token this close to expiry could lapse in flight to the external service.
 const EXPIRY_SKEW_MS = 30_000;
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const REJECTION_DETAIL: Record<Rejection, (header: string) => string> = {
 	missing: (header) => `the request carried no ${header} header`,
@@ -85,15 +79,12 @@ export function readEndUserCredential(
 }
 
 /**
- * The only credentials this adapter ever sends: each user's own token, taken
- * from their requests. A token stays in memory, keyed by hub user id, solely so
- * background work on that user's sandboxes (capture, idle teardown) can run
- * while it is unexpired. It is never persisted and is dropped at `exp`, and it
- * is never used while a request from anyone else is in progress.
+ * The only credentials this adapter ever sends: each user's own token, read from
+ * the request in progress. Nothing is kept between requests, so work outside a
+ * request (the maintenance sweeps, timers) cannot reach a personal kernel.
  */
 export class EndUserCredentials {
 	private readonly context = new AsyncLocalStorage<RequestContext>();
-	private readonly cache = new Map<UserId, CacheEntry>();
 
 	constructor(
 		readonly header: string,
@@ -103,63 +94,44 @@ export class EndUserCredentials {
 
 	run<T>(request: Request, principal: EndUserPrincipal, next: () => Promise<T>): Promise<T> {
 		const read = readEndUserCredential(request, this.header, principal, this.now(), this.audience);
-		// Refresh only users who already drive a kernel, so the cache never grows
-		// to every user who merely browses the hub.
-		if ('credential' in read && this.cache.has(principal.userId)) {
-			this.remember(principal.userId, read.credential);
-		}
 		return this.context.run({ userId: principal.userId, read }, next);
 	}
 
-	/**
-	 * The credential for a proxied kernel request: always the caller's own token
-	 * from this request, never a cached one.
-	 */
+	/** The credential for a proxied kernel request: the caller's own token from this request. */
 	forRequest(request: Request, principal: EndUserPrincipal): EndUserCredential {
 		const read = readEndUserCredential(request, this.header, principal, this.now(), this.audience);
 		if ('rejection' in read) return this.unavailable(read.rejection);
-		this.remember(principal.userId, read.credential);
 		return read.credential;
 	}
 
 	/**
-	 * The credential for an operation on `owner`'s sandbox: within a request, that
-	 * request's own token, which must be the owner's; with no request in progress
-	 * (background work), the owner's cached token. A request never borrows the
-	 * cache, so an API or MCP client needs its own token, and a request from
-	 * anyone else is refused before anything is sent.
+	 * The credential for an operation on `owner`'s sandbox: the token of the
+	 * request in progress, which must be the owner's. A request from anyone else
+	 * is refused before anything is sent.
 	 */
 	forOwner(owner: UserId | undefined): EndUserCredential {
 		const context = this.context.getStore();
-		const userId = owner ?? context?.userId;
-		if (context && userId && context.userId !== userId) {
+		if (!context) return this.unavailable(undefined);
+		if (owner && context.userId !== owner) {
 			throw new ForbiddenError(
 				"This session runs in another user's personal kernel; only its owner can reach it.",
 			);
 		}
-		if (context) {
-			if ('rejection' in context.read) return this.unavailable(context.read.rejection);
-			const { credential } = context.read;
-			if (credential.expiresAt - EXPIRY_SKEW_MS <= this.now()) return this.unavailable('expired');
-			this.remember(context.userId, credential);
-			return credential;
-		}
-		return (userId ? this.lookup(userId) : undefined) ?? this.unavailable(undefined);
-	}
-
-	/** Run hub-initiated work (a timer, a sweep) without the request it was scheduled from. */
-	outsideRequest<T>(work: () => Promise<T>): Promise<T> {
-		return this.context.exit(work);
+		return this.current(context);
 	}
 
 	/**
 	 * The caller's own credential when a request from someone other than `owner`
-	 * is in progress; undefined for the owner's own request and for background
-	 * work. Only the service's admin route accepts it for another user's kernel.
+	 * is in progress; undefined for the owner's own request and outside requests.
+	 * Only the service's admin route accepts it for another user's kernel.
 	 */
 	foreignRequester(owner: UserId | undefined): EndUserCredential | undefined {
 		const context = this.context.getStore();
 		if (!context || !owner || context.userId === owner) return;
+		return this.current(context);
+	}
+
+	private current(context: RequestContext): EndUserCredential {
 		if ('rejection' in context.read) return this.unavailable(context.read.rejection);
 		if (context.read.credential.expiresAt - EXPIRY_SKEW_MS <= this.now()) {
 			return this.unavailable('expired');
@@ -167,43 +139,10 @@ export class EndUserCredentials {
 		return context.read.credential;
 	}
 
-	clear(): void {
-		for (const entry of this.cache.values()) clearTimeout(entry.timer);
-		this.cache.clear();
-	}
-
-	private lookup(userId: UserId): EndUserCredential | undefined {
-		const entry = this.cache.get(userId);
-		if (!entry) return;
-		if (entry.credential.expiresAt - EXPIRY_SKEW_MS > this.now()) return entry.credential;
-		this.forget(userId, entry);
-		return;
-	}
-
-	private remember(userId: UserId, credential: EndUserCredential): void {
-		const existing = this.cache.get(userId);
-		if (existing && existing.credential.expiresAt >= credential.expiresAt) return;
-		if (existing) clearTimeout(existing.timer);
-		const entry: CacheEntry = {
-			credential,
-			timer: setTimeout(
-				() => this.forget(userId, entry),
-				Math.min(MAX_TIMER_MS, Math.max(0, credential.expiresAt - this.now())),
-			),
-		};
-		entry.timer.unref?.();
-		this.cache.set(userId, entry);
-	}
-
-	private forget(userId: UserId, entry: CacheEntry): void {
-		clearTimeout(entry.timer);
-		if (this.cache.get(userId) === entry) this.cache.delete(userId);
-	}
-
 	private unavailable(rejection: Rejection | undefined): never {
 		const reason = rejection
 			? REJECTION_DETAIL[rejection](this.header)
-			: 'the kernel owner has no request in progress and no unexpired token in this hub process';
+			: "no request from the kernel's owner is in progress";
 		const message = `No end-user credential for the external kernel: ${reason}. The hub holds no service credential for external kernels.`;
 		throw rejection === 'email_mismatch'
 			? new ForbiddenError(message)
