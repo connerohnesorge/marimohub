@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ForbiddenError, UnavailableError, ValidationError } from '../../errors';
+import { emptySessionNetwork } from '../integrations/network';
 import { createNotebookId, createProjectId, createSandboxId, createVersionId } from '../../ids';
 import { paths } from '../../paths';
 import type {
@@ -223,14 +224,20 @@ describe('SandboxProvisioner with a managed-environment provider', () => {
 
 		it('hands it the whole environment before launch and writes none of it', async () => {
 			const { instance, calls, delivered, order, provider } = delivering();
-			const tunnel = { host: 'db', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] };
-			const access = {
-				endpoint: 'https://s3.example',
-				region: 'us-east-1',
-				accessKeyId: 'AK',
-				secretAccessKey: 'SK',
-				credentialVars: ['AWS_ACCESS_KEY_ID'],
-				endpointVars: [],
+			const network = {
+				...emptySessionNetwork(),
+				tunnels: [{ host: 'db', port: 5432, hostVars: ['PGHOST'], portVars: [], urlVars: [] }],
+				aws: [
+					{
+						services: ['s3'],
+						region: 'us-east-1',
+						accessKeyId: 'AK',
+						secretAccessKey: 'SK',
+						credentialVars: ['AWS_ACCESS_KEY_ID'],
+						endpointVars: [],
+					},
+				],
+				unrelayable: [{ integration: 'mongo', reason: 'srv' }],
 			};
 
 			await new SandboxProvisioner(provider).provision(
@@ -238,9 +245,7 @@ describe('SandboxProvisioner with a managed-environment provider', () => {
 					vars: { PGHOST: 'db', SHARED: 'forced' },
 					defaults: { SHARED: 'fallback', ONLY_DEFAULT: 'd' },
 					files: [{ path: '/tmp/marimohub-integrations/x.pem', content: 'pem' }],
-					tunnels: [tunnel],
-					s3: [access],
-					unrelayable: [{ integration: 'mongo', reason: 'srv' }],
+					network,
 				}),
 			);
 
@@ -248,9 +253,7 @@ describe('SandboxProvisioner with a managed-environment provider', () => {
 				{
 					vars: { PGHOST: 'db', SHARED: 'forced', ONLY_DEFAULT: 'd' },
 					files: [{ path: '/tmp/marimohub-integrations/x.pem', content: 'pem' }],
-					tunnels: [tunnel],
-					s3: [access],
-					unrelayable: [{ integration: 'mongo', reason: 'srv' }],
+					network,
 				},
 			]);
 			expect(order).toEqual(['environment', 'launch']);

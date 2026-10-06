@@ -4,6 +4,7 @@ import {
 	AWS_REGION_REGEX,
 	awsAuthSchema,
 	connectionUrl,
+	connectionVar,
 	hostField,
 	portField,
 	renderConnection,
@@ -119,21 +120,24 @@ export const athena = defineIntegration({
 		// which is what makes it fall through to boto3's provider chain.
 		// China is its own partition, with its own DNS suffix; GovCloud is not.
 		const suffix = config.region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com';
-		const url = connectionUrl({
-			scheme: 'awsathena+rest',
-			host: `athena.${config.region}.${suffix}`,
-			port: 443,
-			segments: [config.database],
-			username: staticAuth?.access_key_id ?? '',
-			password: staticAuth?.secret_access_key ?? '',
-			query: {
-				s3_staging_dir: config.s3_staging_dir,
-				work_group: config.workgroup,
-				catalog_name: config.catalog,
-				aws_session_token: staticAuth?.session_token,
-			},
-		});
-		return renderConnection({
+		const athenaUrl = (credentials?: typeof staticAuth) =>
+			connectionUrl({
+				scheme: 'awsathena+rest',
+				host: `athena.${config.region}.${suffix}`,
+				port: 443,
+				segments: [config.database],
+				username: credentials?.access_key_id ?? '',
+				password: credentials?.secret_access_key ?? '',
+				query: {
+					s3_staging_dir: config.s3_staging_dir,
+					work_group: config.workgroup,
+					catalog_name: config.catalog,
+					aws_session_token: credentials?.session_token,
+				},
+			});
+		const url = athenaUrl(staticAuth);
+		const field = (name: string) => connectionVar('ATHENA', instanceName, name);
+		const output = renderConnection({
 			tool: 'ATHENA',
 			dir: 'athena',
 			instanceName,
@@ -151,5 +155,32 @@ export const athena = defineIntegration({
 			secretFields: ['URL', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'SESSION_TOKEN'],
 			manifestExtra: { region: config.region, auth_method: config.auth.method },
 		});
+		if (!staticAuth) {
+			return {
+				...output,
+				unrelayable: 'ambient AWS credentials do not reach a relayed kernel',
+			};
+		}
+		// Athena writes query results to the staging bucket, so the same keys sign S3.
+		return {
+			...output,
+			aws: [
+				{
+					services: ['athena', 's3'],
+					region: config.region,
+					accessKeyId: staticAuth.access_key_id,
+					secretAccessKey: staticAuth.secret_access_key,
+					...(staticAuth.session_token ? { sessionToken: staticAuth.session_token } : {}),
+					credentialVars: [
+						field('ACCESS_KEY_ID'),
+						field('SECRET_ACCESS_KEY'),
+						field('SESSION_TOKEN'),
+						field('URL'),
+					],
+					endpointVars: [],
+				},
+			],
+			relayEnv: { [field('URL')]: athenaUrl() },
+		};
 	},
 });

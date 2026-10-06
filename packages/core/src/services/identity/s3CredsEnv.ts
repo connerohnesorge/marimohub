@@ -4,7 +4,8 @@
  * Pure — no I/O.
  */
 import type { TempS3Creds } from '../../ports/credentialBroker';
-import type { SessionS3Access } from '../../ports/integrations';
+import type { SessionNetwork } from '../../ports/integrations';
+import { emptySessionNetwork } from '../integrations/network';
 
 /** The region an S3 SDK signs for when none is configured. */
 export const DEFAULT_S3_REGION = 'us-east-1';
@@ -46,24 +47,28 @@ export function s3CredsToSessionEnv(
 	creds: TempS3Creds,
 	endpoint?: string,
 	region?: string,
-): { vars: Record<string, string>; s3: SessionS3Access[] } {
-	const signingRegion = region ?? DEFAULT_S3_REGION;
+): { vars: Record<string, string>; network: SessionNetwork } {
 	return {
 		vars: s3CredsToEnv(creds, endpoint, region),
-		s3: [
-			{
-				endpoint: endpoint ?? awsS3Endpoint(signingRegion),
-				region: signingRegion,
-				accessKeyId: creds.accessKeyId,
-				secretAccessKey: creds.secretAccessKey,
-				...(creds.sessionToken ? { sessionToken: creds.sessionToken } : {}),
-				credentialVars: [
-					'AWS_ACCESS_KEY_ID',
-					'AWS_SECRET_ACCESS_KEY',
-					...(creds.sessionToken ? ['AWS_SESSION_TOKEN'] : []),
-				],
-				endpointVars: ['AWS_ENDPOINT_URL_S3'],
-			},
-		],
+		network: {
+			...emptySessionNetwork(),
+			aws: [
+				{
+					services: ['s3'],
+					region: region ?? DEFAULT_S3_REGION,
+					...(endpoint ? { endpoint } : {}),
+					accessKeyId: creds.accessKeyId,
+					secretAccessKey: creds.secretAccessKey,
+					...(creds.sessionToken ? { sessionToken: creds.sessionToken } : {}),
+					...(creds.expiration ? { expiresAt: creds.expiration } : {}),
+					credentialVars: [
+						'AWS_ACCESS_KEY_ID',
+						'AWS_SECRET_ACCESS_KEY',
+						...(creds.sessionToken ? ['AWS_SESSION_TOKEN'] : []),
+					],
+					endpointVars: ['AWS_ENDPOINT_URL_S3'],
+				},
+			],
+		},
 	};
 }

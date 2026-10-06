@@ -2,7 +2,13 @@ import { z } from 'zod';
 import { defineIntegration, envSegment, HOSTNAME_REGEX } from '../sdk';
 import { ValidationError } from '../../../errors';
 import { zSecret } from '../secretFields';
-import { AMBIENT_ENV_DESCRIPTION, connectionUrl, renderConnection, renderFile } from './common';
+import {
+	AMBIENT_ENV_DESCRIPTION,
+	connectionUrl,
+	GOOGLE_AUTH_HOSTS,
+	renderConnection,
+	renderFile,
+} from './common';
 
 const bigQueryConfig = z.strictObject({
 	// Sits in the authority position of the rendered URL, so it carries the same
@@ -97,7 +103,7 @@ export const bigquery = defineIntegration({
 			segments: [config.dataset],
 			query: { credentials_path: credentialsPath, location: config.location },
 		});
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'BIGQUERY',
 			dir: 'bigquery',
 			instanceName,
@@ -117,5 +123,13 @@ export const bigquery = defineIntegration({
 			files,
 			manifestExtra: { project_id: config.project_id, auth_method: config.auth.method },
 		});
+		return {
+			...output,
+			hosts: [
+				{ host: 'bigquery.googleapis.com' },
+				{ host: 'bigquerystorage.googleapis.com' },
+				...GOOGLE_AUTH_HOSTS,
+			],
+		};
 	},
 });

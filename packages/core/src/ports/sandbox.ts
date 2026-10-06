@@ -2,7 +2,7 @@ import type { NotebookId, ProjectId, SandboxId, UserId } from '../ids';
 import type { SessionMode } from '../constants';
 import type { Millis } from '../duration';
 import type { Timings } from '../timing';
-import type { SessionS3Access, SessionTunnel, SessionUnrelayable } from './integrations';
+import type { SessionNetwork } from './integrations';
 
 export type ExecResult =
 	| { success: true; stdout: string; stderr: string }
@@ -213,10 +213,7 @@ export interface ManagedSessionEnvironment {
 	vars: Record<string, string>;
 	/** Absolute sandbox paths; variables may name them. */
 	files: { path: string; content: string }[];
-	tunnels: SessionTunnel[];
-	/** In ascending precedence: a later set wins where only one can apply. */
-	s3: SessionS3Access[];
-	unrelayable: SessionUnrelayable[];
+	network: SessionNetwork;
 }
 
 export interface SandboxInstance {

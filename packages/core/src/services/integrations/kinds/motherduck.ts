@@ -37,7 +37,7 @@ export const motherduck = defineIntegration({
 		// connection string instead.
 		const query = new URLSearchParams({ motherduck_token: config.token });
 		if (config.saas_mode) query.set('saas_mode', 'true');
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'MOTHERDUCK',
 			dir: 'motherduck',
 			instanceName,
@@ -50,5 +50,14 @@ export const motherduck = defineIntegration({
 			secretFields: ['URL', 'TOKEN'],
 			manifestExtra: { database: config.database },
 		});
+		return {
+			...output,
+			hosts: [
+				{ host: '*.motherduck.com' },
+				// DuckDB installs the motherduck extension on first `md:` connect.
+				{ host: 'extensions.duckdb.org' },
+				{ host: 'extensions.duckdb.org', port: 80 },
+			],
+		};
 	},
 });

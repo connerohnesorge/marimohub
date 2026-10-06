@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createIntegrationId, createServices } from '@marimo-hub/core';
+import { createIntegrationId, createServices, emptySessionNetwork } from '@marimo-hub/core';
 import type {
 	ManagedSessionEnvironment,
 	MarimoLaunchSpec,
@@ -148,7 +148,7 @@ describe('Session start on a managed-environment compute provider', () => {
 			vars: { MARIMOHUB_PG_DB_HOST: 'db.internal' },
 			attachments: [pin],
 			warnings: [],
-			tunnels: [tunnel],
+			network: { ...emptySessionNetwork(), tunnels: [tunnel] },
 		}));
 		const deps = {
 			ai: {
@@ -194,8 +194,8 @@ describe('Session start on a managed-environment compute provider', () => {
 			AWS_ENDPOINT_URL_S3: 'https://objects.example',
 			AWS_REGION: 'us-east-1',
 		});
-		expect(environment.tunnels).toEqual([tunnel]);
-		expect(environment.s3).toMatchObject([
+		expect(environment.network.tunnels).toEqual([tunnel]);
+		expect(environment.network.aws).toMatchObject([
 			{ endpoint: 'https://objects.example', accessKeyId: 'CWAK', sessionToken: 'tok' },
 		]);
 		// No marimo config (AI token) and no kernel token in either channel.

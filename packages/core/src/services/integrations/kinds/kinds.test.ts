@@ -3912,16 +3912,8 @@ describe('network declarations', () => {
 			['MARIMOHUB_TRINO_PROD_URL'],
 		],
 		[pyspark, 'spark.internal', 15002, [], [], ['MARIMOHUB_PYSPARK_PROD_REMOTE', 'SPARK_REMOTE']],
-		[
-			databricks,
-			'dbc-1234abcd-5678.cloud.databricks.com',
-			443,
-			['MARIMOHUB_DATABRICKS_PROD_HOST'],
-			[],
-			['MARIMOHUB_DATABRICKS_PROD_URL'],
-		],
 	] as const)(
-		'%#: declares the server each client dials and the variables that carry it',
+		'%#: tunnels the server each client dials through the variables that carry it',
 		(def, host, port, hostVars, portVars, urlVars) => {
 			const output = renderFixture(def as IntegrationDefinition);
 			expect(output.tunnels).toEqual([{ host, port, hostVars, portVars, urlVars }]);
@@ -3932,60 +3924,178 @@ describe('network declarations', () => {
 		},
 	);
 
-	it('declares a plain mongodb host but not a DNS-seeded mongodb+srv cluster', () => {
-		const plain = renderFixture(mongodb, { scheme: 'mongodb', port: 27018 });
-		expect(plain.tunnels).toEqual([
-			{
-				host: 'cluster0.abcde.mongodb.net',
-				port: 27018,
-				hostVars: ['MARIMOHUB_MONGODB_PROD_HOST'],
-				portVars: ['MARIMOHUB_MONGODB_PROD_PORT'],
-				urlVars: ['MARIMOHUB_MONGODB_PROD_URL'],
-			},
-		]);
-		const srv = renderFixture(mongodb);
-		expect(srv.tunnels).toBeUndefined();
-		expect(srv.unrelayable).toMatch(/DNS SRV/);
+	it('names MongoDB URLs, mongodb+srv included, for the relay to resolve', () => {
+		for (const scheme of ['mongodb+srv', 'mongodb']) {
+			const output = renderFixture(mongodb, { scheme });
+			expect(output.mongodb).toEqual([{ urlVar: 'MARIMOHUB_MONGODB_PROD_URL' }]);
+			expect(output.tunnels).toBeUndefined();
+			expect(output.unrelayable).toBeUndefined();
+		}
 	});
 
-	it('marks Snowflake unrelayable: its host comes from the account identifier', () => {
-		const output = renderFixture(snowflake);
+	it.each([
+		[databricks, {}, ['dbc-1234abcd-5678.cloud.databricks.com']],
+		[snowflake, {}, ['*.snowflakecomputing.com']],
+		[
+			bigquery,
+			{},
+			[
+				'bigquery.googleapis.com',
+				'bigquerystorage.googleapis.com',
+				'oauth2.googleapis.com',
+				'www.googleapis.com',
+			],
+		],
+		[gcs, {}, ['storage.googleapis.com', 'oauth2.googleapis.com', 'www.googleapis.com']],
+		[azureBlob, {}, ['lakeaccount.blob.core.windows.net', 'lakeaccount.dfs.core.windows.net']],
+		[
+			azureBlob,
+			{ auth: { method: 'service_principal', tenant_id: 't', client_id: 'c', client_secret: 's' } },
+			[
+				'lakeaccount.blob.core.windows.net',
+				'lakeaccount.dfs.core.windows.net',
+				'login.microsoftonline.com',
+			],
+		],
+		[motherduck, {}, ['*.motherduck.com', 'extensions.duckdb.org', 'extensions.duckdb.org']],
+		[wandb, {}, ['api.wandb.ai']],
+		[huggingFace, {}, ['huggingface.co', '*.huggingface.co', '*.hf.co']],
+		[huggingFace, { endpoint: 'https://hub.internal' }, ['hub.internal']],
+	] as const)('%#: reaches its vendor by host name', (def, overrides, hosts) => {
+		const output = renderFixture(def as IntegrationDefinition, overrides);
+		expect(output.hosts?.map(({ host }) => host)).toEqual(hosts);
 		expect(output.tunnels).toBeUndefined();
-		expect(output.unrelayable).toMatch(/account identifier/);
 	});
 
 	it('declares static S3 credentials and every variable that carries them', () => {
-		const output = renderFixture(s3);
-		expect(output.s3).toEqual({
-			endpoint: 'https://minio.internal:9000',
-			region: 'us-east-1',
-			accessKeyId: 'AKIAEXAMPLE',
-			secretAccessKey: 's3-secret',
-			credentialVars: [
-				'MARIMOHUB_S3_PROD_ACCESS_KEY_ID',
-				'MARIMOHUB_S3_PROD_SECRET_ACCESS_KEY',
-				'MARIMOHUB_S3_PROD_SESSION_TOKEN',
-				'AWS_ACCESS_KEY_ID',
-				'AWS_SECRET_ACCESS_KEY',
-				'AWS_SESSION_TOKEN',
+		expect(renderFixture(s3).aws).toEqual([
+			{
+				services: ['s3'],
+				region: 'us-east-1',
+				endpoint: 'https://minio.internal:9000',
+				accessKeyId: 'AKIAEXAMPLE',
+				secretAccessKey: 's3-secret',
+				credentialVars: [
+					'MARIMOHUB_S3_PROD_ACCESS_KEY_ID',
+					'MARIMOHUB_S3_PROD_SECRET_ACCESS_KEY',
+					'MARIMOHUB_S3_PROD_SESSION_TOKEN',
+					'AWS_ACCESS_KEY_ID',
+					'AWS_SECRET_ACCESS_KEY',
+					'AWS_SESSION_TOKEN',
+				],
+				endpointVars: ['AWS_ENDPOINT_URL_S3', 'MARIMOHUB_S3_PROD_ENDPOINT_URL'],
+			},
+		]);
+		const aws = renderFixture(s3, { endpoint_url: undefined, ambient_env: false });
+		expect(aws.aws?.[0]).not.toHaveProperty('endpoint');
+		expect(renderFixture(s3, { auth: { method: 'ambient' } }).aws).toBeUndefined();
+	});
+
+	it('signs Athena and its result bucket with brokered keys, and gives the kernel a keyless URL', () => {
+		const output = renderFixture(athena);
+		expect(output.aws).toEqual([
+			expect.objectContaining({
+				services: ['athena', 's3'],
+				region: 'us-east-1',
+				accessKeyId: 'AKIAATHENA',
+				credentialVars: expect.arrayContaining(['MARIMOHUB_ATHENA_PROD_URL']),
+			}),
+		]);
+		const keyless = output.relayEnv?.MARIMOHUB_ATHENA_PROD_URL;
+		expect(keyless).toMatch(/^awsathena\+rest:\/\/:@athena\.us-east-1\.amazonaws\.com:443\//);
+		expect(keyless).not.toContain('athena-secret');
+		expect(renderFixture(athena, { auth: { method: 'ambient' } }).unrelayable).toMatch(/ambient/);
+	});
+
+	describe('Iceberg catalogs', () => {
+		it('tunnels SQL and Hive catalogs through a URI variable that overrides the YAML', () => {
+			const sql = renderFixture(icebergSql);
+			expect(sql.tunnels).toEqual([
+				{
+					host: 'db.internal',
+					port: 5432,
+					hostVars: [],
+					portVars: [],
+					urlVars: ['PYICEBERG_CATALOG__PROD__URI'],
+				},
+			]);
+			expect(sql.relayEnv).toEqual({
+				PYICEBERG_CATALOG__PROD__URI:
+					'postgresql+psycopg2://catalog:secret@db.internal:5432/iceberg',
+			});
+			expect(
+				renderFixture(icebergSql, { uri: 'sqlite:///tmp/catalog.db' }).tunnels,
+			).toBeUndefined();
+			expect(renderFixture(icebergHive).tunnels?.[0]).toMatchObject({
+				host: 'hive.internal',
+				port: 9083,
+			});
+			expect(
+				renderFixture(icebergHive, { kerberos: { enabled: true, service_name: 'hive' } })
+					.unrelayable,
+			).toMatch(/Kerberos/);
+		});
+
+		it('brokers Glue and DynamoDB keys and drops them from the relayed YAML', () => {
+			const glue = renderFixture(icebergGlue, {
+				credentials: { method: 'static', access_key_id: 'GLUEKEY', secret_access_key: 'g' },
+				unified_credentials: {
+					method: 'static',
+					access_key_id: 'CLIENTKEY',
+					secret_access_key: 'c',
+				},
+			});
+			expect(glue.aws?.map(({ services, accessKeyId }) => [services, accessKeyId])).toEqual([
+				[['glue'], 'GLUEKEY'],
+				[['s3'], 'CLIENTKEY'],
+			]);
+			expect(glue.relayYamlKeys).toEqual(
+				expect.arrayContaining(['glue.access-key-id', 'client.access-key-id']),
+			);
+			const shared = renderFixture(icebergDynamoDb, {
+				unified_credentials: {
+					method: 'static',
+					access_key_id: 'CLIENTKEY',
+					secret_access_key: 'c',
+				},
+			});
+			expect(shared.aws?.map(({ services }) => services)).toEqual([['dynamodb', 's3']]);
+			expect(renderFixture(icebergGlue).unrelayable).toMatch(/glue with ambient/);
+		});
+
+		it('reaches a REST catalog, its token endpoint, and its storage by host', () => {
+			const rest = renderFixture(icebergRest);
+			expect(rest.hosts?.map(({ host }) => host)).toEqual(['catalog.internal', 'idp.internal']);
+			expect(rest.unrelayable).toBeUndefined();
+			expect(
+				renderFixture(icebergRest, { auth: { method: 'sigv4', region: 'us-east-1' } }).unrelayable,
+			).toMatch(/SigV4/);
+			const tls = renderFixture(icebergRest, { tls: { ca_bundle: 'PEM' } });
+			expect(tls.relayYamlKeys).toContain('ssl');
+			expect(tls.unrelayable).toMatch(/TLS/);
+			expect(renderFixture(icebergBigQuery).hosts?.map(({ host }) => host)).toContain(
+				'bigquery.googleapis.com',
+			);
+		});
+
+		it.each([
+			[
+				{ scheme: 'gcs' },
+				['storage.googleapis.com', 'oauth2.googleapis.com', 'www.googleapis.com'],
+				undefined,
 			],
-			endpointVars: ['AWS_ENDPOINT_URL_S3', 'MARIMOHUB_S3_PROD_ENDPOINT_URL'],
-		});
-		const aws = renderFixture(s3, {
-			endpoint_url: undefined,
-			region: 'cn-north-1',
-			ambient_env: false,
-		});
-		expect(aws.s3).toMatchObject({
-			endpoint: 'https://s3.cn-north-1.amazonaws.com.cn',
-			region: 'cn-north-1',
-			credentialVars: [
-				'MARIMOHUB_S3_PROD_ACCESS_KEY_ID',
-				'MARIMOHUB_S3_PROD_SECRET_ACCESS_KEY',
-				'MARIMOHUB_S3_PROD_SESSION_TOKEN',
+			[
+				{ scheme: 'adls', account_name: 'lake' },
+				['lake.blob.core.windows.net', 'lake.dfs.core.windows.net'],
+				undefined,
 			],
-			endpointVars: ['MARIMOHUB_S3_PROD_ENDPOINT_URL'],
+			[{ scheme: 'adls' }, undefined, /not named/],
+			[{ scheme: 'hdfs', host: 'nn.internal' }, undefined, /datanode/],
+			[{ scheme: 'hugging_face' }, ['huggingface.co', '*.huggingface.co', '*.hf.co'], undefined],
+		] as const)('maps %j storage', (storage, hosts, unrelayable) => {
+			const output = renderFixture(icebergSql, { storage });
+			expect(output.hosts?.map(({ host }) => host)).toEqual(hosts);
+			if (unrelayable) expect(output.unrelayable).toMatch(unrelayable);
 		});
-		expect(renderFixture(s3, { auth: { method: 'ambient' } }).s3).toBeUndefined();
 	});
 });

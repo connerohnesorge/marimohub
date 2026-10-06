@@ -1,15 +1,22 @@
 import { z } from 'zod';
 import { ValidationError } from '../../../errors';
+import type { SessionAwsAccess } from '../../../ports/integrations';
+import { DEFAULT_S3_REGION } from '../../identity/s3CredsEnv';
+import { envSegment } from '../sdk';
 import type { RenderOutput } from '../sdk';
 import { zSecret } from '../secretFields';
 import { INTEGRATIONS_DIR } from '../bundle';
 import { normalizeIcebergRestStorage } from './icebergStorageUtils';
 import {
 	awsStaticCredentials,
+	entraLoginHost,
+	GOOGLE_AUTH_HOSTS,
 	httpUrlField,
+	huggingFaceHosts,
 	isIpAddressHost,
 	isValidS3Bucket,
 	s3BrokerReadLocationsSchema,
+	urlHost,
 } from './common';
 
 export { HTTP_URL_REGEX } from './common';
@@ -524,6 +531,186 @@ export function storageProperties(
 	}
 }
 
+/** A catalog's network declarations; several `unrelayable` reasons are joined. */
+export type IcebergNetwork = Pick<
+	RenderOutput,
+	'tunnels' | 'hosts' | 'aws' | 'relayEnv' | 'relayYamlKeys'
+> & { unrelayable?: string[] };
+
+export function mergeIcebergNetworks(...networks: IcebergNetwork[]): IcebergNetwork {
+	const merged: Required<IcebergNetwork> = {
+		tunnels: [],
+		hosts: [],
+		aws: [],
+		relayEnv: {},
+		relayYamlKeys: [],
+		unrelayable: [],
+	};
+	for (const network of networks) {
+		merged.tunnels.push(...(network.tunnels ?? []));
+		merged.hosts.push(...(network.hosts ?? []));
+		merged.aws.push(...(network.aws ?? []));
+		Object.assign(merged.relayEnv, network.relayEnv);
+		merged.relayYamlKeys.push(...(network.relayYamlKeys ?? []));
+		merged.unrelayable.push(...(network.unrelayable ?? []));
+	}
+	return merged;
+}
+
+/**
+ * The variable PyIceberg reads for one property of this catalog; it takes
+ * precedence over `.pyiceberg.yaml`, so a relay can rewrite it.
+ */
+export function pyicebergCatalogVar(instanceName: string, property: string): string {
+	return `PYICEBERG_CATALOG__${envSegment(instanceName)}__${property.toUpperCase().replaceAll('.', '__').replaceAll('-', '_')}`;
+}
+
+function awsKeyProperties(prefix: string): string[] {
+	return [`${prefix}.access-key-id`, `${prefix}.secret-access-key`, `${prefix}.session-token`];
+}
+
+/** One brokered AWS credential set read from catalog properties `<prefix>.*`. */
+export function awsCatalogAccess(
+	services: string[],
+	region: string | undefined,
+	credentials: { access_key_id: string; secret_access_key: string; session_token?: string },
+	endpoint?: string,
+): SessionAwsAccess {
+	return {
+		services,
+		region: region ?? DEFAULT_S3_REGION,
+		...(endpoint ? { endpoint } : {}),
+		accessKeyId: credentials.access_key_id,
+		secretAccessKey: credentials.secret_access_key,
+		...(credentials.session_token ? { sessionToken: credentials.session_token } : {}),
+		credentialVars: [],
+		endpointVars: [],
+	};
+}
+
+/**
+ * What FileIO storage reaches. `clientCredentials` are the catalog's shared
+ * `client.*` keys, which S3 uses when the storage names none of its own.
+ */
+export function storageNetwork(
+	storage: z.infer<typeof icebergStorageSchema> | z.infer<typeof icebergRestStorageSchema>,
+	clientCredentials?: { services: string[]; region?: string; access: SessionAwsAccess },
+): IcebergNetwork {
+	switch (storage.scheme) {
+		case 'catalog':
+			if (!('vended_s3' in storage)) return {};
+			if (!storage.vended_s3) {
+				return { unrelayable: ['the catalog names its storage only at run time'] };
+			}
+			{
+				const endpoint = urlHost(storage.vended_s3.endpoint);
+				return {
+					hosts: [
+						endpoint,
+						...(storage.vended_s3.force_virtual_addressing
+							? [{ host: `*.${endpoint.host}`, port: endpoint.port }]
+							: []),
+					],
+				};
+			}
+		case 's3': {
+			if (storage.role_arn || storage.signer || storage.signer_uri) {
+				return {
+					unrelayable: ['S3 role assumption and remote signing need credentials in the kernel'],
+				};
+			}
+			if (storage.credentials.method === 'profile') {
+				return { unrelayable: ['S3 profile credentials live in an AWS config file'] };
+			}
+			const keys = [...awsKeyProperties('s3'), 's3.endpoint'];
+			if (storage.credentials.method === 'static') {
+				return {
+					aws: [awsCatalogAccess(['s3'], storage.region, storage.credentials, storage.endpoint)],
+					relayYamlKeys: keys,
+				};
+			}
+			return clientCredentials?.services.includes('s3') ? { relayYamlKeys: keys } : {};
+		}
+		case 'gcs':
+			return {
+				hosts: [
+					{ host: 'storage.googleapis.com' },
+					...GOOGLE_AUTH_HOSTS,
+					...(storage.service_host ? [urlHost(storage.service_host)] : []),
+				],
+			};
+		case 'adls': {
+			const account = storage.account_name;
+			const hosts = [storage.blob_storage_authority, storage.dfs_storage_authority]
+				.filter((authority): authority is string => !!authority)
+				.map((authority) => ({ host: authority.split(':')[0] }));
+			if (hosts.length === 0 && storage.account_host) hosts.push({ host: storage.account_host });
+			if (hosts.length === 0 && account) {
+				hosts.push(
+					{ host: `${account}.blob.core.windows.net` },
+					{ host: `${account}.dfs.core.windows.net` },
+				);
+			}
+			if (storage.auth.method === 'service_principal') {
+				hosts.push({ host: entraLoginHost('core.windows.net')! });
+			}
+			return hosts.length > 0
+				? { hosts }
+				: { unrelayable: ['the ADLS account is not named, so its hosts are unknown'] };
+		}
+		case 'hdfs':
+			return { unrelayable: ['HDFS clients connect to every datanode the namenode names'] };
+		case 'hugging_face':
+			return { hosts: huggingFaceHosts(storage.endpoint) };
+	}
+}
+
+/** Shared `client.*` keys as one brokered set, and the YAML properties that carry them. */
+export function clientAwsNetwork(
+	credentials: z.infer<typeof unifiedAwsCredentialsSchema>,
+	services: string[],
+): { network: IcebergNetwork; client?: { services: string[]; access: SessionAwsAccess } } {
+	switch (credentials.method) {
+		case 'none':
+			return { network: {} };
+		case 'static': {
+			const access = awsCatalogAccess(services, credentials.region, credentials);
+			return {
+				network: { aws: [access], relayYamlKeys: awsKeyProperties('client') },
+				client: { services, access },
+			};
+		}
+		case 'profile':
+		case 'role':
+			return {
+				network: {
+					unrelayable: ['AWS profile or role credentials need AWS configuration in the kernel'],
+				},
+			};
+	}
+}
+
+/** Service-scoped `<prefix>.*` keys as one brokered set, when they are static. */
+export function serviceAwsNetwork(
+	prefix: string,
+	service: string,
+	region: string | undefined,
+	credentials: z.infer<typeof awsCredentialsSchema>,
+	endpoint?: string,
+): IcebergNetwork {
+	switch (credentials.method) {
+		case 'ambient':
+			return {};
+		case 'static':
+			return {
+				aws: [awsCatalogAccess([service], region, credentials, endpoint)],
+				relayYamlKeys: [...awsKeyProperties(prefix), ...(endpoint ? [`${prefix}.endpoint`] : [])],
+			};
+		case 'profile':
+			return { unrelayable: ['AWS profile credentials live in an AWS config file'] };
+	}
+}
+
 export function renderIcebergCatalog(options: {
 	instanceName: string;
 	catalogType: string;
@@ -531,9 +718,18 @@ export function renderIcebergCatalog(options: {
 	descriptor?: Record<string, unknown>;
 	rootProperties?: Record<string, unknown>;
 	files?: { path: string; content: string }[];
+	network?: IcebergNetwork;
 }): RenderOutput {
 	const { instanceName, catalogType, properties, descriptor, rootProperties, files } = options;
+	const { unrelayable, ...network } = options.network ?? {};
+	const declared = Object.fromEntries(
+		Object.entries(network).filter(([, value]) =>
+			Array.isArray(value) ? value.length > 0 : Object.keys(value ?? {}).length > 0,
+		),
+	);
 	return {
+		...declared,
+		...(unrelayable?.length ? { unrelayable: unrelayable.join('; ') } : {}),
 		env: { PYICEBERG_HOME: INTEGRATIONS_DIR },
 		yamlFiles: [
 			{

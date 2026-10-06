@@ -1,5 +1,6 @@
 import {
 	exchangeFederatedStorageSessionEnv,
+	mergeSessionNetworks,
 	UnavailableError,
 	ValidationError,
 } from '@marimo-hub/core';
@@ -22,15 +23,14 @@ import { errorMetadata, logEvent } from './log';
  * same resolved secrets an app session would carry.
  */
 
-/** `add` wins variable collisions, and its S3 credentials take precedence. */
+/** `add` wins variable collisions, and its AWS credentials take precedence. */
 export function mergeSessionEnv(base: SessionEnv | undefined, add: SessionEnv): SessionEnv {
+	const network = mergeSessionNetworks(base?.network, add.network);
 	return {
 		files: [...(base?.files ?? []), ...(add.files ?? [])],
 		vars: { ...base?.vars, ...add.vars },
 		defaults: { ...base?.defaults, ...add.defaults },
-		tunnels: [...(base?.tunnels ?? []), ...(add.tunnels ?? [])],
-		s3: [...(base?.s3 ?? []), ...(add.s3 ?? [])],
-		unrelayable: [...(base?.unrelayable ?? []), ...(add.unrelayable ?? [])],
+		...(network ? { network } : {}),
 	};
 }
 

@@ -190,6 +190,7 @@ export {
 	INTEGRATIONS_DIR_ENV,
 } from './integrations/bundle';
 export type { RenderedIntegration } from './integrations/bundle';
+export { emptySessionNetwork, mergeSessionNetworks } from './integrations/network';
 export {
 	athena,
 	azureBlob,
@@ -261,6 +262,7 @@ export {
 export {
 	createWorkspaceLoadStrategies,
 	DEFAULT_SANDBOX_STARTUP_TIMEOUT_MS,
+	managedSessionEnvironment,
 	SandboxProvisioner,
 } from './runtime/SandboxProvisioner';
 export type {

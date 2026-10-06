@@ -335,27 +335,64 @@ export interface SessionTunnel {
 	urlVars: string[];
 }
 
+/** An HTTPS (or other TLS) service reached by name, so TLS stays end to end. */
+export interface SessionHost {
+	/** DNS name, or `*.` followed by a domain to match any of its subdomains. */
+	host: string;
+	/** Defaults to 443. */
+	port?: number;
+}
+
+/** A variable holding a `mongodb://` or `mongodb+srv://` URL, whose members a relay resolves. */
+export interface SessionMongoUrl {
+	urlVar: string;
+}
+
 /**
- * S3 credentials that session variables carry, naming those variables, so a
- * backend that keeps credentials out of the kernel can withhold them.
+ * AWS credentials that session variables or files carry, naming those
+ * variables, so a backend that keeps credentials out of the kernel can withhold
+ * them and sign the requests itself.
  */
-export interface SessionS3Access {
-	/** S3 API endpoint the credentials sign for, an http(s) origin. */
-	endpoint: string;
+export interface SessionAwsAccess {
+	/** AWS service signing names the client calls, e.g. `s3`, `athena`, `glue`. */
+	services: string[];
 	region: string;
+	/** An S3-compatible endpoint origin; absent for AWS itself. */
+	endpoint?: string;
 	accessKeyId: string;
 	secretAccessKey: string;
 	sessionToken?: string;
+	/** ISO-8601 time the credentials stop working; absent for long-lived keys. */
+	expiresAt?: string;
 	/** Every variable that holds one of the credentials. */
 	credentialVars: string[];
-	/** Variables that hold the endpoint, preferred first. */
+	/** Variables that hold the real endpoint, withheld with the credentials. */
 	endpointVars: string[];
 }
 
-/** An integration that connects somewhere no `SessionTunnel` can describe. */
+/** An integration that connects somewhere no network declaration can describe. */
 export interface SessionUnrelayable {
 	integration: string;
 	reason: string;
+}
+
+/**
+ * What session variables reach over the network and which of them carry
+ * credentials, for a backend that relays kernel traffic and keeps credentials
+ * out of the kernel. Every other backend gets the same values through the
+ * variables and files themselves.
+ */
+export interface SessionNetwork {
+	tunnels: SessionTunnel[];
+	hosts: SessionHost[];
+	mongodb: SessionMongoUrl[];
+	/** In ascending precedence: a later set wins a service both name. */
+	aws: SessionAwsAccess[];
+	/** Variable values a relaying backend sets after it withholds credential variables. */
+	relayEnv: Record<string, string>;
+	/** Files with their credentials removed, replacing same-path files for a relaying backend. */
+	relayFiles: { path: string; content: string }[];
+	unrelayable: SessionUnrelayable[];
 }
 
 /** Files, variables, and audit pins produced for session provisioning. */
@@ -366,9 +403,5 @@ export interface SessionRender {
 	attachments: IntegrationVersionPin[];
 	/** User-safe notices about best-effort integration features. */
 	warnings: string[];
-	/** TCP destinations `vars` connect to (see `SessionTunnel`). */
-	tunnels?: SessionTunnel[];
-	/** S3 credentials `vars` carry, in ascending precedence (see `SessionS3Access`). */
-	s3?: SessionS3Access[];
-	unrelayable?: SessionUnrelayable[];
+	network?: SessionNetwork;
 }

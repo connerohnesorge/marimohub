@@ -105,21 +105,7 @@ export const mongodb = defineIntegration({
 			files,
 			manifestExtra: { host: config.host, database: config.database },
 		});
-		if (srv) {
-			return { ...output, unrelayable: 'mongodb+srv finds its servers through DNS SRV records' };
-		}
-		const field = (name: string) => connectionVar('MONGODB', instanceName, name);
-		return {
-			...output,
-			tunnels: [
-				{
-					host: config.host,
-					port: config.port,
-					hostVars: [field('HOST')],
-					portVars: [field('PORT')],
-					urlVars: [field('URL')],
-				},
-			],
-		};
+		// A relay resolves the SRV and replica set members from the URL itself.
+		return { ...output, mongodb: [{ urlVar: connectionVar('MONGODB', instanceName, 'URL') }] };
 	},
 });

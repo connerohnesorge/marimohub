@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import { basicAuthHeader, defineIntegration, probeEndpoint } from '../sdk';
 import { zSecret } from '../secretFields';
-import { renderConnection, serviceUrl, serviceUrlField } from './common';
+import { huggingFaceHosts, renderConnection, serviceUrl, serviceUrlField, urlHost } from './common';
 
 const NAME_REGEX = /^[A-Za-z0-9._-]+$/;
 
@@ -58,7 +58,7 @@ export const wandb = defineIntegration({
 	},
 
 	render({ config, instanceName }) {
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'WANDB',
 			dir: 'wandb',
 			instanceName,
@@ -80,6 +80,7 @@ export const wandb = defineIntegration({
 			},
 			manifestExtra: { base_url: config.base_url, entity: config.entity },
 		});
+		return { ...output, hosts: [urlHost(config.base_url)] };
 	},
 
 	testConnection(config, probe) {
@@ -135,7 +136,7 @@ export const huggingFace = defineIntegration({
 	},
 
 	render({ config, instanceName }) {
-		return renderConnection({
+		const output = renderConnection({
 			tool: 'HF',
 			dir: 'huggingface',
 			instanceName,
@@ -149,6 +150,7 @@ export const huggingFace = defineIntegration({
 			descriptor: { endpoint: config.endpoint, cache_dir: HF_HOME, token_env: 'HF_TOKEN' },
 			manifestExtra: { endpoint: config.endpoint },
 		});
+		return { ...output, hosts: huggingFaceHosts(config.endpoint) };
 	},
 
 	testConnection(config, probe) {

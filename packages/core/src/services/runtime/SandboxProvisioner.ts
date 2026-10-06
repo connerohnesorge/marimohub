@@ -37,7 +37,8 @@ import type { MarimoLaunchMode, MarimoLaunchPlan, MarimoLaunchStrategyName } fro
 import { assertValidKernelAuthToken, KERNEL_AUTH_TOKEN_FILE } from './kernelAuth';
 import { shellQuote } from './shell';
 import type { NotebookService } from '../content/NotebookService';
-import type { SessionS3Access, SessionTunnel, SessionUnrelayable } from '../../ports/integrations';
+import type { SessionNetwork } from '../../ports/integrations';
+import { emptySessionNetwork } from '../integrations/network';
 import { captureWorkspace, readSessionArtifacts, restoreWorkspace } from './sandboxFiles';
 import type { WorkspaceRestoreStats } from './sandboxFiles';
 import { restorePackedWorkspace } from './packedWorkspaceRestore';
@@ -185,14 +186,22 @@ export interface SessionEnv {
 	defaults?: Record<string, string>;
 	files?: { path: string; content: string }[];
 	/**
-	 * What `vars` connect to and which of them carry S3 credentials. Only a
-	 * provider that delivers the environment itself reads these; every other
-	 * backend gets the same values through `vars`.
+	 * What `vars` reach and which of them carry credentials. Only a provider that
+	 * delivers the environment itself reads it; every other backend gets the same
+	 * values through `vars` and `files`.
 	 */
-	tunnels?: SessionTunnel[];
-	/** In ascending precedence. */
-	s3?: SessionS3Access[];
-	unrelayable?: SessionUnrelayable[];
+	network?: SessionNetwork;
+}
+
+/** The environment a session-environment provider receives for `sessionEnv`. */
+export function managedSessionEnvironment(
+	sessionEnv: SessionEnv | undefined,
+): ManagedSessionEnvironment {
+	return {
+		vars: { ...sessionEnv?.defaults, ...sessionEnv?.vars },
+		files: sessionEnv?.files ?? [],
+		network: sessionEnv?.network ?? emptySessionNetwork(),
+	};
 }
 
 export interface ProvisionOptions {
@@ -1168,14 +1177,7 @@ export class SandboxProvisioner {
 		options: ProvisionOptions,
 		time: TimeSandboxPhase,
 	): Promise<void> {
-		const sessionEnv = await options.sessionEnv;
-		const environment: ManagedSessionEnvironment = {
-			vars: { ...sessionEnv?.defaults, ...sessionEnv?.vars },
-			files: sessionEnv?.files ?? [],
-			tunnels: sessionEnv?.tunnels ?? [],
-			s3: sessionEnv?.s3 ?? [],
-			unrelayable: sessionEnv?.unrelayable ?? [],
-		};
+		const environment = managedSessionEnvironment(await options.sessionEnv);
 		if (Object.keys(environment.vars).length === 0 && environment.files.length === 0) return;
 		const applyEnvironment = sandbox.applyEnvironment?.bind(sandbox);
 		await time(async () => {

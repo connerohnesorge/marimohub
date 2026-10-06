@@ -5,13 +5,18 @@ import { zSecret } from '../secretFields';
 import {
 	awsCredentialProperties,
 	awsCredentialsSchema,
+	clientAwsNetwork,
 	extraPropertiesSchema,
 	ICEBERG_BRAND_COLOR,
 	icebergRuntimeSchema,
 	icebergRequirements,
 	icebergStorageSchema,
 	icebergStorageUiHints,
+	mergeIcebergNetworks,
+	pyicebergCatalogVar,
 	renderIcebergCatalog,
+	serviceAwsNetwork,
+	storageNetwork,
 	runtimeCatalogProperties,
 	runtimeRootProperties,
 	storageProperties,
@@ -21,7 +26,74 @@ import {
 	unifiedAwsUiHints,
 	validateExtraProperties,
 } from './icebergShared';
-import { httpUrlField } from './common';
+import type { IcebergNetwork } from './icebergShared';
+import { GOOGLE_AUTH_HOSTS, httpUrlField } from './common';
+
+const SQL_DEFAULT_PORTS: Record<string, number> = { postgres: 5432, postgresql: 5432, mysql: 3306 };
+
+/** A catalog database or metastore reached through its URI variable, which a relay rewrites. */
+function uriTunnel(instanceName: string, uri: string, defaultPort?: number): IcebergNetwork {
+	const parsed = URL.parse(uri);
+	const port = Number(parsed?.port) || defaultPort;
+	if (!parsed?.hostname || !port) {
+		return { unrelayable: ['the catalog URI names no host and port'] };
+	}
+	const uriVar = pyicebergCatalogVar(instanceName, 'uri');
+	// A relay rewrites `host:port`, so the URI it sees names the port.
+	parsed.port = String(port);
+	return {
+		tunnels: [
+			{
+				host: parsed.hostname.replaceAll(/^\[|\]$/g, ''),
+				port,
+				hostVars: [],
+				portVars: [],
+				urlVars: [uriVar],
+			},
+		],
+		relayEnv: { [uriVar]: parsed.toString() },
+	};
+}
+
+function sqlCatalogNetwork(instanceName: string, uri: string): IcebergNetwork {
+	const dialect = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(uri)?.[1].split('+')[0].toLowerCase();
+	if (dialect === 'sqlite') return {};
+	return uriTunnel(instanceName, uri, dialect ? SQL_DEFAULT_PORTS[dialect] : undefined);
+}
+
+/**
+ * Glue and DynamoDB catalogs sign with their own `<service>.*` keys, else the
+ * shared `client.*` keys, which S3 FileIO also uses when storage names none.
+ */
+function awsCatalogNetwork(
+	service: 'glue' | 'dynamodb',
+	config: {
+		region?: string;
+		endpoint?: string;
+		credentials: z.infer<typeof awsCredentialsSchema>;
+		unified_credentials: z.infer<typeof glueConfig>['unified_credentials'];
+		storage: z.infer<typeof glueConfig>['storage'];
+	},
+): IcebergNetwork {
+	const serviceOwn = config.credentials.method !== 'ambient';
+	const storageUsesClient =
+		config.storage.scheme === 'catalog' ||
+		(config.storage.scheme === 's3' && config.storage.credentials.method === 'ambient');
+	const clientServices = [...(serviceOwn ? [] : [service]), ...(storageUsesClient ? ['s3'] : [])];
+	const client =
+		clientServices.length > 0
+			? clientAwsNetwork(config.unified_credentials, clientServices)
+			: { network: {} };
+	const reachesService = serviceOwn || client.client !== undefined;
+	return mergeIcebergNetworks(
+		serviceAwsNetwork(service, service, config.region, config.credentials, config.endpoint),
+		client.network,
+		storageNetwork(config.storage, client.client),
+		reachesService
+			? {}
+			: { unrelayable: [`${service} with ambient AWS credentials has no credentials to relay`] },
+	);
+}
 
 const commonUiHints = {
 	warehouse: { group: 'Connection', order: 2 },
@@ -93,6 +165,10 @@ export const icebergSql = defineIntegration({
 			},
 			rootProperties: runtimeRootProperties(config.runtime),
 			descriptor: { storage: config.storage.scheme },
+			network: mergeIcebergNetworks(
+				sqlCatalogNetwork(instanceName, config.uri),
+				storageNetwork(config.storage),
+			),
 		});
 	},
 });
@@ -164,6 +240,12 @@ export const icebergHive = defineIntegration({
 			},
 			rootProperties: runtimeRootProperties(config.runtime),
 			descriptor: { uri: config.uri, storage: config.storage.scheme },
+			network: mergeIcebergNetworks(
+				config.kerberos.enabled
+					? { unrelayable: ['a Kerberos metastore needs the KDC from inside the kernel'] }
+					: uriTunnel(instanceName, config.uri, 9083),
+				storageNetwork(config.storage),
+			),
 		});
 	},
 });
@@ -263,6 +345,7 @@ export const icebergGlue = defineIntegration({
 			},
 			rootProperties: runtimeRootProperties(config.runtime),
 			descriptor: { region: config.region, storage: config.storage.scheme },
+			network: awsCatalogNetwork('glue', config),
 		});
 	},
 });
@@ -341,6 +424,7 @@ export const icebergDynamoDb = defineIntegration({
 			},
 			rootProperties: runtimeRootProperties(config.runtime),
 			descriptor: { table_name: config.table_name, region: config.region },
+			network: awsCatalogNetwork('dynamodb', config),
 		});
 	},
 });
@@ -415,6 +499,16 @@ export const icebergBigQuery = defineIntegration({
 				location: config.location,
 				storage: config.storage.scheme,
 			},
+			network: mergeIcebergNetworks(
+				{
+					hosts: [
+						{ host: 'bigquery.googleapis.com' },
+						{ host: 'bigquerystorage.googleapis.com' },
+						...GOOGLE_AUTH_HOSTS,
+					],
+				},
+				storageNetwork(config.storage),
+			),
 		});
 	},
 });
